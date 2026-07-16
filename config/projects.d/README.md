@@ -1,6 +1,11 @@
-# Registre des projets
+# Registre actif des projets
 
-Chaque projet sera décrit par un fichier déclaratif distinct.
-
-Aucun projet métier ne doit être ajouté avant la validation des tests de panne
+Chaque fichier `*.toml` de ce répertoire représente un projet géré par
 HermesOps.
+
+Le répertoire est vide tant que les tests de panne de l'infrastructure ne sont
+pas validés.
+
+Un exemple complet est disponible dans :
+
+`config/examples/project.example.toml`

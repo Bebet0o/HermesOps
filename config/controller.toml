@@ -1,0 +1,36 @@
+schema_version = 1
+
+root = "/opt/docker/hermesops"
+database = "/opt/docker/hermesops/state/controller/hermesops.db"
+projects_directory = "/opt/docker/hermesops/repo/config/projects.d"
+default_policy = "default"
+
+[limits]
+max_parallel_projects = 1
+max_writers_per_project = 1
+max_parallel_readers_per_project = 3
+
+[transactions]
+snapshot_required = true
+clean_worktree_required_at_start = true
+clean_worktree_required_at_finish = true
+commit_required_before_completion = true
+push_allowed = false
+
+[recovery]
+allowed_decisions = [
+  "RESUME_SAFE",
+  "ROLLBACK_SAFE",
+  "BLOCK_HUMAN",
+]
+
+[review]
+allowed_verdicts = [
+  "PASS",
+  "PASS_WITH_DEBT",
+  "FIX",
+  "SECURITY",
+  "PERFORMANCE",
+  "ARCHITECTURE",
+  "HUMAN",
+]
