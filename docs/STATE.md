@@ -2,30 +2,33 @@
 
 ## Jalon validé
 
-`1C — OpenAI Codex et premier appel contrôlé`
+`1D — Hermes WebUI séparée`
 
 ## Hermes Agent
 
 - version : `0.18.2`
-- conteneur : `hermesops-agent`
-- API : `127.0.0.1:8642`
-- backend terminal : `docker`
-- moteur sandbox : socket Unix uniquement
-
-## Fournisseur IA
-
 - fournisseur : `openai-codex`
 - modèle : `gpt-5.6-sol`
-- authentification : OAuth ChatGPT / device code
-- fichier secret : `/opt/docker/hermesops/state/hermes-home/auth.json`
-- identifiants suivis par Git : non
-- appel CLI réel : validé
-- appel Gateway API réel : validé
+- API : `127.0.0.1:8642`
+- backend terminal : daemon Docker dédié par socket Unix
 
-## Raisonnement
+## Hermes WebUI
 
-Aucun niveau global imposé pendant le jalon 1C. Les futurs profils
-orchestrateur, worker et reviewer recevront leurs propres politiques.
+- version source : `ghcr.io/nesquena/hermes-webui:0.52.41`
+- image verrouillée : `ghcr.io/nesquena/hermes-webui@sha256:10eaa2d43efbdd01833e7ff64aaaa5557beb15e2a34d32a489af4fd4ed5fbff5`
+- conteneur : `hermesops-webui`
+- URL locale : `http://127.0.0.1:8787`
+- authentification WebUI : active
+- backend de conversation : `gateway`
+- accès au socket sandbox : aucun
+- workspace monté dans WebUI : lecture seule
+- source Agent dans WebUI : lecture seule
+- connexion WebUI → Gateway : validée
+
+## Approbations
+
+La Runs API d'approbation n'est pas encore activée. Voir
+`docs/BLOCKERS.md`.
 
 ## Projet métier importé
 
@@ -33,4 +36,4 @@ Aucun.
 
 ## Prochaine étape
 
-`1D — Hermes WebUI séparée, verrouillée et connectée au Gateway`
+`2A — registre déclaratif des projets et schéma de politique`
