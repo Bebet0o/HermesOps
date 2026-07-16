@@ -18,3 +18,14 @@ Conséquences :
 - Telegram et l'API Controller seront évalués comme surfaces de décision.
 
 Ce blocage doit être retesté avant la phase quasi autonome.
+
+## Kanban Hermes natif et Controller HermesOps
+
+État : volontairement non reliés.
+
+Les profils HermesOps ne reçoivent pas encore le toolset Kanban natif. Utiliser
+simultanément le board natif et la base Controller créerait deux sources de
+vérité.
+
+Avant l'automatisation, le Controller devra exposer des outils transactionnels
+uniques pour créer, réclamer, heartbeat, terminer, bloquer et revoir les tâches.

@@ -11,21 +11,19 @@ DB="${ROOT}/state/controller/hermesops.db"
 "${REPO}/scripts/hermesops-db.py" integrity
 
 [[ -f "$DB" ]]
-
 [[ "$(stat -c '%a' "$DB")" == "640" ]]
 
 [[ "$(
-    sqlite3 "$DB" \
-        'PRAGMA journal_mode;'
+    sqlite3 "$DB" 'PRAGMA journal_mode;'
 )" == "wal" ]]
 
 [[ "$(
-    sqlite3 "$DB" \
-        'PRAGMA user_version;'
-)" == "1" ]]
+    sqlite3 "$DB" 'PRAGMA user_version;'
+)" == "2" ]]
 
 required_tables=(
     projects
+    roles
     runs
     tasks
     project_locks

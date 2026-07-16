@@ -2,7 +2,7 @@
 
 ## Jalon validé
 
-`2A — registre déclaratif et état transactionnel`
+`2B — flotte de profils HermesOps`
 
 ## Infrastructure
 
@@ -11,19 +11,28 @@
 - OpenAI Codex : authentifié
 - modèle : GPT-5.6 Sol
 - Hermes WebUI : saine
-- backend WebUI : Gateway
-- Controller SQLite : initialisé
-- registre déclaratif : initialisé
+- Controller SQLite : migration 002
 - projets actifs : aucun
+- profils HermesOps : six
 
-## Plan de contrôle
+## Profils
 
-- configuration globale : `config/controller.toml`
-- politique par défaut : `config/policies/default.toml`
-- registre actif : `config/projects.d/*.toml`
-- base : `state/controller/hermesops.db`
-- migration courante : `001`
-- journal SQLite : WAL
+- orchestrateur : `ops-orchestrator`
+- code : `ops-worker-code`
+- tests : `ops-worker-tests`
+- documentation : `ops-worker-docs`
+- reviewer : `ops-reviewer`
+- recovery : `ops-recovery`
+
+## Sécurité actuelle
+
+- OAuth partagé sans duplication de jeton ;
+- aucun profil autorisé à pousser ;
+- orchestrateur privé des outils d'implémentation ;
+- reviewer déclaré en lecture seule ;
+- recovery déclaré `controller_only`.
+
+Les modes workspace déclarés seront imposés techniquement au jalon 3A.
 
 ## Projet métier importé
 
@@ -31,4 +40,4 @@ Aucun.
 
 ## Prochaine étape
 
-`2B — profils Orchestrator, Worker, Reviewer et Recovery`
+`3A — transactions Git, snapshots et worktrees isolés`

@@ -1,0 +1,113 @@
+schema_version = 1
+provider = "openai-codex"
+model = "gpt-5.6-sol"
+auth_strategy = "shared-root-symlink"
+
+[roles.orchestrator]
+profile = "ops-orchestrator"
+kind = "orchestrator"
+description = "Décompose les objectifs en tâches vérifiables, choisit les spécialistes et suit les dépendances sans modifier les projets."
+reasoning_effort = "high"
+max_turns = 30
+toolsets = ["todo", "memory", "skills"]
+skills = ["plan"]
+workspace_mode = "none"
+may_commit = false
+may_push = false
+network = false
+cpu = 2
+memory_mb = 4096
+
+[roles.worker_code]
+profile = "ops-worker-code"
+kind = "worker"
+description = "Implémente du code dans un worktree attribué, exécute les contrôles requis et produit un handoff vérifiable."
+reasoning_effort = "high"
+max_turns = 80
+toolsets = ["terminal", "file", "web", "skills", "todo", "memory"]
+skills = [
+  "codebase-inspection",
+  "test-driven-development",
+  "systematic-debugging",
+  "simplify-code",
+]
+workspace_mode = "write"
+may_commit = true
+may_push = false
+network = true
+cpu = 4
+memory_mb = 8192
+
+[roles.worker_tests]
+profile = "ops-worker-tests"
+kind = "worker"
+description = "Conçoit et exécute les tests, recherche les régressions et documente précisément toute défaillance."
+reasoning_effort = "high"
+max_turns = 60
+toolsets = ["terminal", "file", "web", "skills", "todo", "memory"]
+skills = [
+  "codebase-inspection",
+  "test-driven-development",
+  "systematic-debugging",
+]
+workspace_mode = "write"
+may_commit = true
+may_push = false
+network = true
+cpu = 4
+memory_mb = 8192
+
+[roles.worker_docs]
+profile = "ops-worker-docs"
+kind = "worker"
+description = "Maintient la documentation technique en s'appuyant uniquement sur le comportement et les preuves réellement observés."
+reasoning_effort = "medium"
+max_turns = 50
+toolsets = ["terminal", "file", "web", "skills", "todo", "memory"]
+skills = [
+  "codebase-inspection",
+  "humanizer",
+]
+workspace_mode = "write"
+may_commit = true
+may_push = false
+network = true
+cpu = 2
+memory_mb = 4096
+
+[roles.reviewer]
+profile = "ops-reviewer"
+kind = "reviewer"
+description = "Effectue une revue indépendante et adversariale en lecture seule, puis émet un verdict structuré fondé sur des preuves."
+reasoning_effort = "xhigh"
+max_turns = 60
+toolsets = ["terminal", "file", "web", "skills", "todo", "memory"]
+skills = [
+  "codebase-inspection",
+  "requesting-code-review",
+  "systematic-debugging",
+]
+workspace_mode = "read_only"
+may_commit = false
+may_push = false
+network = false
+cpu = 4
+memory_mb = 8192
+
+[roles.recovery]
+profile = "ops-recovery"
+kind = "recovery"
+description = "Analyse les états interrompus et choisit exclusivement RESUME_SAFE, ROLLBACK_SAFE ou BLOCK_HUMAN."
+reasoning_effort = "high"
+max_turns = 40
+toolsets = ["terminal", "file", "skills", "todo", "memory"]
+skills = [
+  "codebase-inspection",
+  "systematic-debugging",
+]
+workspace_mode = "controller_only"
+may_commit = false
+may_push = false
+network = false
+cpu = 2
+memory_mb = 4096
