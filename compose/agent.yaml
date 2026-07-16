@@ -11,15 +11,18 @@ services:
 
     environment:
       DOCKER_TLS_CERTDIR: ""
+      DOCKER_HOST: unix:///run/hermes-docker/docker.sock
 
     command:
-      - "--host=tcp://0.0.0.0:2375"
-      - "--host=unix:///var/run/docker.sock"
+      - dockerd
+      - "--host=unix:///run/hermes-docker/docker.sock"
+      - "--group=${HERMES_GID:-1000}"
       - "--storage-driver=overlay2"
       - "--log-level=warn"
 
     volumes:
       - ../../state/sandbox-engine:/var/lib/docker
+      - ../../runtime/sandbox-engine-socket:/run/hermes-docker
       - ../../state/sandboxes:/opt/docker/hermesops/state/sandboxes
       - ../../workspaces:/opt/docker/hermesops/workspaces
       - ../../project-data:/opt/docker/hermesops/project-data
@@ -27,7 +30,10 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - docker info >/dev/null 2>&1
+        - >-
+          docker
+          --host unix:///run/hermes-docker/docker.sock
+          info >/dev/null 2>&1
       interval: 5s
       timeout: 5s
       retries: 30
@@ -66,13 +72,14 @@ services:
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_PORT: "8642"
 
-      DOCKER_HOST: tcp://sandbox-engine:2375
+      DOCKER_HOST: unix:///run/hermes-docker/docker.sock
       DOCKER_TLS_CERTDIR: ""
       HERMES_DOCKER_BINARY: /usr/bin/docker
       TERMINAL_SANDBOX_DIR: /opt/docker/hermesops/state/sandboxes
 
     volumes:
       - ../../state/hermes-home:/home/hermes/.hermes
+      - ../../runtime/sandbox-engine-socket:/run/hermes-docker
       - ../../state/sandboxes:/opt/docker/hermesops/state/sandboxes
       - ../../workspaces:/opt/docker/hermesops/workspaces
       - ../../project-data:/opt/docker/hermesops/project-data
@@ -95,7 +102,6 @@ services:
 
     networks:
       - hermes-control
-      - hermes-sandbox-control
 
 networks:
   hermes-control:

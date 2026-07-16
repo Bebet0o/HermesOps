@@ -2,7 +2,7 @@
 
 ## Jalon validé
 
-`1B — moteur de sandbox dédié`
+`1B.1 — transport Unix du moteur sandbox`
 
 ## Hermes Agent
 
@@ -12,15 +12,16 @@
 - authentification : active
 - backend terminal : `docker`
 
-## Plan d'exécution
+## Moteur sandbox
 
-- moteur : `hermesops-sandbox-engine`
-- image moteur : `docker@sha256:66d292e5c26bd33a6f6f61cacb880de2186339a524ecba1ce098dbbaceed6515`
-- image sandbox : `python@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93`
-- socket Docker hôte transmis à Agent : non
-- publication réseau du moteur : aucune
-- persistance sandbox : validée
-- séparation des daemons : validée
+- conteneur : `hermesops-sandbox-engine`
+- connexion Agent → moteur : socket Unix
+- endpoint : `/run/hermes-docker/docker.sock`
+- API TCP 2375/2376 : désactivée
+- port publié sur l'hôte : aucun
+- réseau partagé Agent/moteur : aucun
+- socket Docker hôte transmis : non
+- smoke test réel : validé
 
 ## Fournisseur et modèle
 
@@ -32,4 +33,4 @@ Aucun.
 
 ## Prochaine étape
 
-`1C — fournisseur IA, modèle et premier appel contrôlé sans outil`
+`1C — fournisseur IA et premier appel contrôlé sans outil`

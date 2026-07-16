@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 AGENT="hermesops-agent"
 ENGINE="hermesops-sandbox-engine"
+SOCKET="/run/hermes-docker/docker.sock"
 
 [[ "$(
     docker inspect "$AGENT" \
@@ -22,9 +23,22 @@ jq -e '
 
 [[ -z "$(docker port "$ENGINE")" ]]
 
-docker exec "$AGENT" sh -lc '
-    test "$DOCKER_HOST" = "tcp://sandbox-engine:2375"
+docker exec "$AGENT" test -S "$SOCKET"
+
+docker exec --user hermes "$AGENT" sh -lc '
+    test "$DOCKER_HOST" = "unix:///run/hermes-docker/docker.sock"
     docker info >/dev/null
+'
+
+ENGINE_COMMAND="$(
+    docker inspect "$ENGINE" \
+        --format '{{json .Config.Cmd}}'
+)"
+
+! grep -Eq 'tcp://|2375|2376' <<<"$ENGINE_COMMAND"
+
+docker exec "$ENGINE" sh -lc '
+    ! grep -qiE ":(0947|0948) " /proc/net/tcp /proc/net/tcp6
 '
 
 docker exec -i --user hermes "$AGENT" python - <<'PY'
