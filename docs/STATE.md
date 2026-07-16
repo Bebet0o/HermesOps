@@ -2,42 +2,34 @@
 
 ## Jalon validé
 
-`2B — flotte de profils HermesOps`
+`3A — transactions Git et worktrees isolés`
 
 ## Infrastructure
 
 - Hermes Agent : sain
 - moteur sandbox : sain
-- OpenAI Codex : authentifié
-- modèle : GPT-5.6 Sol
 - Hermes WebUI : saine
-- Controller SQLite : migration 002
-- projets actifs : aucun
-- profils HermesOps : six
+- modèle : GPT-5.6 Sol
+- profils spécialisés : six
+- Controller SQLite : migration 003
 
-## Profils
+## Transactions
 
-- orchestrateur : `ops-orchestrator`
-- code : `ops-worker-code`
-- tests : `ops-worker-tests`
-- documentation : `ops-worker-docs`
-- reviewer : `ops-reviewer`
-- recovery : `ops-recovery`
+- snapshot Git avant écriture : validé
+- bundle vérifié : validé
+- worktree isolé : validé
+- verrou exclusif par projet : validé
+- second writer refusé : validé
+- commit obligatoire : validé
+- soumission `REVIEWING` : validée
+- `ROLLBACK_SAFE` : validé
+- branche principale non modifiée : validé
 
-## Sécurité actuelle
+## Projets
 
-- OAuth partagé sans duplication de jeton ;
-- aucun profil autorisé à pousser ;
-- orchestrateur privé des outils d'implémentation ;
-- reviewer déclaré en lecture seule ;
-- recovery déclaré `controller_only`.
-
-Les modes workspace déclarés seront imposés techniquement au jalon 3A.
-
-## Projet métier importé
-
-Aucun.
+- projet métier actif : aucun
+- fixture transactionnelle : présente mais désactivée
 
 ## Prochaine étape
 
-`3A — transactions Git, snapshots et worktrees isolés`
+`3B — lancement contrôlé des workers dans leurs worktrees`
