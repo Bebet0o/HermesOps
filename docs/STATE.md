@@ -2,30 +2,30 @@
 
 ## Jalon validé
 
-`1B.1 — transport Unix du moteur sandbox`
+`1C — OpenAI Codex et premier appel contrôlé`
 
 ## Hermes Agent
 
 - version : `0.18.2`
 - conteneur : `hermesops-agent`
 - API : `127.0.0.1:8642`
-- authentification : active
 - backend terminal : `docker`
+- moteur sandbox : socket Unix uniquement
 
-## Moteur sandbox
+## Fournisseur IA
 
-- conteneur : `hermesops-sandbox-engine`
-- connexion Agent → moteur : socket Unix
-- endpoint : `/run/hermes-docker/docker.sock`
-- API TCP 2375/2376 : désactivée
-- port publié sur l'hôte : aucun
-- réseau partagé Agent/moteur : aucun
-- socket Docker hôte transmis : non
-- smoke test réel : validé
+- fournisseur : `openai-codex`
+- modèle : `gpt-5.6-sol`
+- authentification : OAuth ChatGPT / device code
+- fichier secret : `/opt/docker/hermesops/state/hermes-home/auth.json`
+- identifiants suivis par Git : non
+- appel CLI réel : validé
+- appel Gateway API réel : validé
 
-## Fournisseur et modèle
+## Raisonnement
 
-Non configurés.
+Aucun niveau global imposé pendant le jalon 1C. Les futurs profils
+orchestrateur, worker et reviewer recevront leurs propres politiques.
 
 ## Projet métier importé
 
@@ -33,4 +33,4 @@ Aucun.
 
 ## Prochaine étape
 
-`1C — fournisseur IA et premier appel contrôlé sans outil`
+`1D — Hermes WebUI séparée, verrouillée et connectée au Gateway`
