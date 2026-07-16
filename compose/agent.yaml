@@ -1,15 +1,55 @@
 name: hermesops
 
 services:
+  sandbox-engine:
+    image: ${HERMES_SANDBOX_ENGINE_IMAGE:?HERMES_SANDBOX_ENGINE_IMAGE is required}
+    container_name: hermesops-sandbox-engine
+
+    privileged: true
+    restart: unless-stopped
+    stop_grace_period: 90s
+
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+
+    command:
+      - "--host=tcp://0.0.0.0:2375"
+      - "--host=unix:///var/run/docker.sock"
+      - "--storage-driver=overlay2"
+      - "--log-level=warn"
+
+    volumes:
+      - ../../state/sandbox-engine:/var/lib/docker
+      - ../../state/sandboxes:/opt/docker/hermesops/state/sandboxes
+      - ../../workspaces:/opt/docker/hermesops/workspaces
+      - ../../project-data:/opt/docker/hermesops/project-data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - docker info >/dev/null 2>&1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+    networks:
+      - hermes-sandbox-control
+
   hermes-agent:
     image: ${HERMES_AGENT_IMAGE:?HERMES_AGENT_IMAGE is required}
     container_name: hermesops-agent
+
     command:
       - gateway
       - run
 
     restart: unless-stopped
     stop_grace_period: 90s
+
+    depends_on:
+      sandbox-engine:
+        condition: service_healthy
 
     ports:
       - "127.0.0.1:8642:8642"
@@ -26,8 +66,16 @@ services:
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_PORT: "8642"
 
+      DOCKER_HOST: tcp://sandbox-engine:2375
+      DOCKER_TLS_CERTDIR: ""
+      HERMES_DOCKER_BINARY: /usr/bin/docker
+      TERMINAL_SANDBOX_DIR: /opt/docker/hermesops/state/sandboxes
+
     volumes:
       - ../../state/hermes-home:/home/hermes/.hermes
+      - ../../state/sandboxes:/opt/docker/hermesops/state/sandboxes
+      - ../../workspaces:/opt/docker/hermesops/workspaces
+      - ../../project-data:/opt/docker/hermesops/project-data
 
     healthcheck:
       test:
@@ -47,8 +95,13 @@ services:
 
     networks:
       - hermes-control
+      - hermes-sandbox-control
 
 networks:
   hermes-control:
     name: hermesops-control
+    driver: bridge
+
+  hermes-sandbox-control:
+    name: hermesops-sandbox-control
     driver: bridge

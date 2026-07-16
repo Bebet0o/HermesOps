@@ -2,21 +2,29 @@
 
 ## Jalon validé
 
-`1A — fondation Hermes Agent`
+`1B — moteur de sandbox dédié`
 
 ## Hermes Agent
 
-- tag source : `nousresearch/hermes-agent:v2026.7.7.2`
-- image verrouillée : `nousresearch/hermes-agent@sha256:9c841866021c54c4596849f6135717e8a4d52ba510b7f52c50aef1de1a283973`
+- version : `0.18.2`
 - conteneur : `hermesops-agent`
 - API : `127.0.0.1:8642`
-- état persistant : `/opt/docker/hermesops/state/hermes-home`
-- authentification API : active
-- redémarrage et persistance : validés
+- authentification : active
+- backend terminal : `docker`
+
+## Plan d'exécution
+
+- moteur : `hermesops-sandbox-engine`
+- image moteur : `docker@sha256:66d292e5c26bd33a6f6f61cacb880de2186339a524ecba1ce098dbbaceed6515`
+- image sandbox : `python@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93`
+- socket Docker hôte transmis à Agent : non
+- publication réseau du moteur : aucune
+- persistance sandbox : validée
+- séparation des daemons : validée
 
 ## Fournisseur et modèle
 
-Non configurés pendant le jalon 1A.
+Non configurés.
 
 ## Projet métier importé
 
@@ -24,4 +32,4 @@ Aucun.
 
 ## Prochaine étape
 
-`1B — configuration minimale du fournisseur et validation d'un appel contrôlé`
+`1C — fournisseur IA, modèle et premier appel contrôlé sans outil`
