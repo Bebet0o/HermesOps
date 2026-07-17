@@ -1,0 +1,23 @@
+schema_version = 1
+
+[project]
+id = "tradingbot"
+name = "TradingBot"
+enabled = true
+policy = "default"
+
+[paths]
+repo = "/opt/docker/hermesops/workspaces/tradingbot"
+data = "/opt/docker/hermesops/project-data/tradingbot"
+
+[git]
+default_branch = "master"
+allow_push = false
+require_clean = true
+
+[execution]
+writer_concurrency = 1
+max_parallel_tasks = 2
+
+[review]
+required = true

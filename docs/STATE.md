@@ -14,3 +14,11 @@ correctness.
 `hermesopsctl` provides one consistent interface for objective submission,
 queue inspection, pause, resume, cancellation, approval inspection, safe
 approval resolution and notification status.
+
+## TradingBot — onboarding 4D-A
+
+Le projet réel `tradingbot` est enregistré sur la branche `master` dans
+`/opt/docker/hermesops/workspaces/tradingbot`. Le travail L2 proxy non commité
+du dépôt historique a été sauvegardé puis importé dans un checkpoint local
+propre. Le push est désactivé, la revue est obligatoire et le dépôt historique
+reste intact.

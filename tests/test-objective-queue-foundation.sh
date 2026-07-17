@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+objective_foundation_error() {
+    local rc=$?
+    echo "OBJECTIVE FOUNDATION FAILURE" >&2
+    echo "Line    : ${BASH_LINENO[0]:-${LINENO}}" >&2
+    echo "Command : ${BASH_COMMAND}" >&2
+    echo "Exit    : ${rc}" >&2
+    exit "$rc"
+}
+trap objective_foundation_error ERR
+
+objective_stage() {
+    echo "Objective foundation stage: $1"
+}
+
 ROOT="${HERMESOPS_ROOT:-/opt/docker/hermesops}"
 REPO="${ROOT}/repo"
 DB="${ROOT}/state/controller/hermesops.db"
 
+objective_stage "required files"
 for file in \
     "${REPO}/scripts/hermesops-objectives.py" \
     "${REPO}/scripts/hermesops-orchestrator.py" \
@@ -13,16 +28,22 @@ for file in \
     "${REPO}/docs/OBJECTIVES.md" \
     "${REPO}/tests/test-objective-queue-foundation.sh"
 do
-    [[ -f "$file" ]]
+    if [[ ! -f "$file" ]]; then
+        echo "Required objective foundation file missing: $file" >&2
+        exit 1
+    fi
 done
 
+objective_stage "python compilation"
 python3 -m py_compile \
     "${REPO}/scripts/hermesops-objectives.py" \
     "${REPO}/scripts/hermesops-orchestrator.py"
 
+objective_stage "component self-tests"
 "${REPO}/scripts/hermesops-objectives.py" self-test
 "${REPO}/scripts/hermesops-orchestrator.py" self-test
 
+objective_stage "source contracts"
 grep -Fq 'def synchronize_objective_states' \
     "${REPO}/scripts/hermesops-orchestrator.py"
 grep -Fq 'def reserve_ai_objective' \
@@ -38,6 +59,7 @@ grep -Fq 'global_parallel_objectives = 2' \
 grep -Fq 'planning_retry_backoff_seconds = 30' \
     "${REPO}/config/orchestrator.toml"
 
+objective_stage "database schema"
 # HERMESOPS_OBJECTIVE_QUEUE_MINIMUM_MIGRATION_V1
 OBJECTIVE_QUEUE_SCHEMA_VERSION="$(
     sqlite3 "$DB" 'PRAGMA user_version;'
@@ -56,9 +78,11 @@ do
     )" == "1" ]]
 done
 
+objective_stage "orchestrator service"
 systemctl --user is-enabled --quiet hermesops-orchestrator.service
 systemctl --user is-active --quiet hermesops-orchestrator.service
 
+objective_stage "daemon status"
 DAEMON_STATUS="$("${REPO}/scripts/hermesops-orchestrator.py" daemon-status)"
 python3 - "$DAEMON_STATUS" <<'PY'
 import json
@@ -72,6 +96,18 @@ assert payload["instance"]["status"] == "RUNNING"
 assert isinstance(payload["objective_counts"], dict)
 PY
 
+objective_stage "state invariants"
+
+REAL_ENABLED_PROJECTS="$(
+    sqlite3 "$DB" \
+        "SELECT COUNT(*)
+         FROM projects
+         WHERE enabled = 1
+           AND project_id NOT LIKE 'transaction-fixture%';"
+)"
+
+if [[ "$REAL_ENABLED_PROJECTS" == "0" ]]; then
+    echo "Objective foundation mode: historical fixtures"
 python3 - "$DB" <<'PY'
 import json
 import sqlite3
@@ -203,60 +239,242 @@ active = connection.execute(
 ).fetchone()[0]
 assert active == 0, active
 PY
+else
+    echo "Objective foundation mode: production registry"
+    python3 - "$DB" <<'PY'
+from __future__ import annotations
 
-[[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM project_locks;')" == "0" ]]
-[[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM projects WHERE enabled=1;')" == "0" ]]
-
-# HERMESOPS_4C_EXPECTED_PRECOMMIT_DIRTY_SET_V1
-REPOSITORY_STATUS="$(
-    git -C "$REPO" status --porcelain=v1 --untracked-files=all
-)"
-
-python3 - "$REPOSITORY_STATUS" <<'PY'
+import json
+import sqlite3
 import sys
 
-lines = [line for line in sys.argv[1].splitlines() if line]
-if not lines:
-    raise SystemExit(0)
+connection = sqlite3.connect(sys.argv[1])
+connection.row_factory = sqlite3.Row
 
-allowed = {
-    "VERSION",
-    "config/notifier.toml",
-    "docs/NOTIFICATIONS.md",
-    "docs/STATE.md",
-    "migrations/011_notification_outbox.sql",
-    "scripts/configure-hermesops-telegram.sh",
-    "scripts/hermesops-control.py",
-    "scripts/hermesops-notifier.py",
-    "scripts/hermesopsctl",
-    "systemd/user/hermesops-notifier.service",
-    "tests/test-notification-foundation.sh",
-    "tests/test-objective-queue-foundation.sh",
+allowed_objective_statuses = {
+    "QUEUED",
+    "PLANNING",
+    "RUNNING",
+    "PAUSE_REQUESTED",
+    "PAUSED",
+    "CANCEL_REQUESTED",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "BLOCKED",
 }
 
-observed = set()
-for line in lines:
-    if len(line) < 4:
-        raise AssertionError(f"Malformed porcelain entry: {line!r}")
-    status = line[:2]
-    path = line[3:]
-    if path not in allowed:
-        raise AssertionError(f"Unexpected repository change: {line}")
-    if status not in {"??", " M"}:
-        raise AssertionError(
-            f"Unexpected change type for {path}: {status!r}"
-        )
-    if path in observed:
-        raise AssertionError(f"Duplicate repository change: {path}")
-    observed.add(path)
-
-required = allowed - {"VERSION"}
-missing = required - observed
-if missing:
-    raise AssertionError(
-        "Expected 4C pre-commit changes missing: "
-        + ", ".join(sorted(missing))
+statuses = {
+    row[0]
+    for row in connection.execute(
+        "SELECT DISTINCT status FROM objective_queue"
     )
+}
+unknown = statuses - allowed_objective_statuses
+assert not unknown, sorted(unknown)
+
+active = connection.execute(
+    """
+    SELECT COUNT(*)
+    FROM objective_queue
+    WHERE status IN (
+        'QUEUED',
+        'PLANNING',
+        'RUNNING',
+        'PAUSE_REQUESTED',
+        'CANCEL_REQUESTED'
+    )
+    """
+).fetchone()[0]
+assert active == 0, active
+
+# HERMESOPS_OBJECTIVE_PROJECT_SCOPE_SCHEMA_V1
+project_ids = {
+    row["project_id"]
+    for row in connection.execute(
+        "SELECT project_id FROM projects"
+    )
+}
+
+invalid_scopes = []
+unknown_scoped_projects = []
+
+for row in connection.execute(
+    """
+    SELECT objective_id, project_scope_json, plan_id
+    FROM objective_queue
+    ORDER BY created_at
+    """
+):
+    try:
+        scope = json.loads(row["project_scope_json"])
+    except json.JSONDecodeError as error:
+        invalid_scopes.append(
+            {
+                "objective_id": row["objective_id"],
+                "reason": f"invalid JSON: {error}",
+            }
+        )
+        continue
+
+    if not isinstance(scope, list):
+        invalid_scopes.append(
+            {
+                "objective_id": row["objective_id"],
+                "reason": "scope is not a JSON array",
+            }
+        )
+        continue
+
+    if (
+        any(
+            not isinstance(project_id, str)
+            or not project_id.strip()
+            for project_id in scope
+        )
+        or len(scope) != len(set(scope))
+    ):
+        invalid_scopes.append(
+            {
+                "objective_id": row["objective_id"],
+                "reason": "scope contains an invalid or duplicate project id",
+            }
+        )
+        continue
+
+    missing = sorted(set(scope) - project_ids)
+    if missing:
+        unknown_scoped_projects.append(
+            {
+                "objective_id": row["objective_id"],
+                "project_ids": missing,
+            }
+        )
+
+assert not invalid_scopes, invalid_scopes
+assert not unknown_scoped_projects, unknown_scoped_projects
+
+missing_task_projects = connection.execute(
+    """
+    SELECT
+        task.orchestration_task_id,
+        task.plan_id,
+        task.project_id
+    FROM orchestration_tasks AS task
+    LEFT JOIN projects AS project
+      ON project.project_id = task.project_id
+    WHERE task.project_id IS NOT NULL
+      AND project.project_id IS NULL
+    ORDER BY task.created_at
+    """
+).fetchall()
+assert not missing_task_projects, [
+    dict(row)
+    for row in missing_task_projects
+]
+
+invalid_enabled_projects = connection.execute(
+    """
+    SELECT *
+    FROM projects
+    WHERE enabled = 1
+      AND (
+          TRIM(repo_path) = ''
+          OR TRIM(data_path) = ''
+          OR TRIM(policy_id) = ''
+          OR TRIM(config_source) = ''
+          OR TRIM(config_hash) = ''
+      )
+    """
+).fetchall()
+assert not invalid_enabled_projects, [
+    dict(row)
+    for row in invalid_enabled_projects
+]
+
+enabled_fixtures = connection.execute(
+    """
+    SELECT project_id
+    FROM projects
+    WHERE project_id LIKE 'transaction-fixture%'
+      AND enabled != 0
+    """
+).fetchall()
+assert not enabled_fixtures, [
+    row["project_id"]
+    for row in enabled_fixtures
+]
+
+ai_rows = connection.execute(
+    """
+    SELECT objective_id, status, plan_id
+    FROM objective_queue
+    WHERE source = 'AI'
+    ORDER BY created_at
+    """
+).fetchall()
+for row in ai_rows:
+    assert row["status"] in allowed_objective_statuses
+    if row["status"] == "COMPLETED":
+        assert row["plan_id"]
+
+completed_pipeline_rows = connection.execute(
+    """
+    SELECT result_json
+    FROM orchestration_tasks
+    WHERE kind = 'PIPELINE'
+      AND status = 'COMPLETED'
+      AND result_json IS NOT NULL
+    """
+).fetchall()
+
+for row in completed_pipeline_rows:
+    payload = json.loads(row["result_json"])
+    if "worker" in payload:
+        assert payload["worker"].get("exit_code") == 0
+    if "reviewer" in payload:
+        assert payload["reviewer"].get("decision") in {
+            "APPROVE",
+            "PASS",
+            "PASS_WITH_DEBT",
+        }
+    if "integration" in payload:
+        assert payload["integration"].get("integrated") is True
 PY
+fi
+
+
+[[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM project_locks;')" == "0" ]]
+
+# HERMESOPS_REAL_PROJECT_REGISTRY_COMPATIBILITY_V1
+[[ "$(
+    sqlite3 "$DB" \
+        "SELECT COUNT(*)
+         FROM projects
+         WHERE project_id LIKE 'transaction-fixture%'
+           AND enabled != 0;"
+)" == "0" ]]
+
+[[ "$(
+    sqlite3 "$DB" \
+        "SELECT COUNT(*)
+         FROM projects
+         WHERE enabled = 1
+           AND (
+               TRIM(repo_path) = ''
+               OR TRIM(data_path) = ''
+               OR TRIM(policy_id) = ''
+               OR TRIM(config_source) = ''
+           );"
+)" == "0" ]]
+
+# HERMESOPS_OBJECTIVE_FOUNDATION_PRODUCTION_STATE_V1
+objective_stage "repository integrity"
+git -C "$REPO" diff --check
+
+if git -C "$REPO" ls-files -u | grep -q .; then
+    echo "Unmerged controller files detected." >&2
+    exit 1
+fi
 
 echo "HermesOps persistent autonomous objective queue foundation: PASS"
