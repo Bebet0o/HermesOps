@@ -146,31 +146,38 @@ import json
 import sys
 
 payload = json.loads(sys.argv[1])
-assert payload["version"] == "orchestrator-v1"
+assert payload["version"] == "orchestrator-v2"
 assert payload["lock_held"] is True
 assert payload["supervisor_healthy"] is True
 assert payload["instance"]["status"] == "RUNNING"
 PY
 
-AI_EXECUTION="$(
-    sqlite3 "$DB" \
-        "SELECT execution_id
-         FROM orchestrator_executions
-         WHERE role_id='orchestrator'
-           AND source_profile='ops-orchestrator'
-           AND exit_code=0
-           AND plan_id IS NOT NULL
-         ORDER BY created_at DESC
-         LIMIT 1;"
-)"
-[[ -n "$AI_EXECUTION" ]]
-
+# HERMESOPS_4A_AUDIT_PLAN_SELECTOR_V1
+#
+# 4A created one controlled AI plan as a cancelled audit artifact. Future
+# milestones legitimately create newer AI plans with other terminal states,
+# so the foundation test must select the 4A artifact by its own immutable
+# objective contract rather than by global recency.
 AI_PLAN="$(
     sqlite3 "$DB" \
-        "SELECT plan_id
-         FROM orchestrator_executions
-         WHERE execution_id='${AI_EXECUTION}';"
+        "SELECT plan.plan_id
+         FROM orchestration_plans AS plan
+         WHERE plan.source='AI'
+           AND plan.status='CANCELLED'
+           AND plan.objective LIKE
+               'Prepare a minimal reviewed implementation for the transaction fixture%'
+           AND EXISTS (
+               SELECT 1
+               FROM orchestrator_executions AS execution
+               WHERE execution.plan_id=plan.plan_id
+                 AND execution.role_id='orchestrator'
+                 AND execution.source_profile='ops-orchestrator'
+                 AND execution.exit_code=0
+           )
+         ORDER BY plan.created_at DESC
+         LIMIT 1;"
 )"
+[[ -n "$AI_PLAN" ]]
 [[ "$(
     sqlite3 "$DB" \
         "SELECT source || '|' || status

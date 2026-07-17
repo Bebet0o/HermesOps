@@ -112,8 +112,7 @@ OUTPUT_PATH="$(
          WHERE execution_id='${EXECUTION_ID}';"
 )"
 
-[[ -f "$OUTPUT_PATH" ]]
-grep -Fqx 'HERMESOPS_CONTROLLED_WORKER_OK' "$OUTPUT_PATH"
+[[ -s "$OUTPUT_PATH" ]]
 
 RESULT_JSON="$(
     sqlite3 "$DB" \
@@ -127,6 +126,8 @@ import json
 import sys
 
 payload = json.loads(sys.argv[1])
+assert payload["exit_code"] == 0
+assert payload["marker_found"] is True
 assert payload["standalone_clone"] is True
 assert payload["protected_refs_verified"] is True
 assert payload["sandbox_preflight"]["clean"] is True

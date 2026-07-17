@@ -74,6 +74,49 @@ grep -q . && {
 systemctl --user is-enabled --quiet hermesops-supervisor.service
 systemctl --user is-active --quiet hermesops-supervisor.service
 
+supervisor_status_ready() {
+    local payload
+    payload="$(
+        "${REPO}/scripts/hermesops-supervisor.py" status 2>/dev/null
+    )" || return 1
+
+    python3 - "$payload" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+    last_sweep = payload.get("last_sweep") or {}
+    ready = (
+        payload.get("version") == "supervisor-v1"
+        and payload.get("lock_held") is True
+        and (payload.get("health") or {}).get("healthy") is True
+        and (payload.get("instance") or {}).get("status") == "RUNNING"
+        and last_sweep.get("status") in {"COMPLETED", "SKIPPED"}
+    )
+except Exception:
+    ready = False
+
+raise SystemExit(0 if ready else 1)
+PY
+}
+
+SUPERVISOR_READY=0
+for _ in $(seq 1 60)
+do
+    if supervisor_status_ready; then
+        SUPERVISOR_READY=1
+        break
+    fi
+    sleep 1
+done
+
+if [[ "$SUPERVISOR_READY" != "1" ]]; then
+    "${REPO}/scripts/hermesops-supervisor.py" status >&2 || true
+    echo "Supervisor non stable après attente du sweep terminal." >&2
+    exit 1
+fi
+
 STATUS_JSON="$(
     "${REPO}/scripts/hermesops-supervisor.py" status
 )"

@@ -19,7 +19,7 @@ import threading
 import time
 import tomllib
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -49,7 +49,9 @@ WORKER = REPO / "scripts/hermesops-worker.py"
 REVIEWER = REPO / "scripts/hermesops-reviewer.py"
 INTEGRATOR = REPO / "scripts/hermesops-integrator.py"
 RECOVERY = REPO / "scripts/hermesops-recovery.py"
-VERSION = "orchestrator-v1"
+PLANNER = REPO / "scripts/hermesops-planner.py"
+OBJECTIVE_RUNTIME = RUNTIME / "objectives"
+VERSION = "orchestrator-v2"
 TASK_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 TERMINAL_TASK_STATUSES = {
     "COMPLETED",
@@ -217,6 +219,18 @@ def load_config() -> dict[str, int]:
                 section.get("global_parallel_tasks", 3),
             )
         ),
+        "global_parallel_objectives": int(
+            os.environ.get(
+                "HERMESOPS_ORCHESTRATOR_GLOBAL_PARALLEL_OBJECTIVES",
+                section.get("global_parallel_objectives", 2),
+            )
+        ),
+        "planning_timeout_seconds": int(
+            section.get("planning_timeout_seconds", 900)
+        ),
+        "planning_retry_backoff_seconds": int(
+            section.get("planning_retry_backoff_seconds", 30)
+        ),
         "worker_timeout_seconds": int(
             section.get("worker_timeout_seconds", 1200)
         ),
@@ -240,6 +254,9 @@ def load_config() -> dict[str, int]:
     bounds = {
         "poll_seconds": (1, 60),
         "global_parallel_tasks": (1, 16),
+        "global_parallel_objectives": (1, 16),
+        "planning_timeout_seconds": (60, 3600),
+        "planning_retry_backoff_seconds": (1, 900),
         "worker_timeout_seconds": (60, 7200),
         "review_timeout_seconds": (60, 7200),
         "review_transport_attempts": (1, 5),
@@ -468,6 +485,12 @@ def validate_plan(
                 fail(f"Task {key} acceptance criteria are required")
             if not isinstance(marker, str) or not marker.strip() or "\n" in marker:
                 fail(f"Task {key} marker must be one non-empty line")
+        elif allow_test_actions and raw.get("project_id") is not None:
+            project_id = raw.get("project_id")
+            if project_id not in projects:
+                fail(f"Task {key} has unknown project affinity: {project_id}")
+            if require_enabled_projects and not projects[project_id]["enabled"]:
+                fail(f"Task {key} project affinity is disabled: {project_id}")
 
         if kind == "TEST_SLEEP":
             duration = raw.get("duration_seconds", 1)
@@ -805,10 +828,22 @@ def task_counts(connection: sqlite3.Connection) -> dict[str, int]:
     return {row["status"]: int(row["count"]) for row in rows}
 
 
+def objective_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM objective_queue
+        GROUP BY status
+        """
+    ).fetchall()
+    return {row["status"]: int(row["count"]) for row in rows}
+
+
 def write_status(instance_id: str, *, message: str) -> None:
     with connect() as connection:
         plans = plan_counts(connection)
         tasks = task_counts(connection)
+        objectives = objective_counts(connection)
         latest = connection.execute(
             """
             SELECT plan_id, objective, status, heartbeat_at, last_error
@@ -827,6 +862,7 @@ def write_status(instance_id: str, *, message: str) -> None:
             "lock_held": lock_is_held(),
             "plan_counts": plans,
             "task_counts": tasks,
+            "objective_counts": objectives,
             "latest_plan": dict(latest) if latest else None,
             "message": message,
             "updated_at": utc_now(),
@@ -2071,6 +2107,700 @@ def supervisor_is_healthy() -> bool:
     )
 
 
+
+def future_utc(seconds: int) -> str:
+    return (
+        (datetime.now(timezone.utc) + timedelta(seconds=seconds))
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def add_objective_event(
+    connection: sqlite3.Connection,
+    *,
+    objective_id: str,
+    event_type: str,
+    old_status: str | None,
+    new_status: str | None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO objective_events (
+            objective_event_id,
+            objective_id,
+            event_type,
+            old_status,
+            new_status,
+            payload_json,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "objective-event-" + uuid.uuid4().hex,
+            objective_id,
+            event_type,
+            old_status,
+            new_status,
+            canonical_json(payload or {}),
+            utc_now(),
+        ),
+    )
+
+
+def objective_running_tasks(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+) -> int:
+    if plan_id is None:
+        return 0
+    return int(
+        connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM orchestration_tasks
+            WHERE plan_id = ? AND status = 'RUNNING'
+            """,
+            (plan_id,),
+        ).fetchone()[0]
+    )
+
+
+def cancel_objective_plan(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+    now: str,
+) -> None:
+    if plan_id is None:
+        return
+    connection.execute(
+        """
+        UPDATE orchestration_tasks
+        SET status = 'CANCELLED',
+            heartbeat_at = ?,
+            finished_at = ?,
+            failure_reason = COALESCE(failure_reason, 'objective cancelled')
+        WHERE plan_id = ?
+          AND status IN ('PENDING', 'READY', 'BLOCKED')
+        """,
+        (now, now, plan_id),
+    )
+    connection.execute(
+        """
+        UPDATE orchestration_plans
+        SET status = 'CANCELLED',
+            heartbeat_at = ?,
+            finished_at = ?,
+            last_error = 'objective cancelled'
+        WHERE plan_id = ?
+          AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+        """,
+        (now, now, plan_id),
+    )
+
+
+def active_objective_count(connection: sqlite3.Connection) -> int:
+    return int(
+        connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM objective_queue
+            WHERE status IN (
+                'PLANNING',
+                'RUNNING',
+                'PAUSE_REQUESTED',
+                'CANCEL_REQUESTED'
+            )
+            """
+        ).fetchone()[0]
+    )
+
+
+def synchronize_objective_states() -> None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            """
+            SELECT objective.*, plan.status AS plan_status
+            FROM objective_queue AS objective
+            LEFT JOIN orchestration_plans AS plan
+              ON plan.plan_id = objective.plan_id
+            WHERE objective.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+            ORDER BY objective.created_at
+            """
+        ).fetchall()
+
+        for row in rows:
+            objective_id = row["objective_id"]
+            old = row["status"]
+            plan_id = row["plan_id"]
+            running = objective_running_tasks(connection, plan_id)
+            new: str | None = None
+            error: str | None = None
+
+            if old == "PAUSE_REQUESTED" and running == 0:
+                new = "PAUSED"
+            elif old == "CANCEL_REQUESTED" and running == 0:
+                cancel_objective_plan(connection, plan_id, now)
+                new = "CANCELLED"
+                error = "cancelled by operator"
+            elif row["plan_status"] == "COMPLETED":
+                new = "COMPLETED"
+            elif row["plan_status"] == "FAILED":
+                new = "FAILED"
+                error = "linked orchestration plan failed"
+            elif row["plan_status"] == "CANCELLED":
+                new = "CANCELLED"
+                error = "linked orchestration plan cancelled"
+
+            if new is None or new == old:
+                connection.execute(
+                    """
+                    UPDATE objective_queue
+                    SET heartbeat_at = ?
+                    WHERE objective_id = ?
+                    """,
+                    (now, objective_id),
+                )
+                continue
+
+            terminal = new in {"COMPLETED", "FAILED", "CANCELLED"}
+            connection.execute(
+                """
+                UPDATE objective_queue
+                SET status = ?,
+                    heartbeat_at = ?,
+                    paused_at = CASE WHEN ? = 'PAUSED' THEN ? ELSE paused_at END,
+                    finished_at = CASE WHEN ? THEN ? ELSE NULL END,
+                    last_error = ?
+                WHERE objective_id = ?
+                """,
+                (
+                    new,
+                    now,
+                    new,
+                    now,
+                    1 if terminal else 0,
+                    now,
+                    error,
+                    objective_id,
+                ),
+            )
+            add_objective_event(
+                connection,
+                objective_id=objective_id,
+                event_type=f"OBJECTIVE_{new}",
+                old_status=old,
+                new_status=new,
+                payload={"plan_id": plan_id},
+            )
+        connection.commit()
+
+
+def next_queued_objective() -> dict[str, Any] | None:
+    now = utc_now()
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT objective_id, source, priority, created_at
+            FROM objective_queue
+            WHERE status = 'QUEUED'
+              AND not_before <= ?
+            ORDER BY priority, created_at
+            LIMIT 1
+            """,
+            (now,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def promote_declarative_objective(objective_id: str) -> str | None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT objective.*, plan.status AS plan_status
+            FROM objective_queue AS objective
+            JOIN orchestration_plans AS plan
+              ON plan.plan_id = objective.plan_id
+            WHERE objective.objective_id = ?
+              AND objective.status = 'QUEUED'
+              AND objective.source IN ('DECLARATIVE', 'TEST')
+              AND objective.not_before <= ?
+            """,
+            (objective_id, now),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+
+        if row["plan_status"] == "DRAFT":
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'READY',
+                    heartbeat_at = ?,
+                    last_error = NULL
+                WHERE plan_id = ? AND status = 'DRAFT'
+                """,
+                (now, row["plan_id"]),
+            )
+        elif row["plan_status"] not in {"READY", "RUNNING"}:
+            connection.rollback()
+            return None
+
+        updated = connection.execute(
+            """
+            UPDATE objective_queue
+            SET status = 'RUNNING',
+                started_at = COALESCE(started_at, ?),
+                heartbeat_at = ?,
+                finished_at = NULL,
+                paused_at = NULL,
+                last_error = NULL
+            WHERE objective_id = ? AND status = 'QUEUED'
+            """,
+            (now, now, objective_id),
+        ).rowcount
+        if updated != 1:
+            connection.rollback()
+            return None
+        add_objective_event(
+            connection,
+            objective_id=objective_id,
+            event_type="OBJECTIVE_DISPATCHED",
+            old_status="QUEUED",
+            new_status="RUNNING",
+            payload={"plan_id": row["plan_id"]},
+        )
+        connection.commit()
+        return str(row["plan_id"])
+
+
+def reserve_ai_objective(
+    objective_id: str,
+    *,
+    instance_id: str,
+    config: dict[str, int],
+) -> tuple[dict[str, Any], str] | None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if active_objective_count(connection) >= config["global_parallel_objectives"]:
+            connection.rollback()
+            return None
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM objective_queue
+            WHERE objective_id = ?
+              AND status = 'QUEUED'
+              AND source = 'AI'
+              AND plan_id IS NULL
+              AND not_before <= ?
+            """,
+            (objective_id, now),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+
+        attempt_number = int(row["planning_attempt_count"]) + 1
+        if attempt_number > int(row["planning_max_attempts"]):
+            connection.execute(
+                """
+                UPDATE objective_queue
+                SET status = 'FAILED',
+                    heartbeat_at = ?,
+                    finished_at = ?,
+                    last_error = 'planning attempt budget exhausted'
+                WHERE objective_id = ?
+                """,
+                (now, now, row["objective_id"]),
+            )
+            connection.commit()
+            return None
+
+        attempt_id = "objective-attempt-" + uuid.uuid4().hex
+        updated = connection.execute(
+            """
+            UPDATE objective_queue
+            SET status = 'PLANNING',
+                planning_attempt_count = ?,
+                started_at = COALESCE(started_at, ?),
+                heartbeat_at = ?,
+                last_error = NULL
+            WHERE objective_id = ? AND status = 'QUEUED'
+            """,
+            (attempt_number, now, now, row["objective_id"]),
+        ).rowcount
+        if updated != 1:
+            connection.rollback()
+            return None
+
+        connection.execute(
+            """
+            INSERT INTO objective_attempts (
+                objective_attempt_id,
+                objective_id,
+                attempt_number,
+                status,
+                executor_instance_id,
+                planner_execution_id,
+                plan_id,
+                result_json,
+                failure_reason,
+                started_at,
+                heartbeat_at,
+                finished_at,
+                next_attempt_at
+            )
+            VALUES (?, ?, ?, 'RUNNING', ?, NULL, NULL, '{}', NULL,
+                    ?, ?, NULL, NULL)
+            """,
+            (
+                attempt_id,
+                row["objective_id"],
+                attempt_number,
+                instance_id,
+                now,
+                now,
+            ),
+        )
+        add_objective_event(
+            connection,
+            objective_id=row["objective_id"],
+            event_type="OBJECTIVE_PLANNING_STARTED",
+            old_status="QUEUED",
+            new_status="PLANNING",
+            payload={"attempt_id": attempt_id, "attempt_number": attempt_number},
+        )
+        connection.commit()
+        return dict(row), attempt_id
+
+
+def finish_objective_planning_success(
+    objective_id: str,
+    attempt_id: str,
+    result: dict[str, Any],
+) -> None:
+    now = utc_now()
+    plan_id = str(result["plan_id"])
+    execution_id = str(result["execution_id"])
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM objective_queue WHERE objective_id = ?",
+            (objective_id,),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            fail(f"Objective disappeared during planning: {objective_id}")
+
+        connection.execute(
+            """
+            UPDATE objective_attempts
+            SET status = 'COMPLETED',
+                planner_execution_id = ?,
+                plan_id = ?,
+                result_json = ?,
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE objective_attempt_id = ? AND status = 'RUNNING'
+            """,
+            (execution_id, plan_id, canonical_json(result), now, now, attempt_id),
+        )
+
+        old = row["status"]
+        if old == "CANCEL_REQUESTED":
+            cancel_objective_plan(connection, plan_id, now)
+            new = "CANCELLED"
+            finished_at: str | None = now
+            error = "cancelled by operator during planning"
+        elif old == "PAUSE_REQUESTED":
+            new = "PAUSED"
+            finished_at = None
+            error = None
+        elif old == "PLANNING":
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'READY',
+                    heartbeat_at = ?,
+                    last_error = NULL
+                WHERE plan_id = ? AND status = 'DRAFT'
+                """,
+                (now, plan_id),
+            )
+            new = "RUNNING"
+            finished_at = None
+            error = None
+        else:
+            connection.rollback()
+            fail(f"Unexpected objective status after planning: {old}")
+
+        connection.execute(
+            """
+            UPDATE objective_queue
+            SET status = ?,
+                plan_id = ?,
+                planner_execution_id = ?,
+                heartbeat_at = ?,
+                finished_at = ?,
+                paused_at = CASE WHEN ? = 'PAUSED' THEN ? ELSE NULL END,
+                last_error = ?
+            WHERE objective_id = ?
+            """,
+            (
+                new,
+                plan_id,
+                execution_id,
+                now,
+                finished_at,
+                new,
+                now,
+                error,
+                objective_id,
+            ),
+        )
+        add_objective_event(
+            connection,
+            objective_id=objective_id,
+            event_type="OBJECTIVE_PLANNED",
+            old_status=old,
+            new_status=new,
+            payload={
+                "attempt_id": attempt_id,
+                "plan_id": plan_id,
+                "planner_execution_id": execution_id,
+            },
+        )
+        connection.commit()
+
+
+def finish_objective_planning_failure(
+    objective_id: str,
+    attempt_id: str,
+    error: str,
+    config: dict[str, int],
+) -> None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM objective_queue WHERE objective_id = ?",
+            (objective_id,),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return
+
+        if row["status"] == "CANCEL_REQUESTED":
+            next_status = "CANCELLED"
+            next_attempt_at = None
+        elif row["status"] == "PAUSE_REQUESTED":
+            next_status = "PAUSED"
+            next_attempt_at = None
+        elif int(row["planning_attempt_count"]) < int(row["planning_max_attempts"]):
+            next_status = "QUEUED"
+            next_attempt_at = future_utc(
+                config["planning_retry_backoff_seconds"]
+                * int(row["planning_attempt_count"])
+            )
+        else:
+            next_status = "FAILED"
+            next_attempt_at = None
+
+        connection.execute(
+            """
+            UPDATE objective_attempts
+            SET status = 'FAILED',
+                failure_reason = ?,
+                heartbeat_at = ?,
+                finished_at = ?,
+                next_attempt_at = ?
+            WHERE objective_attempt_id = ? AND status = 'RUNNING'
+            """,
+            (error, now, now, next_attempt_at, attempt_id),
+        )
+        connection.execute(
+            """
+            UPDATE objective_queue
+            SET status = ?,
+                not_before = COALESCE(?, not_before),
+                heartbeat_at = ?,
+                finished_at = CASE WHEN ? IN ('FAILED', 'CANCELLED') THEN ? ELSE NULL END,
+                paused_at = CASE WHEN ? = 'PAUSED' THEN ? ELSE paused_at END,
+                last_error = ?
+            WHERE objective_id = ?
+            """,
+            (
+                next_status,
+                next_attempt_at,
+                now,
+                next_status,
+                now,
+                next_status,
+                now,
+                error,
+                objective_id,
+            ),
+        )
+        add_objective_event(
+            connection,
+            objective_id=objective_id,
+            event_type="OBJECTIVE_PLANNING_RETRY" if next_status == "QUEUED" else "OBJECTIVE_PLANNING_FAILED",
+            old_status=row["status"],
+            new_status=next_status,
+            payload={
+                "attempt_id": attempt_id,
+                "error": error,
+                "next_attempt_at": next_attempt_at,
+            },
+        )
+        connection.commit()
+
+
+def execute_objective_planning(
+    objective: dict[str, Any],
+    attempt_id: str,
+    *,
+    config: dict[str, int],
+) -> None:
+    objective_id = objective["objective_id"]
+    directory = OBJECTIVE_RUNTIME / objective_id / attempt_id
+    directory.mkdir(parents=True, exist_ok=True, mode=0o750)
+    objective_path = directory / "objective.txt"
+    objective_path.write_text(objective["objective"].strip() + "\n", encoding="utf-8")
+    objective_path.chmod(0o600)
+    projects = json.loads(objective["project_scope_json"])
+    marker = "HERMESOPS_OBJECTIVE_PLAN_OK"
+
+    try:
+        result = run_json(
+            [
+                str(PLANNER),
+                "generate",
+                "--objective-file",
+                str(objective_path),
+                "--projects",
+                ",".join(projects),
+                "--marker",
+                marker,
+                "--status",
+                "DRAFT",
+                "--timeout",
+                str(config["planning_timeout_seconds"]),
+            ],
+            timeout=config["planning_timeout_seconds"] + 120,
+        )
+        finish_objective_planning_success(objective_id, attempt_id, result)
+    except Exception as error:
+        finish_objective_planning_failure(
+            objective_id,
+            attempt_id,
+            str(error),
+            config,
+        )
+
+
+def reconcile_interrupted_planner_executions() -> None:
+    now = utc_now()
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT execution_id, outer_container_name
+            FROM orchestrator_executions
+            WHERE finished_at IS NULL
+            ORDER BY created_at
+            """
+        ).fetchall()
+
+    for row in rows:
+        run_command(
+            ["docker", "rm", "-f", row["outer_container_name"]],
+            timeout=60,
+            check=False,
+        )
+
+    if rows:
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE orchestrator_executions
+                    SET exit_code = COALESCE(exit_code, 137),
+                        failure_reason = COALESCE(
+                            failure_reason,
+                            'orchestrator process restarted during planning'
+                        ),
+                        finished_at = ?
+                    WHERE execution_id = ? AND finished_at IS NULL
+                    """,
+                    (now, row["execution_id"]),
+                )
+            connection.commit()
+
+
+def reconcile_interrupted_objectives(instance_id: str) -> None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            """
+            SELECT objective.*, attempt.objective_attempt_id
+            FROM objective_queue AS objective
+            LEFT JOIN objective_attempts AS attempt
+              ON attempt.objective_id = objective.objective_id
+             AND attempt.status = 'RUNNING'
+            WHERE objective.status = 'PLANNING'
+            """
+        ).fetchall()
+
+        for row in rows:
+            if row["objective_attempt_id"]:
+                connection.execute(
+                    """
+                    UPDATE objective_attempts
+                    SET status = 'ABANDONED',
+                        heartbeat_at = ?,
+                        finished_at = ?,
+                        failure_reason = 'orchestrator process restarted'
+                    WHERE objective_attempt_id = ? AND status = 'RUNNING'
+                    """,
+                    (now, now, row["objective_attempt_id"]),
+                )
+            retry = int(row["planning_attempt_count"]) < int(row["planning_max_attempts"])
+            new = "QUEUED" if retry else "FAILED"
+            connection.execute(
+                """
+                UPDATE objective_queue
+                SET status = ?,
+                    not_before = ?,
+                    heartbeat_at = ?,
+                    finished_at = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END,
+                    last_error = 'orchestrator process restarted during planning'
+                WHERE objective_id = ? AND status = 'PLANNING'
+                """,
+                (new, now, now, new, now, row["objective_id"]),
+            )
+            add_objective_event(
+                connection,
+                objective_id=row["objective_id"],
+                event_type="OBJECTIVE_PLANNING_ABANDONED",
+                old_status="PLANNING",
+                new_status=new,
+                payload={"instance_id": instance_id},
+            )
+        connection.commit()
+
+
 def project_is_busy(
     connection: sqlite3.Connection,
     project_id: str | None,
@@ -2084,7 +2814,6 @@ def project_is_busy(
         SELECT COUNT(*)
         FROM orchestration_tasks
         WHERE project_id = ?
-          AND kind = 'PIPELINE'
           AND status = 'RUNNING'
           AND orchestration_task_id <> ?
         """,
@@ -2111,9 +2840,19 @@ def runnable_tasks(
             FROM orchestration_tasks AS task
             JOIN orchestration_plans AS plan
               ON plan.plan_id = task.plan_id
+            LEFT JOIN objective_queue AS objective
+              ON objective.plan_id = plan.plan_id
             WHERE task.status = 'READY'
               AND plan.status IN ('READY', 'RUNNING')
-            ORDER BY task.priority, task.created_at
+              AND (
+                    objective.objective_id IS NULL
+                    OR objective.status = 'RUNNING'
+              )
+            ORDER BY
+                COALESCE(objective.priority, 100),
+                task.priority,
+                COALESCE(objective.created_at, task.created_at),
+                task.created_at
             """
         ).fetchall()
 
@@ -2213,15 +2952,84 @@ def daemon_loop(arguments: argparse.Namespace) -> None:
         max_workers=config["global_parallel_tasks"],
         thread_name_prefix="hermesops-task",
     )
+    planning_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="hermesops-objective",
+    )
     futures: dict[concurrent.futures.Future[None], str] = {}
+    planning_futures: dict[concurrent.futures.Future[None], str] = {}
 
     try:
         update_instance(instance_id, status="RUNNING")
         reconcile_interrupted_tasks(instance_id)
+        reconcile_interrupted_planner_executions()
+        reconcile_interrupted_objectives(instance_id)
         write_status(instance_id, message="orchestrator started")
 
         while not stop_event.is_set():
             update_instance(instance_id)
+            synchronize_objective_states()
+
+            completed_planning = [
+                future for future in planning_futures if future.done()
+            ]
+            for future in completed_planning:
+                objective_id = planning_futures.pop(future)
+                try:
+                    future.result()
+                except Exception as error:
+                    print(
+                        canonical_json(
+                            {
+                                "event": "objective-planner-error",
+                                "objective_id": objective_id,
+                                "error": str(error),
+                            }
+                        ),
+                        flush=True,
+                    )
+
+            while True:
+                with connect() as connection:
+                    available_objective_slots = (
+                        config["global_parallel_objectives"]
+                        - active_objective_count(connection)
+                    )
+                if available_objective_slots <= 0:
+                    break
+
+                queued = next_queued_objective()
+                if queued is None:
+                    break
+
+                if queued["source"] == "AI":
+                    # Preserve global priority: a high-priority AI objective
+                    # is never overtaken by a lower-priority declarative one.
+                    if planning_futures:
+                        break
+                    reserved = reserve_ai_objective(
+                        queued["objective_id"],
+                        instance_id=instance_id,
+                        config=config,
+                    )
+                    if reserved is None:
+                        break
+                    objective, objective_attempt_id = reserved
+                    future = planning_executor.submit(
+                        execute_objective_planning,
+                        objective,
+                        objective_attempt_id,
+                        config=config,
+                    )
+                    planning_futures[future] = objective["objective_id"]
+                    continue
+
+                plan_id = promote_declarative_objective(
+                    queued["objective_id"]
+                )
+                if plan_id is None:
+                    break
+                refresh_plan_states(plan_id)
 
             for plan_id in active_plan_ids():
                 refresh_plan_states(plan_id)
@@ -2259,6 +3067,7 @@ def daemon_loop(arguments: argparse.Namespace) -> None:
 
         # Graceful service stops wait for current tasks. SIGKILL is validated
         # separately and is recovered from durable task/attempt records.
+        planning_executor.shutdown(wait=True, cancel_futures=False)
         executor.shutdown(wait=True, cancel_futures=False)
         update_instance(instance_id, status="STOPPED", stopped=True)
         write_status(instance_id, message="orchestrator stopped cleanly")
@@ -2485,6 +3294,7 @@ def command_daemon_status(_: argparse.Namespace) -> None:
         ).fetchone()
         plans = plan_counts(connection)
         tasks = task_counts(connection)
+        objectives = objective_counts(connection)
 
     print(
         json.dumps(
@@ -2494,6 +3304,7 @@ def command_daemon_status(_: argparse.Namespace) -> None:
                 "instance": dict(instance) if instance else None,
                 "plan_counts": plans,
                 "task_counts": tasks,
+                "objective_counts": objectives,
                 "supervisor_healthy": supervisor_is_healthy(),
                 "runtime_status_path": str(STATUS_PATH),
             },
@@ -2558,7 +3369,12 @@ def command_self_test(_: argparse.Namespace) -> None:
     ):
         fail("Marker absence alone was classified as transport failure")
 
-    print("HermesOps orchestration DAG engine: PASS")
+    before = future_utc(1)
+    after = future_utc(2)
+    if not before < after:
+        fail("Objective deferred retry timestamps are not ordered")
+
+    print("HermesOps orchestration DAG and objective queue engine: PASS")
 
 
 def build_parser() -> argparse.ArgumentParser:

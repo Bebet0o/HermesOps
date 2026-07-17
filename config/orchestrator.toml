@@ -1,8 +1,11 @@
-schema_version = 1
+schema_version = 2
 
 [orchestrator]
 poll_seconds = 3
 global_parallel_tasks = 3
+global_parallel_objectives = 2
+planning_timeout_seconds = 900
+planning_retry_backoff_seconds = 30
 worker_timeout_seconds = 1200
 review_timeout_seconds = 1200
 review_transport_attempts = 3
