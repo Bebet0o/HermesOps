@@ -1,11 +1,17 @@
-# HermesOps state after milestone 3D
+# HermesOps state after milestone 3E
 
-Base before this milestone: `edd1ff76005da07b907dd547c741fd891275f9fe`.
+Base before this milestone: `2350dc9049258bc880bbc467a1b8bfbbb925b6a8`.
 
-Milestone 3D adds the Controller-owned reviewed integration gate and migration
-006. A real worker and real independent reviewer produce an `APPROVE/PASS`
-transaction that is fast-forwarded into the fixture default branch. The
-fixture is then restored to its original base while the completed run and
-integration evidence remain in SQLite. Deterministic tests also prove no-review
-refusal, stale-review refusal, REJECT without Git mutation, and BLOCK_HUMAN
-with a pending approval followed by safe rollback.
+Milestone 3E adds migration 007 and the deterministic Recovery Manager. Tests
+simulate an abandoned worker, an interrupted review, a missing worktree, a
+power loss after Git fast-forward but before SQLite finalization, a divergent
+default branch, and a corrupted snapshot. The resulting decisions cover
+`RESUME_SAFE`, `ROLLBACK_SAFE`, and `BLOCK_HUMAN`, including resource cleanup,
+approval creation, idempotent terminal handling, and safe fixture restoration.
+
+
+3E v2 fixes the only failure observed during the first real milestone run.
+All recovery decisions and scenarios passed, but deleting the abandoned
+worker clone left an empty project parent directory. The inherited 3B worker
+foundation correctly rejected that residue. The Recovery Manager now prunes
+empty clone parents after per-run cleanup and after global orphan cleanup.
