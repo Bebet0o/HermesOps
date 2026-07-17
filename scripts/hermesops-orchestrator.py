@@ -1,0 +1,2620 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import tomllib
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, NoReturn
+
+
+ROOT = Path(
+    os.environ.get("HERMESOPS_ROOT", "/opt/docker/hermesops")
+).resolve()
+REPO = ROOT / "repo"
+DATABASE = Path(
+    os.environ.get(
+        "HERMESOPS_DB",
+        str(ROOT / "state/controller/hermesops.db"),
+    )
+).resolve()
+CONFIG_PATH = Path(
+    os.environ.get(
+        "HERMESOPS_ORCHESTRATOR_CONFIG",
+        str(REPO / "config/orchestrator.toml"),
+    )
+).resolve()
+RUNTIME = ROOT / "runtime/orchestrator"
+LOCK_PATH = RUNTIME / "orchestrator.lock"
+STATUS_PATH = RUNTIME / "status.json"
+SUPERVISOR_STATUS_PATH = ROOT / "runtime/supervisor/status.json"
+TRANSACTION = REPO / "scripts/hermesops-transaction.py"
+WORKER = REPO / "scripts/hermesops-worker.py"
+REVIEWER = REPO / "scripts/hermesops-reviewer.py"
+INTEGRATOR = REPO / "scripts/hermesops-integrator.py"
+RECOVERY = REPO / "scripts/hermesops-recovery.py"
+VERSION = "orchestrator-v1"
+TASK_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+TERMINAL_TASK_STATUSES = {
+    "COMPLETED",
+    "FAILED",
+    "BLOCKED",
+    "CANCELLED",
+}
+ACTIVE_RUN_STATUSES = {
+    "SNAPSHOTTING",
+    "RUNNING",
+    "REVIEWING",
+    "WAITING_HUMAN",
+    "COMMITTING",
+    "RECOVERING",
+}
+
+
+class OrchestratorError(RuntimeError):
+    pass
+
+
+class CommandExecutionError(OrchestratorError):
+    def __init__(
+        self,
+        arguments: list[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        self.arguments = list(arguments)
+        self.returncode = int(returncode)
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(
+            "Command failed: "
+            + " ".join(arguments)
+            + f"\nstdout:\n{stdout}"
+            + f"\nstderr:\n{stderr}"
+        )
+
+
+def fail(message: str) -> NoReturn:
+    raise OrchestratorError(message)
+
+
+def utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def canonical_json(payload: Any) -> str:
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def payload_sha256(payload: Any) -> str:
+    return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+
+
+def atomic_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    content = json.dumps(
+        payload,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    ) + "\n"
+
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    temporary.replace(path)
+    path.chmod(0o640)
+
+
+def connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(DATABASE, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 20000")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = FULL")
+    return connection
+
+
+def run_command(
+    arguments: list[str],
+    *,
+    timeout: int,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        fail(
+            "Command timed out: "
+            + " ".join(arguments)
+            + f" ({error.timeout}s)"
+        )
+
+    if check and result.returncode != 0:
+        raise CommandExecutionError(
+            arguments,
+            result.returncode,
+            result.stdout,
+            result.stderr,
+        )
+
+    return result
+
+
+def run_json(arguments: list[str], *, timeout: int) -> dict[str, Any]:
+    result = run_command(arguments, timeout=timeout)
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(
+            "Command returned invalid JSON: "
+            + " ".join(arguments)
+            + f"\n{error}\nstdout:\n{result.stdout}"
+        )
+
+    if not isinstance(payload, dict):
+        fail("Command JSON result is not an object")
+
+    return payload
+
+
+def load_config() -> dict[str, int]:
+    if not CONFIG_PATH.is_file():
+        fail(f"Orchestrator configuration is absent: {CONFIG_PATH}")
+
+    with CONFIG_PATH.open("rb") as stream:
+        document = tomllib.load(stream)
+
+    section = document.get("orchestrator") or {}
+    result = {
+        "poll_seconds": int(
+            os.environ.get(
+                "HERMESOPS_ORCHESTRATOR_POLL_SECONDS",
+                section.get("poll_seconds", 3),
+            )
+        ),
+        "global_parallel_tasks": int(
+            os.environ.get(
+                "HERMESOPS_ORCHESTRATOR_GLOBAL_PARALLEL_TASKS",
+                section.get("global_parallel_tasks", 3),
+            )
+        ),
+        "worker_timeout_seconds": int(
+            section.get("worker_timeout_seconds", 1200)
+        ),
+        "review_timeout_seconds": int(
+            section.get("review_timeout_seconds", 1200)
+        ),
+        "review_transport_attempts": int(
+            section.get("review_transport_attempts", 3)
+        ),
+        "review_retry_backoff_seconds": int(
+            section.get("review_retry_backoff_seconds", 15)
+        ),
+        "command_timeout_seconds": int(
+            section.get("command_timeout_seconds", 300)
+        ),
+        "heartbeat_seconds": int(
+            section.get("heartbeat_seconds", 5)
+        ),
+    }
+
+    bounds = {
+        "poll_seconds": (1, 60),
+        "global_parallel_tasks": (1, 16),
+        "worker_timeout_seconds": (60, 7200),
+        "review_timeout_seconds": (60, 7200),
+        "review_transport_attempts": (1, 5),
+        "review_retry_backoff_seconds": (1, 120),
+        "command_timeout_seconds": (30, 1800),
+        "heartbeat_seconds": (1, 30),
+    }
+
+    for key, (minimum, maximum) in bounds.items():
+        value = result[key]
+        if not minimum <= value <= maximum:
+            fail(
+                f"Invalid {key}: {value}; expected "
+                f"{minimum}..{maximum}"
+            )
+
+    return result
+
+
+def acquire_lock() -> Any | None:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    descriptor = LOCK_PATH.open("a+", encoding="utf-8")
+
+    try:
+        fcntl.flock(
+            descriptor.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        descriptor.close()
+        return None
+
+    descriptor.seek(0)
+    descriptor.truncate()
+    descriptor.write(
+        canonical_json(
+            {
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "acquired_at": utc_now(),
+            }
+        )
+        + "\n"
+    )
+    descriptor.flush()
+    os.fsync(descriptor.fileno())
+    return descriptor
+
+
+def lock_is_held() -> bool:
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    descriptor = LOCK_PATH.open("a+", encoding="utf-8")
+
+    try:
+        fcntl.flock(
+            descriptor.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        descriptor.close()
+        return True
+
+    fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
+    descriptor.close()
+    return False
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        fail(f"Plan file is absent: {path}")
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        fail(f"Invalid plan JSON: {error}")
+
+    if not isinstance(payload, dict):
+        fail("Plan must be a JSON object")
+
+    return payload
+
+
+def topological_order(tasks: list[dict[str, Any]]) -> list[str]:
+    keys = {task["key"] for task in tasks}
+    dependencies = {
+        task["key"]: set(task.get("dependencies") or [])
+        for task in tasks
+    }
+    reverse: dict[str, set[str]] = {key: set() for key in keys}
+
+    for key, parents in dependencies.items():
+        for parent in parents:
+            reverse[parent].add(key)
+
+    ready = sorted(
+        key for key, parents in dependencies.items() if not parents
+    )
+    order: list[str] = []
+
+    while ready:
+        key = ready.pop(0)
+        order.append(key)
+
+        for child in sorted(reverse[key]):
+            dependencies[child].discard(key)
+            if not dependencies[child] and child not in order and child not in ready:
+                ready.append(child)
+                ready.sort()
+
+    if len(order) != len(keys):
+        fail("Plan dependency graph contains a cycle")
+
+    return order
+
+
+def validate_plan(
+    plan: dict[str, Any],
+    *,
+    allow_test_actions: bool,
+    require_enabled_projects: bool = True,
+) -> dict[str, Any]:
+    if plan.get("schema_version") != 1:
+        fail("Plan schema_version must be 1")
+
+    objective = plan.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        fail("Plan objective is required")
+    if len(objective.encode()) > 16_384:
+        fail("Plan objective exceeds 16 KiB")
+
+    maximum = plan.get("max_parallel_tasks", 1)
+    if not isinstance(maximum, int) or not 1 <= maximum <= 16:
+        fail("max_parallel_tasks must be an integer from 1 to 16")
+
+    tasks = plan.get("tasks")
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= 32:
+        fail("Plan tasks must contain 1..32 entries")
+
+    normalized: list[dict[str, Any]] = []
+    keys: set[str] = set()
+
+    with connect() as connection:
+        roles = {
+            row["role_id"]: dict(row)
+            for row in connection.execute(
+                "SELECT * FROM roles WHERE enabled = 1"
+            )
+        }
+        projects = {
+            row["project_id"]: dict(row)
+            for row in connection.execute(
+                "SELECT * FROM projects"
+            )
+        }
+
+    for index, raw in enumerate(tasks):
+        if not isinstance(raw, dict):
+            fail(f"Task {index} must be an object")
+
+        key = raw.get("key")
+        if not isinstance(key, str) or not TASK_KEY_PATTERN.fullmatch(key):
+            fail(f"Invalid task key at index {index}: {key!r}")
+        if key in keys:
+            fail(f"Duplicate task key: {key}")
+        keys.add(key)
+
+        kind = raw.get("kind", "PIPELINE")
+        if kind not in {"PIPELINE", "NOOP", "TEST_SLEEP", "TEST_FAIL"}:
+            fail(f"Unsupported task kind: {kind}")
+        if kind.startswith("TEST_") and not allow_test_actions:
+            fail(f"Test action is forbidden outside test plans: {kind}")
+
+        dependencies = raw.get("dependencies") or []
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) for item in dependencies
+        ):
+            fail(f"Task {key} dependencies must be a string list")
+        if len(set(dependencies)) != len(dependencies):
+            fail(f"Task {key} contains duplicate dependencies")
+        if key in dependencies:
+            fail(f"Task {key} depends on itself")
+
+        instruction = raw.get("instruction", "")
+        if not isinstance(instruction, str):
+            fail(f"Task {key} instruction must be a string")
+        if len(instruction.encode()) > 32_768:
+            fail(f"Task {key} instruction exceeds 32 KiB")
+
+        acceptance = raw.get("acceptance_criteria") or []
+        if not isinstance(acceptance, list) or not all(
+            isinstance(item, str) and item.strip() for item in acceptance
+        ):
+            fail(f"Task {key} acceptance_criteria must be strings")
+
+        max_attempts = raw.get("max_attempts", 1)
+        if not isinstance(max_attempts, int) or not 1 <= max_attempts <= 10:
+            fail(f"Task {key} max_attempts must be 1..10")
+
+        priority = raw.get("priority", 100)
+        if not isinstance(priority, int) or not -1000 <= priority <= 1000:
+            fail(f"Task {key} priority is invalid")
+
+        project_id: str | None = None
+        role_id: str | None = None
+        marker: str | None = None
+
+        if kind == "PIPELINE":
+            project_id = raw.get("project_id")
+            role_id = raw.get("role_id")
+            marker = raw.get("marker")
+
+            if project_id not in projects:
+                fail(f"Task {key} has unknown project: {project_id}")
+            if require_enabled_projects and not projects[project_id]["enabled"]:
+                fail(f"Task {key} project is disabled: {project_id}")
+            if role_id not in roles:
+                fail(f"Task {key} has unknown role: {role_id}")
+            role = roles[role_id]
+            if role["role_kind"] != "worker" or not role["may_commit"]:
+                fail(f"Task {key} role is not a committing worker: {role_id}")
+            if role["may_push"]:
+                fail(f"Task {key} role may push, which is forbidden")
+            if not instruction.strip():
+                fail(f"Task {key} pipeline instruction is empty")
+            if not acceptance:
+                fail(f"Task {key} acceptance criteria are required")
+            if not isinstance(marker, str) or not marker.strip() or "\n" in marker:
+                fail(f"Task {key} marker must be one non-empty line")
+
+        if kind == "TEST_SLEEP":
+            duration = raw.get("duration_seconds", 1)
+            if not isinstance(duration, int) or not 1 <= duration <= 120:
+                fail(f"Task {key} duration_seconds must be 1..120")
+        else:
+            duration = None
+
+        normalized.append(
+            {
+                "key": key,
+                "kind": kind,
+                "project_id": project_id,
+                "role_id": role_id,
+                "instruction": instruction.strip(),
+                "acceptance_criteria": acceptance,
+                "marker": marker.strip() if marker else None,
+                "dependencies": dependencies,
+                "priority": priority,
+                "max_attempts": max_attempts,
+                "duration_seconds": duration,
+            }
+        )
+
+    for task in normalized:
+        unknown = set(task["dependencies"]) - keys
+        if unknown:
+            fail(
+                f"Task {task['key']} has unknown dependencies: "
+                + ", ".join(sorted(unknown))
+            )
+
+    order = topological_order(normalized)
+    by_key = {task["key"]: task for task in normalized}
+
+    # One project has writer concurrency 1. Independent write tasks on the
+    # same project would produce competing base commits, so every same-project
+    # PIPELINE pair must be dependency-ordered.
+    ancestors: dict[str, set[str]] = {key: set() for key in by_key}
+    for key in order:
+        for parent in by_key[key]["dependencies"]:
+            ancestors[key].add(parent)
+            ancestors[key].update(ancestors[parent])
+
+    pipeline_by_project: dict[str, list[str]] = {}
+    for task in normalized:
+        if task["kind"] == "PIPELINE":
+            pipeline_by_project.setdefault(task["project_id"], []).append(task["key"])
+
+    for project_id, project_tasks in pipeline_by_project.items():
+        for index, left in enumerate(project_tasks):
+            for right in project_tasks[index + 1 :]:
+                if left not in ancestors[right] and right not in ancestors[left]:
+                    fail(
+                        "Same-project PIPELINE tasks must be dependency-ordered: "
+                        f"{project_id}: {left}, {right}"
+                    )
+
+    ordered_tasks = [by_key[key] for key in order]
+
+    return {
+        "schema_version": 1,
+        "objective": objective.strip(),
+        "max_parallel_tasks": maximum,
+        "tasks": ordered_tasks,
+    }
+
+
+def insert_plan(
+    plan: dict[str, Any],
+    *,
+    source: str,
+    initial_status: str,
+) -> str:
+    if source not in {"AI", "DECLARATIVE", "TEST"}:
+        fail(f"Invalid plan source: {source}")
+    if initial_status not in {"DRAFT", "READY"}:
+        fail(f"Invalid initial plan status: {initial_status}")
+
+    plan_id = "plan-" + uuid.uuid4().hex
+    now = utc_now()
+    plan_text = canonical_json(plan)
+    digest = hashlib.sha256(plan_text.encode()).hexdigest()
+    task_ids = {
+        task["key"]: "orchestration-task-" + uuid.uuid4().hex
+        for task in plan["tasks"]
+    }
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            INSERT INTO orchestration_plans (
+                plan_id,
+                objective,
+                source,
+                planner_role_id,
+                status,
+                max_parallel_tasks,
+                plan_sha256,
+                plan_json,
+                created_at,
+                started_at,
+                heartbeat_at,
+                finished_at,
+                last_error
+            )
+            VALUES (?, ?, ?, 'orchestrator', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL)
+            """,
+            (
+                plan_id,
+                plan["objective"],
+                source,
+                initial_status,
+                plan["max_parallel_tasks"],
+                digest,
+                plan_text,
+                now,
+                now,
+            ),
+        )
+
+        for task in plan["tasks"]:
+            connection.execute(
+                """
+                INSERT INTO orchestration_tasks (
+                    orchestration_task_id,
+                    plan_id,
+                    task_key,
+                    kind,
+                    project_id,
+                    role_id,
+                    status,
+                    priority,
+                    instruction,
+                    acceptance_json,
+                    marker,
+                    max_attempts,
+                    attempt_count,
+                    result_json,
+                    failure_reason,
+                    created_at,
+                    started_at,
+                    heartbeat_at,
+                    finished_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, 0,
+                    '{}', NULL, ?, NULL, NULL, NULL
+                )
+                """,
+                (
+                    task_ids[task["key"]],
+                    plan_id,
+                    task["key"],
+                    task["kind"],
+                    task["project_id"],
+                    task["role_id"],
+                    task["priority"],
+                    task["instruction"],
+                    canonical_json(task["acceptance_criteria"]),
+                    task["marker"],
+                    task["max_attempts"],
+                    now,
+                ),
+            )
+
+        for task in plan["tasks"]:
+            for parent in task["dependencies"]:
+                connection.execute(
+                    """
+                    INSERT INTO orchestration_dependencies (
+                        plan_id,
+                        orchestration_task_id,
+                        depends_on_task_id,
+                        dependency_condition
+                    )
+                    VALUES (?, ?, ?, 'SUCCESS')
+                    """,
+                    (
+                        plan_id,
+                        task_ids[task["key"]],
+                        task_ids[parent],
+                    ),
+                )
+
+        connection.commit()
+
+    return plan_id
+
+
+def add_event(
+    connection: sqlite3.Connection,
+    *,
+    plan_id: str,
+    task_id: str | None,
+    event_type: str,
+    severity: str,
+    payload: dict[str, Any],
+) -> None:
+    # Orchestration events do not have a runs FK target, so plan identity is
+    # carried in payload_json and task_id remains NULL for the legacy table.
+    connection.execute(
+        """
+        INSERT INTO events (
+            project_id,
+            run_id,
+            task_id,
+            event_type,
+            severity,
+            payload_json,
+            created_at
+        )
+        VALUES (NULL, NULL, NULL, ?, ?, ?, ?)
+        """,
+        (
+            event_type,
+            severity,
+            canonical_json(
+                {
+                    "plan_id": plan_id,
+                    "orchestration_task_id": task_id,
+                    **payload,
+                }
+            ),
+            utc_now(),
+        ),
+    )
+
+
+def register_instance(owner: str) -> str:
+    instance_id = "orchestrator-instance-" + uuid.uuid4().hex
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            UPDATE orchestrator_instances
+            SET status = 'ABANDONED',
+                stopped_at = ?,
+                last_error = CASE
+                    WHEN last_error IS NULL OR last_error = ''
+                    THEN 'superseded after orchestrator restart'
+                    ELSE last_error
+                END
+            WHERE status IN ('STARTING', 'RUNNING')
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            INSERT INTO orchestrator_instances (
+                instance_id,
+                hostname,
+                pid,
+                owner,
+                version,
+                status,
+                started_at,
+                heartbeat_at,
+                stopped_at,
+                last_error
+            )
+            VALUES (?, ?, ?, ?, ?, 'STARTING', ?, ?, NULL, NULL)
+            """,
+            (
+                instance_id,
+                socket.gethostname(),
+                os.getpid(),
+                owner,
+                VERSION,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+
+    return instance_id
+
+
+def update_instance(
+    instance_id: str,
+    *,
+    status: str | None = None,
+    last_error: str | None = None,
+    stopped: bool = False,
+) -> None:
+    assignments = ["heartbeat_at = ?"]
+    parameters: list[Any] = [utc_now()]
+
+    if status is not None:
+        assignments.append("status = ?")
+        parameters.append(status)
+    if last_error is not None:
+        assignments.append("last_error = ?")
+        parameters.append(last_error)
+    if stopped:
+        assignments.append("stopped_at = ?")
+        parameters.append(utc_now())
+
+    parameters.append(instance_id)
+
+    with connect() as connection:
+        connection.execute(
+            f"""
+            UPDATE orchestrator_instances
+            SET {', '.join(assignments)}
+            WHERE instance_id = ?
+            """,
+            tuple(parameters),
+        )
+        connection.commit()
+
+
+def plan_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM orchestration_plans
+        GROUP BY status
+        """
+    ).fetchall()
+    return {row["status"]: int(row["count"]) for row in rows}
+
+
+def task_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM orchestration_tasks
+        GROUP BY status
+        """
+    ).fetchall()
+    return {row["status"]: int(row["count"]) for row in rows}
+
+
+def write_status(instance_id: str, *, message: str) -> None:
+    with connect() as connection:
+        plans = plan_counts(connection)
+        tasks = task_counts(connection)
+        latest = connection.execute(
+            """
+            SELECT plan_id, objective, status, heartbeat_at, last_error
+            FROM orchestration_plans
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    atomic_json(
+        STATUS_PATH,
+        {
+            "version": VERSION,
+            "instance_id": instance_id,
+            "pid": os.getpid(),
+            "lock_held": lock_is_held(),
+            "plan_counts": plans,
+            "task_counts": tasks,
+            "latest_plan": dict(latest) if latest else None,
+            "message": message,
+            "updated_at": utc_now(),
+        },
+    )
+
+
+def refresh_plan_states(plan_id: str) -> None:
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        plan = connection.execute(
+            "SELECT * FROM orchestration_plans WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()
+
+        if plan is None or plan["status"] in {
+            "DRAFT",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+        }:
+            connection.rollback()
+            return
+
+        tasks = connection.execute(
+            """
+            SELECT *
+            FROM orchestration_tasks
+            WHERE plan_id = ?
+            ORDER BY priority, created_at
+            """,
+            (plan_id,),
+        ).fetchall()
+
+        for task in tasks:
+            if task["status"] != "PENDING":
+                continue
+
+            parents = connection.execute(
+                """
+                SELECT parent.status
+                FROM orchestration_dependencies AS dependency
+                JOIN orchestration_tasks AS parent
+                  ON parent.orchestration_task_id = dependency.depends_on_task_id
+                WHERE dependency.orchestration_task_id = ?
+                """,
+                (task["orchestration_task_id"],),
+            ).fetchall()
+            parent_statuses = {row["status"] for row in parents}
+
+            if parent_statuses & {"FAILED", "BLOCKED", "CANCELLED"}:
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = 'BLOCKED',
+                        failure_reason = 'dependency did not complete successfully',
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE orchestration_task_id = ?
+                      AND status = 'PENDING'
+                    """,
+                    (now, now, task["orchestration_task_id"]),
+                )
+                add_event(
+                    connection,
+                    plan_id=plan_id,
+                    task_id=task["orchestration_task_id"],
+                    event_type="ORCHESTRATION_TASK_BLOCKED",
+                    severity="WARNING",
+                    payload={"reason": "dependency-failed"},
+                )
+            elif all(status == "COMPLETED" for status in parent_statuses):
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = 'READY',
+                        heartbeat_at = ?
+                    WHERE orchestration_task_id = ?
+                      AND status = 'PENDING'
+                    """,
+                    (now, task["orchestration_task_id"]),
+                )
+
+        statuses = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT status
+                FROM orchestration_tasks
+                WHERE plan_id = ?
+                """,
+                (plan_id,),
+            ).fetchall()
+        ]
+
+        if statuses and all(status == "COMPLETED" for status in statuses):
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'COMPLETED',
+                    heartbeat_at = ?,
+                    finished_at = ?,
+                    last_error = NULL
+                WHERE plan_id = ?
+                """,
+                (now, now, plan_id),
+            )
+            add_event(
+                connection,
+                plan_id=plan_id,
+                task_id=None,
+                event_type="ORCHESTRATION_PLAN_COMPLETED",
+                severity="INFO",
+                payload={},
+            )
+        elif any(
+            status in {"FAILED", "BLOCKED", "CANCELLED"}
+            for status in statuses
+        ) and not any(
+            status in {"READY", "RUNNING", "PENDING"}
+            for status in statuses
+        ):
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'FAILED',
+                    heartbeat_at = ?,
+                    finished_at = ?,
+                    last_error = 'one or more tasks failed'
+                WHERE plan_id = ?
+                """,
+                (now, now, plan_id),
+            )
+            add_event(
+                connection,
+                plan_id=plan_id,
+                task_id=None,
+                event_type="ORCHESTRATION_PLAN_FAILED",
+                severity="ERROR",
+                payload={},
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = CASE
+                        WHEN status = 'READY' THEN 'RUNNING'
+                        ELSE status
+                    END,
+                    started_at = COALESCE(started_at, ?),
+                    heartbeat_at = ?
+                WHERE plan_id = ?
+                """,
+                (now, now, plan_id),
+            )
+
+        connection.commit()
+
+
+def reserve_attempt(
+    task_id: str,
+    *,
+    instance_id: str,
+) -> tuple[str, int, sqlite3.Row]:
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        task = connection.execute(
+            "SELECT * FROM orchestration_tasks WHERE orchestration_task_id = ?",
+            (task_id,),
+        ).fetchone()
+
+        if task is None:
+            connection.rollback()
+            fail(f"Unknown orchestration task: {task_id}")
+        if task["status"] != "READY":
+            connection.rollback()
+            fail(f"Task cannot start from status {task['status']}")
+        if task["attempt_count"] >= task["max_attempts"]:
+            connection.rollback()
+            fail("Task attempt budget is exhausted")
+
+        attempt_number = int(task["attempt_count"]) + 1
+        attempt_id = "orchestration-attempt-" + uuid.uuid4().hex
+        updated = connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status = 'RUNNING',
+                attempt_count = ?,
+                started_at = COALESCE(started_at, ?),
+                heartbeat_at = ?,
+                failure_reason = NULL
+            WHERE orchestration_task_id = ?
+              AND status = 'READY'
+            """,
+            (attempt_number, now, now, task_id),
+        ).rowcount
+
+        if updated != 1:
+            connection.rollback()
+            fail("Task reservation lost a concurrent race")
+
+        connection.execute(
+            """
+            INSERT INTO orchestration_attempts (
+                attempt_id,
+                orchestration_task_id,
+                attempt_number,
+                status,
+                executor_instance_id,
+                run_id,
+                worker_execution_id,
+                review_execution_id,
+                integration_id,
+                result_json,
+                failure_reason,
+                started_at,
+                heartbeat_at,
+                finished_at
+            )
+            VALUES (?, ?, ?, 'RUNNING', ?, NULL, NULL, NULL, NULL,
+                    '{}', NULL, ?, ?, NULL)
+            """,
+            (
+                attempt_id,
+                task_id,
+                attempt_number,
+                instance_id,
+                now,
+                now,
+            ),
+        )
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task_id,
+            event_type="ORCHESTRATION_TASK_STARTED",
+            severity="INFO",
+            payload={
+                "attempt_id": attempt_id,
+                "attempt_number": attempt_number,
+                "kind": task["kind"],
+            },
+        )
+        connection.commit()
+
+    return attempt_id, attempt_number, task
+
+
+def heartbeat_attempt(
+    task_id: str,
+    attempt_id: str,
+    stop_event: threading.Event,
+    seconds: int,
+) -> None:
+    while not stop_event.wait(seconds):
+        now = utc_now()
+        try:
+            with connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET heartbeat_at = ?
+                    WHERE orchestration_task_id = ?
+                      AND status = 'RUNNING'
+                    """,
+                    (now, task_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET heartbeat_at = ?
+                    WHERE attempt_id = ?
+                      AND status = 'RUNNING'
+                    """,
+                    (now, attempt_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE orchestration_plans
+                    SET heartbeat_at = ?
+                    WHERE plan_id = (
+                        SELECT plan_id
+                        FROM orchestration_tasks
+                        WHERE orchestration_task_id = ?
+                    )
+                    """,
+                    (now, task_id),
+                )
+                connection.commit()
+        except sqlite3.Error:
+            continue
+
+
+def set_attempt_links(
+    attempt_id: str,
+    *,
+    run_id: str | None = None,
+    worker_execution_id: str | None = None,
+    review_execution_id: str | None = None,
+    integration_id: str | None = None,
+) -> None:
+    assignments: list[str] = []
+    parameters: list[Any] = []
+
+    for column, value in (
+        ("run_id", run_id),
+        ("worker_execution_id", worker_execution_id),
+        ("review_execution_id", review_execution_id),
+        ("integration_id", integration_id),
+    ):
+        if value is not None:
+            assignments.append(f"{column} = ?")
+            parameters.append(value)
+
+    if not assignments:
+        return
+
+    assignments.append("heartbeat_at = ?")
+    parameters.append(utc_now())
+    parameters.append(attempt_id)
+
+    with connect() as connection:
+        connection.execute(
+            f"""
+            UPDATE orchestration_attempts
+            SET {', '.join(assignments)}
+            WHERE attempt_id = ?
+            """,
+            tuple(parameters),
+        )
+        connection.commit()
+
+
+def finish_task_success(
+    task: sqlite3.Row,
+    attempt_id: str,
+    result: dict[str, Any],
+) -> None:
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            UPDATE orchestration_attempts
+            SET status = 'COMPLETED',
+                result_json = ?,
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE attempt_id = ?
+              AND status = 'RUNNING'
+            """,
+            (canonical_json(result), now, now, attempt_id),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status = 'COMPLETED',
+                result_json = ?,
+                failure_reason = NULL,
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE orchestration_task_id = ?
+              AND status = 'RUNNING'
+            """,
+            (
+                canonical_json(result),
+                now,
+                now,
+                task["orchestration_task_id"],
+            ),
+        )
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task["orchestration_task_id"],
+            event_type="ORCHESTRATION_TASK_COMPLETED",
+            severity="INFO",
+            payload={"attempt_id": attempt_id},
+        )
+        connection.commit()
+
+
+def rollback_run_best_effort(run_id: str | None, timeout: int) -> None:
+    if not run_id:
+        return
+
+    try:
+        with connect() as connection:
+            run = connection.execute(
+                "SELECT status FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+
+        if run is not None and run["status"] in ACTIVE_RUN_STATUSES | {"FAILED"}:
+            run_command(
+                [str(TRANSACTION), "rollback", "--run", run_id],
+                timeout=timeout,
+                check=False,
+            )
+    except Exception:
+        return
+
+
+def finish_task_failure(
+    task: sqlite3.Row,
+    attempt_id: str,
+    error: str,
+) -> None:
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            """
+            SELECT attempt_count, max_attempts, status
+            FROM orchestration_tasks
+            WHERE orchestration_task_id = ?
+            """,
+            (task["orchestration_task_id"],),
+        ).fetchone()
+
+        if current is None:
+            connection.rollback()
+            return
+
+        connection.execute(
+            """
+            UPDATE orchestration_attempts
+            SET status = 'FAILED',
+                failure_reason = ?,
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE attempt_id = ?
+              AND status = 'RUNNING'
+            """,
+            (error, now, now, attempt_id),
+        )
+
+        retry = int(current["attempt_count"]) < int(current["max_attempts"])
+        next_status = "READY" if retry else "FAILED"
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status = ?,
+                failure_reason = ?,
+                heartbeat_at = ?,
+                finished_at = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END
+            WHERE orchestration_task_id = ?
+            """,
+            (
+                next_status,
+                error,
+                now,
+                next_status,
+                now,
+                task["orchestration_task_id"],
+            ),
+        )
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task["orchestration_task_id"],
+            event_type=(
+                "ORCHESTRATION_TASK_RETRY"
+                if retry
+                else "ORCHESTRATION_TASK_FAILED"
+            ),
+            severity="WARNING" if retry else "ERROR",
+            payload={
+                "attempt_id": attempt_id,
+                "failure_reason": error,
+                "retry": retry,
+            },
+        )
+        connection.commit()
+
+
+def read_log_tail(path_value: str | None, limit: int = 32768) -> str:
+    if not path_value:
+        return ""
+
+    path = Path(path_value)
+    try:
+        if not path.is_file():
+            return ""
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - limit), os.SEEK_SET)
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def latest_reviewer_evidence(run_id: str) -> dict[str, Any]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                execution_id,
+                task_id,
+                runtime_profile,
+                outer_container_name,
+                sandbox_container_id,
+                output_path,
+                failure_reason,
+                exit_code,
+                created_at,
+                finished_at
+            FROM reviewer_executions
+            WHERE run_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+
+    if row is None:
+        return {}
+
+    evidence = dict(row)
+    evidence["log_tail"] = read_log_tail(evidence.get("output_path"))
+    return evidence
+
+
+def is_transient_review_transport_failure(
+    error: BaseException,
+    evidence: dict[str, Any],
+) -> bool:
+    combined = "\n".join(
+        str(value)
+        for value in (
+            error,
+            evidence.get("failure_reason"),
+            evidence.get("log_tail"),
+        )
+        if value
+    ).lower()
+
+    exact_signatures = (
+        "codex stream produced no sse events",
+        "connection reset by peer",
+        "server disconnected",
+        "temporarily unavailable",
+        "service unavailable",
+        "gateway timeout",
+        "bad gateway",
+        "too many requests",
+        "rate limit",
+    )
+    return any(signature in combined for signature in exact_signatures)
+
+
+def contained_path(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def cleanup_reviewer_resources(
+    evidence: dict[str, Any],
+    *,
+    timeout: int,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+
+    def record(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            result = run_command(
+                arguments,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception as error:
+            result = subprocess.CompletedProcess(
+                arguments,
+                1,
+                "",
+                str(error),
+            )
+
+        actions.append(
+            {
+                "arguments": arguments,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+        )
+        return result
+
+    outer = str(
+        evidence.get("outer_container_name")
+        or evidence.get("outer_container")
+        or ""
+    )
+    if re.fullmatch(r"hermesops-reviewer-[a-f0-9]{12}", outer):
+        record(["docker", "rm", "-f", outer])
+
+    sandbox = str(evidence.get("sandbox_container_id") or "")
+    if re.fullmatch(r"[a-f0-9]{12,64}", sandbox):
+        record(
+            [
+                "docker",
+                "exec",
+                "hermesops-sandbox-engine",
+                "docker",
+                "rm",
+                "-f",
+                sandbox,
+            ]
+        )
+
+    profile = str(evidence.get("runtime_profile") or "")
+    if re.fullmatch(r"runtime-reviewer-[a-f0-9]{12}", profile):
+        listed = record(
+            [
+                "docker",
+                "exec",
+                "hermesops-sandbox-engine",
+                "docker",
+                "ps",
+                "-aq",
+                "--filter",
+                f"label=hermes-profile={profile}",
+            ]
+        )
+        for container_id in listed.stdout.split():
+            if re.fullmatch(r"[a-f0-9]{12,64}", container_id):
+                record(
+                    [
+                        "docker",
+                        "exec",
+                        "hermesops-sandbox-engine",
+                        "docker",
+                        "rm",
+                        "-f",
+                        container_id,
+                    ]
+                )
+
+        profile_root = ROOT / "state/hermes-home/profiles"
+        profile_path = profile_root / profile
+        if contained_path(profile_path, profile_root):
+            shutil.rmtree(profile_path, ignore_errors=True)
+            actions.append(
+                {
+                    "action": "remove_runtime_profile",
+                    "path": str(profile_path),
+                }
+            )
+
+    task_id = str(evidence.get("task_id") or "")
+    if re.fullmatch(r"task-[a-f0-9]{32}", task_id):
+        clone_root = ROOT / "workspaces/.hermesops-reviewer-clones"
+        if clone_root.is_dir():
+            for candidate in clone_root.rglob(task_id):
+                if (
+                    candidate.name == task_id
+                    and contained_path(candidate, clone_root)
+                ):
+                    shutil.rmtree(candidate, ignore_errors=True)
+                    actions.append(
+                        {
+                            "action": "remove_reviewer_clone",
+                            "path": str(candidate),
+                        }
+                    )
+
+    return actions
+
+
+def record_review_retry(
+    task: sqlite3.Row,
+    *,
+    attempt_id: str,
+    run_id: str,
+    review_attempt: int,
+    evidence: dict[str, Any],
+    cleanup_actions: list[dict[str, Any]],
+) -> None:
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task["orchestration_task_id"],
+            event_type="ORCHESTRATION_REVIEW_TRANSPORT_RETRY",
+            severity="WARNING",
+            payload={
+                "attempt_id": attempt_id,
+                "run_id": run_id,
+                "review_attempt": review_attempt,
+                "review_execution_id": evidence.get("execution_id"),
+                "review_task_id": evidence.get("task_id"),
+                "failure_reason": evidence.get("failure_reason"),
+                "output_path": evidence.get("output_path"),
+                "cleanup_actions": cleanup_actions,
+            },
+        )
+        connection.commit()
+
+
+def launch_reviewer_with_transport_retry(
+    task: sqlite3.Row,
+    *,
+    attempt_id: str,
+    run_id: str,
+    review_path: Path,
+    config: dict[str, int],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    marker = "HERMESOPS_ORCHESTRATION_REVIEW_OK"
+    failures: list[dict[str, Any]] = []
+    attempts = config["review_transport_attempts"]
+
+    arguments = [
+        str(REVIEWER),
+        "launch",
+        "--run",
+        run_id,
+        "--role",
+        "reviewer",
+        "--instruction-file",
+        str(review_path),
+        "--marker",
+        marker,
+        "--timeout",
+        str(config["review_timeout_seconds"]),
+    ]
+
+    for review_attempt in range(1, attempts + 1):
+        try:
+            reviewer = run_json(
+                arguments,
+                timeout=config["review_timeout_seconds"] + 120,
+            )
+            evidence = latest_reviewer_evidence(run_id)
+            cleanup_actions = cleanup_reviewer_resources(
+                evidence,
+                timeout=config["command_timeout_seconds"],
+            )
+            return reviewer, failures, cleanup_actions
+        except CommandExecutionError as error:
+            evidence = latest_reviewer_evidence(run_id)
+            transient = is_transient_review_transport_failure(error, evidence)
+            failure = {
+                "review_attempt": review_attempt,
+                "transient": transient,
+                "command_returncode": error.returncode,
+                "command_stderr": error.stderr.strip(),
+                "review_execution_id": evidence.get("execution_id"),
+                "review_task_id": evidence.get("task_id"),
+                "failure_reason": evidence.get("failure_reason"),
+                "output_path": evidence.get("output_path"),
+                "log_tail": evidence.get("log_tail"),
+            }
+
+            if not transient:
+                raise
+
+            cleanup_actions = cleanup_reviewer_resources(
+                evidence,
+                timeout=config["command_timeout_seconds"],
+            )
+            failure["cleanup_actions"] = cleanup_actions
+            failures.append(failure)
+
+            if review_attempt >= attempts:
+                fail(
+                    "Reviewer transport failed after "
+                    f"{attempts} controlled attempts: "
+                    + canonical_json(failures)
+                )
+
+            record_review_retry(
+                task,
+                attempt_id=attempt_id,
+                run_id=run_id,
+                review_attempt=review_attempt,
+                evidence=evidence,
+                cleanup_actions=cleanup_actions,
+            )
+            time.sleep(
+                config["review_retry_backoff_seconds"] * review_attempt
+            )
+
+    fail("Reviewer transport retry loop exited unexpectedly")
+
+
+def build_review_instruction(task: sqlite3.Row) -> str:
+    acceptance = json.loads(task["acceptance_json"])
+    numbered = "\n".join(
+        f"{index}. {criterion}"
+        for index, criterion in enumerate(acceptance, start=1)
+    )
+    return f"""Review the exact transaction result for orchestration task {task['task_key']}.
+
+Acceptance criteria:
+{numbered}
+
+Use read-only Git commands and verify the actual diff, commit ancestry,
+repository cleanliness, branch identity, and absence of unrelated changes or
+remotes. Return APPROVE/PASS only when every criterion is satisfied. Return
+REJECT with the appropriate non-pass verdict for a correctable defect, or
+BLOCK_HUMAN/HUMAN for an ambiguity that cannot be resolved safely.
+"""
+
+
+def execute_pipeline(
+    task: sqlite3.Row,
+    attempt_id: str,
+    instance_id: str,
+    config: dict[str, int],
+) -> dict[str, Any]:
+    task_directory = (
+        RUNTIME
+        / "plans"
+        / task["plan_id"]
+        / task["task_key"]
+        / attempt_id
+    )
+    task_directory.mkdir(parents=True, mode=0o750)
+    instruction_path = task_directory / "worker-instruction.txt"
+    review_path = task_directory / "review-instruction.txt"
+    instruction_path.write_text(task["instruction"] + "\n", encoding="utf-8")
+    instruction_path.chmod(0o600)
+    review_path.write_text(build_review_instruction(task), encoding="utf-8")
+    review_path.chmod(0o600)
+
+    owner = f"orchestrator:{instance_id}:{task['task_key']}"
+    begin = run_json(
+        [
+            str(TRANSACTION),
+            "begin",
+            "--project",
+            task["project_id"],
+            "--owner",
+            owner,
+            "--metadata-json",
+            canonical_json(
+                {
+                    "plan_id": task["plan_id"],
+                    "orchestration_task_id": task["orchestration_task_id"],
+                    "task_key": task["task_key"],
+                    "attempt_id": attempt_id,
+                }
+            ),
+        ],
+        timeout=config["command_timeout_seconds"],
+    )
+    run_id = begin["run_id"]
+    set_attempt_links(attempt_id, run_id=run_id)
+
+    try:
+        worker = run_json(
+            [
+                str(WORKER),
+                "launch",
+                "--run",
+                run_id,
+                "--role",
+                task["role_id"],
+                "--instruction-file",
+                str(instruction_path),
+                "--marker",
+                task["marker"],
+                "--timeout",
+                str(config["worker_timeout_seconds"]),
+            ],
+            timeout=config["worker_timeout_seconds"] + 120,
+        )
+        set_attempt_links(
+            attempt_id,
+            worker_execution_id=worker["execution_id"],
+        )
+
+        submitted = run_json(
+            [str(TRANSACTION), "submit", "--run", run_id],
+            timeout=config["command_timeout_seconds"],
+        )
+
+        reviewer, review_transport_failures, reviewer_cleanup = (
+            launch_reviewer_with_transport_retry(
+                task,
+                attempt_id=attempt_id,
+                run_id=run_id,
+                review_path=review_path,
+                config=config,
+            )
+        )
+        set_attempt_links(
+            attempt_id,
+            review_execution_id=reviewer["execution_id"],
+        )
+
+        integration = run_json(
+            [
+                str(INTEGRATOR),
+                "apply",
+                "--run",
+                run_id,
+                "--owner",
+                owner,
+            ],
+            timeout=config["command_timeout_seconds"],
+        )
+        set_attempt_links(
+            attempt_id,
+            integration_id=integration["integration_id"],
+        )
+
+        if integration.get("status") != "COMPLETED" or not integration.get("integrated"):
+            fail(
+                "Pipeline was not integrated: "
+                + canonical_json(integration)
+            )
+
+        return {
+            "kind": "PIPELINE",
+            "run_id": run_id,
+            "worker": worker,
+            "submitted": submitted,
+            "reviewer": reviewer,
+            "review_transport_failures": review_transport_failures,
+            "reviewer_cleanup": reviewer_cleanup,
+            "integration": integration,
+        }
+    except Exception:
+        rollback_run_best_effort(run_id, config["command_timeout_seconds"])
+        raise
+
+
+def execute_task(
+    task_id: str,
+    *,
+    instance_id: str,
+    config: dict[str, int],
+) -> None:
+    attempt_id, _, task = reserve_attempt(
+        task_id,
+        instance_id=instance_id,
+    )
+    heartbeat_stop = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_attempt,
+        args=(
+            task["orchestration_task_id"],
+            attempt_id,
+            heartbeat_stop,
+            config["heartbeat_seconds"],
+        ),
+        daemon=True,
+    )
+    heartbeat_thread.start()
+
+    try:
+        kind = task["kind"]
+
+        if kind == "NOOP":
+            result = {"kind": kind, "completed_at": utc_now()}
+        elif kind == "TEST_SLEEP":
+            with connect() as connection:
+                plan_row = connection.execute(
+                    "SELECT plan_json FROM orchestration_plans WHERE plan_id = ?",
+                    (task["plan_id"],),
+                ).fetchone()
+            if plan_row is None:
+                fail(f"Unknown plan during task execution: {task['plan_id']}")
+            plan = json.loads(plan_row[0])
+            raw = next(
+                item for item in plan["tasks"]
+                if item["key"] == task["task_key"]
+            )
+            duration = int(raw["duration_seconds"])
+            time.sleep(duration)
+            result = {
+                "kind": kind,
+                "duration_seconds": duration,
+                "completed_at": utc_now(),
+            }
+        elif kind == "TEST_FAIL":
+            fail(f"Synthetic failure requested by task {task['task_key']}")
+        elif kind == "PIPELINE":
+            result = execute_pipeline(
+                task,
+                attempt_id,
+                instance_id,
+                config,
+            )
+        else:
+            fail(f"Unhandled task kind: {kind}")
+
+        finish_task_success(task, attempt_id, result)
+    except Exception as error:
+        finish_task_failure(task, attempt_id, str(error))
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2)
+        refresh_plan_states(task["plan_id"])
+
+
+def reconcile_interrupted_tasks(instance_id: str) -> None:
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        tasks = connection.execute(
+            """
+            SELECT t.*, a.attempt_id, a.run_id, a.attempt_number
+            FROM orchestration_tasks AS t
+            LEFT JOIN orchestration_attempts AS a
+              ON a.orchestration_task_id = t.orchestration_task_id
+             AND a.status = 'RUNNING'
+            WHERE t.status = 'RUNNING'
+            """
+        ).fetchall()
+
+        for task in tasks:
+            if task["attempt_id"] is None:
+                next_status = (
+                    "READY"
+                    if task["attempt_count"] < task["max_attempts"]
+                    else "FAILED"
+                )
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = ?,
+                        failure_reason = 'missing running attempt after restart',
+                        heartbeat_at = ?,
+                        finished_at = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END
+                    WHERE orchestration_task_id = ?
+                    """,
+                    (
+                        next_status,
+                        now,
+                        next_status,
+                        now,
+                        task["orchestration_task_id"],
+                    ),
+                )
+                continue
+
+            if task["kind"] != "PIPELINE":
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET status = 'ABANDONED',
+                        failure_reason = 'orchestrator process restarted',
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE attempt_id = ?
+                      AND status = 'RUNNING'
+                    """,
+                    (now, now, task["attempt_id"]),
+                )
+                retry = task["attempt_count"] < task["max_attempts"]
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = ?,
+                        failure_reason = 'rescheduled after orchestrator restart',
+                        heartbeat_at = ?,
+                        finished_at = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END
+                    WHERE orchestration_task_id = ?
+                    """,
+                    (
+                        "READY" if retry else "FAILED",
+                        now,
+                        "READY" if retry else "FAILED",
+                        now,
+                        task["orchestration_task_id"],
+                    ),
+                )
+                continue
+
+            if task["run_id"] is None:
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET status = 'ABANDONED',
+                        failure_reason = 'pipeline restart before transaction reservation',
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (now, now, task["attempt_id"]),
+                )
+                retry = task["attempt_count"] < task["max_attempts"]
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = ?,
+                        failure_reason = 'pipeline rescheduled after restart',
+                        heartbeat_at = ?
+                    WHERE orchestration_task_id = ?
+                    """,
+                    (
+                        "READY" if retry else "FAILED",
+                        now,
+                        task["orchestration_task_id"],
+                    ),
+                )
+                continue
+
+            run = connection.execute(
+                "SELECT status FROM runs WHERE run_id = ?",
+                (task["run_id"],),
+            ).fetchone()
+
+            if run is None or run["status"] in {"CANCELLED", "FAILED"}:
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET status = 'ABANDONED',
+                        failure_reason = 'pipeline run is terminal after restart',
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (now, now, task["attempt_id"]),
+                )
+                retry = task["attempt_count"] < task["max_attempts"]
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = ?,
+                        failure_reason = 'pipeline run did not complete',
+                        heartbeat_at = ?,
+                        finished_at = CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END
+                    WHERE orchestration_task_id = ?
+                    """,
+                    (
+                        "READY" if retry else "FAILED",
+                        now,
+                        "READY" if retry else "FAILED",
+                        now,
+                        task["orchestration_task_id"],
+                    ),
+                )
+            elif run["status"] == "COMPLETED":
+                integration = connection.execute(
+                    """
+                    SELECT integration_id, result_json
+                    FROM orchestration_attempts
+                    WHERE attempt_id = ?
+                    """,
+                    (task["attempt_id"],),
+                ).fetchone()
+                result = {
+                    "kind": "PIPELINE",
+                    "run_id": task["run_id"],
+                    "reconciled_after_restart": True,
+                    "integration_id": (
+                        integration["integration_id"]
+                        if integration else None
+                    ),
+                }
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET status = 'COMPLETED',
+                        result_json = ?,
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (
+                        canonical_json(result),
+                        now,
+                        now,
+                        task["attempt_id"],
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE orchestration_tasks
+                    SET status = 'COMPLETED',
+                        result_json = ?,
+                        failure_reason = NULL,
+                        heartbeat_at = ?,
+                        finished_at = ?
+                    WHERE orchestration_task_id = ?
+                    """,
+                    (
+                        canonical_json(result),
+                        now,
+                        now,
+                        task["orchestration_task_id"],
+                    ),
+                )
+            else:
+                # The deterministic Recovery Manager owns active pipeline
+                # reconciliation. Keep the task RUNNING and never duplicate it.
+                connection.execute(
+                    """
+                    UPDATE orchestration_attempts
+                    SET executor_instance_id = ?,
+                        heartbeat_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (instance_id, now, task["attempt_id"]),
+                )
+
+        connection.commit()
+
+    with connect() as connection:
+        plan_ids = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT plan_id
+                FROM orchestration_tasks
+                WHERE status IN ('PENDING', 'READY', 'RUNNING', 'BLOCKED', 'FAILED')
+                """
+            ).fetchall()
+        ]
+
+    for plan_id in plan_ids:
+        refresh_plan_states(plan_id)
+
+
+def supervisor_is_healthy() -> bool:
+    try:
+        payload = json.loads(
+            SUPERVISOR_STATUS_PATH.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    return bool(
+        payload.get("lock_held")
+        and (payload.get("health") or {}).get("healthy")
+    )
+
+
+def project_is_busy(
+    connection: sqlite3.Connection,
+    project_id: str | None,
+    task_id: str,
+) -> bool:
+    if project_id is None:
+        return False
+
+    count = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM orchestration_tasks
+        WHERE project_id = ?
+          AND kind = 'PIPELINE'
+          AND status = 'RUNNING'
+          AND orchestration_task_id <> ?
+        """,
+        (project_id, task_id),
+    ).fetchone()[0]
+    return int(count) > 0
+
+
+def runnable_tasks(
+    active_task_ids: set[str],
+    *,
+    capacity: int,
+) -> list[str]:
+    if capacity <= 0:
+        return []
+
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                task.*,
+                plan.max_parallel_tasks,
+                plan.status AS plan_status
+            FROM orchestration_tasks AS task
+            JOIN orchestration_plans AS plan
+              ON plan.plan_id = task.plan_id
+            WHERE task.status = 'READY'
+              AND plan.status IN ('READY', 'RUNNING')
+            ORDER BY task.priority, task.created_at
+            """
+        ).fetchall()
+
+        selected: list[str] = []
+        selected_projects: set[str] = set()
+        per_plan_running: dict[str, int] = {}
+        pipeline_health_ready = supervisor_is_healthy()
+
+        for row in rows:
+            task_id = row["orchestration_task_id"]
+            if task_id in active_task_ids:
+                continue
+            if row["kind"] == "PIPELINE" and not pipeline_health_ready:
+                continue
+
+            plan_id = row["plan_id"]
+            if plan_id not in per_plan_running:
+                per_plan_running[plan_id] = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM orchestration_tasks
+                        WHERE plan_id = ?
+                          AND status = 'RUNNING'
+                        """,
+                        (plan_id,),
+                    ).fetchone()[0]
+                )
+
+            if per_plan_running[plan_id] >= int(row["max_parallel_tasks"]):
+                continue
+            if project_is_busy(connection, row["project_id"], task_id):
+                continue
+            if row["project_id"] is not None and row["project_id"] in selected_projects:
+                continue
+
+            selected.append(task_id)
+            if row["project_id"] is not None:
+                selected_projects.add(row["project_id"])
+            per_plan_running[plan_id] += 1
+
+            if len(selected) >= capacity:
+                break
+
+    return selected
+
+
+def active_plan_ids() -> list[str]:
+    with connect() as connection:
+        return [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT plan_id
+                FROM orchestration_plans
+                WHERE status IN ('READY', 'RUNNING', 'BLOCKED')
+                ORDER BY created_at
+                """
+            ).fetchall()
+        ]
+
+
+def daemon_loop(arguments: argparse.Namespace) -> None:
+    config = load_config()
+    lock = acquire_lock()
+
+    if lock is None:
+        print(
+            canonical_json(
+                {"status": "LOCKED", "lock_path": str(LOCK_PATH)}
+            ),
+            file=sys.stderr,
+        )
+        raise SystemExit(75)
+
+    owner = arguments.owner or f"ops-orchestrator:{socket.gethostname()}"
+    instance_id = register_instance(owner)
+    stop_event = threading.Event()
+
+    def request_stop(signum: int, _: Any) -> None:
+        print(
+            canonical_json(
+                {
+                    "event": "signal",
+                    "signal": signum,
+                    "instance_id": instance_id,
+                }
+            ),
+            flush=True,
+        )
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=config["global_parallel_tasks"],
+        thread_name_prefix="hermesops-task",
+    )
+    futures: dict[concurrent.futures.Future[None], str] = {}
+
+    try:
+        update_instance(instance_id, status="RUNNING")
+        reconcile_interrupted_tasks(instance_id)
+        write_status(instance_id, message="orchestrator started")
+
+        while not stop_event.is_set():
+            update_instance(instance_id)
+
+            for plan_id in active_plan_ids():
+                refresh_plan_states(plan_id)
+
+            completed = [future for future in futures if future.done()]
+            for future in completed:
+                task_id = futures.pop(future)
+                try:
+                    future.result()
+                except Exception as error:
+                    print(
+                        canonical_json(
+                            {
+                                "event": "executor-error",
+                                "task_id": task_id,
+                                "error": str(error),
+                            }
+                        ),
+                        flush=True,
+                    )
+
+            capacity = config["global_parallel_tasks"] - len(futures)
+            active_ids = set(futures.values())
+            for task_id in runnable_tasks(active_ids, capacity=capacity):
+                future = executor.submit(
+                    execute_task,
+                    task_id,
+                    instance_id=instance_id,
+                    config=config,
+                )
+                futures[future] = task_id
+
+            write_status(instance_id, message="scheduler sweep complete")
+            stop_event.wait(config["poll_seconds"])
+
+        # Graceful service stops wait for current tasks. SIGKILL is validated
+        # separately and is recovered from durable task/attempt records.
+        executor.shutdown(wait=True, cancel_futures=False)
+        update_instance(instance_id, status="STOPPED", stopped=True)
+        write_status(instance_id, message="orchestrator stopped cleanly")
+    except BaseException as error:
+        try:
+            update_instance(
+                instance_id,
+                status="FAILED",
+                last_error=str(error),
+                stopped=True,
+            )
+            write_status(instance_id, message=str(error))
+        except Exception:
+            pass
+        raise
+    finally:
+        lock.close()
+
+
+def plan_status_payload(plan_id: str) -> dict[str, Any]:
+    with connect() as connection:
+        plan = connection.execute(
+            "SELECT * FROM orchestration_plans WHERE plan_id = ?",
+            (plan_id,),
+        ).fetchone()
+        if plan is None:
+            fail(f"Unknown orchestration plan: {plan_id}")
+
+        tasks = connection.execute(
+            """
+            SELECT *
+            FROM orchestration_tasks
+            WHERE plan_id = ?
+            ORDER BY priority, created_at
+            """,
+            (plan_id,),
+        ).fetchall()
+        dependencies = connection.execute(
+            """
+            SELECT
+                child.task_key AS task_key,
+                parent.task_key AS depends_on
+            FROM orchestration_dependencies AS dependency
+            JOIN orchestration_tasks AS child
+              ON child.orchestration_task_id = dependency.orchestration_task_id
+            JOIN orchestration_tasks AS parent
+              ON parent.orchestration_task_id = dependency.depends_on_task_id
+            WHERE dependency.plan_id = ?
+            ORDER BY child.task_key, parent.task_key
+            """,
+            (plan_id,),
+        ).fetchall()
+        attempts = connection.execute(
+            """
+            SELECT attempt.*
+            FROM orchestration_attempts AS attempt
+            JOIN orchestration_tasks AS task
+              ON task.orchestration_task_id = attempt.orchestration_task_id
+            WHERE task.plan_id = ?
+            ORDER BY attempt.started_at
+            """,
+            (plan_id,),
+        ).fetchall()
+
+    dependency_map: dict[str, list[str]] = {}
+    for row in dependencies:
+        dependency_map.setdefault(row["task_key"], []).append(row["depends_on"])
+
+    task_payload = []
+    for task in tasks:
+        item = dict(task)
+        item["dependencies"] = dependency_map.get(task["task_key"], [])
+        item["acceptance_criteria"] = json.loads(item.pop("acceptance_json"))
+        item["result"] = json.loads(item.pop("result_json"))
+        task_payload.append(item)
+
+    attempt_payload = []
+    for attempt in attempts:
+        item = dict(attempt)
+        item["result"] = json.loads(item.pop("result_json"))
+        attempt_payload.append(item)
+
+    plan_item = dict(plan)
+    plan_item["plan"] = json.loads(plan_item.pop("plan_json"))
+    return {
+        "plan": plan_item,
+        "tasks": task_payload,
+        "attempts": attempt_payload,
+    }
+
+
+def command_import(arguments: argparse.Namespace) -> None:
+    path = Path(arguments.plan_file).resolve()
+    plan = validate_plan(
+        load_json_file(path),
+        allow_test_actions=arguments.allow_test_actions,
+    )
+    source = "TEST" if arguments.allow_test_actions else "DECLARATIVE"
+    plan_id = insert_plan(
+        plan,
+        source=source,
+        initial_status=arguments.status,
+    )
+    print(json.dumps(plan_status_payload(plan_id), indent=2, sort_keys=True))
+
+
+def command_activate(arguments: argparse.Namespace) -> None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        updated = connection.execute(
+            """
+            UPDATE orchestration_plans
+            SET status = 'READY',
+                heartbeat_at = ?,
+                last_error = NULL
+            WHERE plan_id = ?
+              AND status = 'DRAFT'
+            """,
+            (now, arguments.plan),
+        ).rowcount
+        if updated != 1:
+            connection.rollback()
+            fail("Plan can only be activated from DRAFT")
+        connection.commit()
+
+    refresh_plan_states(arguments.plan)
+    print(json.dumps(plan_status_payload(arguments.plan), indent=2, sort_keys=True))
+
+
+def command_cancel(arguments: argparse.Namespace) -> None:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        plan = connection.execute(
+            "SELECT status FROM orchestration_plans WHERE plan_id = ?",
+            (arguments.plan,),
+        ).fetchone()
+        if plan is None:
+            connection.rollback()
+            fail(f"Unknown plan: {arguments.plan}")
+        if plan["status"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+            connection.rollback()
+            fail(f"Plan is already terminal: {plan['status']}")
+
+        running = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM orchestration_tasks
+            WHERE plan_id = ? AND status = 'RUNNING'
+            """,
+            (arguments.plan,),
+        ).fetchone()[0]
+        if running:
+            connection.rollback()
+            fail("Cannot cancel a plan while a task is RUNNING")
+
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status = 'CANCELLED',
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE plan_id = ?
+              AND status IN ('PENDING', 'READY', 'BLOCKED')
+            """,
+            (now, now, arguments.plan),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_plans
+            SET status = 'CANCELLED',
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE plan_id = ?
+            """,
+            (now, now, arguments.plan),
+        )
+        connection.commit()
+
+    print(json.dumps(plan_status_payload(arguments.plan), indent=2, sort_keys=True))
+
+
+def command_status(arguments: argparse.Namespace) -> None:
+    print(json.dumps(plan_status_payload(arguments.plan), indent=2, sort_keys=True))
+
+
+def command_list(_: argparse.Namespace) -> None:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                plan.plan_id,
+                plan.objective,
+                plan.source,
+                plan.status,
+                plan.max_parallel_tasks,
+                plan.created_at,
+                plan.started_at,
+                plan.finished_at,
+                plan.last_error,
+                SUM(CASE WHEN task.status = 'COMPLETED' THEN 1 ELSE 0 END) AS completed_tasks,
+                COUNT(task.orchestration_task_id) AS total_tasks
+            FROM orchestration_plans AS plan
+            LEFT JOIN orchestration_tasks AS task
+              ON task.plan_id = plan.plan_id
+            GROUP BY plan.plan_id
+            ORDER BY plan.created_at DESC
+            """
+        ).fetchall()
+
+    print(json.dumps([dict(row) for row in rows], indent=2, sort_keys=True))
+
+
+def command_daemon_status(_: argparse.Namespace) -> None:
+    with connect() as connection:
+        instance = connection.execute(
+            """
+            SELECT *
+            FROM orchestrator_instances
+            ORDER BY started_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        plans = plan_counts(connection)
+        tasks = task_counts(connection)
+
+    print(
+        json.dumps(
+            {
+                "version": VERSION,
+                "lock_held": lock_is_held(),
+                "instance": dict(instance) if instance else None,
+                "plan_counts": plans,
+                "task_counts": tasks,
+                "supervisor_healthy": supervisor_is_healthy(),
+                "runtime_status_path": str(STATUS_PATH),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def command_self_test(_: argparse.Namespace) -> None:
+    sample = {
+        "schema_version": 1,
+        "objective": "Validate deterministic DAG ordering",
+        "max_parallel_tasks": 2,
+        "tasks": [
+            {
+                "key": "a",
+                "kind": "TEST_SLEEP",
+                "duration_seconds": 1,
+                "dependencies": [],
+            },
+            {
+                "key": "b",
+                "kind": "NOOP",
+                "dependencies": ["a"],
+            },
+        ],
+    }
+
+    # The full validator needs the Controller database. The graph contract is
+    # independently checked here so package validation remains useful offline.
+    order = topological_order(sample["tasks"])
+    if order != ["a", "b"]:
+        fail(f"Unexpected topological order: {order}")
+
+    cyclic = [
+        {"key": "a", "dependencies": ["b"]},
+        {"key": "b", "dependencies": ["a"]},
+    ]
+    try:
+        topological_order(cyclic)
+    except OrchestratorError:
+        pass
+    else:
+        fail("Cyclic plan was accepted")
+
+    transient = {
+        "log_tail": (
+            "API call failed after 3 retries: "
+            "Codex stream produced no SSE events for 12s after first byte"
+        )
+    }
+    if not is_transient_review_transport_failure(
+        OrchestratorError("Expected reviewer marker is absent"),
+        transient,
+    ):
+        fail("Known transient reviewer transport failure was not classified")
+
+    if is_transient_review_transport_failure(
+        OrchestratorError("Expected reviewer marker is absent"),
+        {},
+    ):
+        fail("Marker absence alone was classified as transport failure")
+
+    print("HermesOps orchestration DAG engine: PASS")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="HermesOps persistent multi-task DAG orchestrator"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    daemon = subparsers.add_parser("daemon")
+    daemon.add_argument("--owner")
+    daemon.set_defaults(function=daemon_loop)
+
+    import_parser = subparsers.add_parser("import")
+    import_parser.add_argument("--plan-file", required=True)
+    import_parser.add_argument("--allow-test-actions", action="store_true")
+    import_parser.add_argument(
+        "--status",
+        choices=("DRAFT", "READY"),
+        default="READY",
+    )
+    import_parser.set_defaults(function=command_import)
+
+    activate = subparsers.add_parser("activate")
+    activate.add_argument("--plan", required=True)
+    activate.set_defaults(function=command_activate)
+
+    cancel = subparsers.add_parser("cancel")
+    cancel.add_argument("--plan", required=True)
+    cancel.set_defaults(function=command_cancel)
+
+    status = subparsers.add_parser("status")
+    status.add_argument("--plan", required=True)
+    status.set_defaults(function=command_status)
+
+    list_parser = subparsers.add_parser("list")
+    list_parser.set_defaults(function=command_list)
+
+    daemon_status = subparsers.add_parser("daemon-status")
+    daemon_status.set_defaults(function=command_daemon_status)
+
+    self_test = subparsers.add_parser("self-test")
+    self_test.set_defaults(function=command_self_test)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    arguments = parser.parse_args()
+
+    try:
+        arguments.function(arguments)
+    except OrchestratorError as error:
+        print(f"Orchestrator error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+if __name__ == "__main__":
+    main()

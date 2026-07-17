@@ -1580,6 +1580,23 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
 
     with connect() as connection:
         active_runs = active_run_ids(connection)
+        # HERMESOPS_ACTIVE_TASK_SANDBOX_PROTECTION_V1
+        #
+        # A worker/reviewer reserves its SQLite task before creating the
+        # nested sandbox. sandbox_container_id is finalized later, so the
+        # task label is the authoritative race-free reference during that
+        # interval.
+        active_task_ids = {
+            str(row["task_id"])
+            for row in connection.execute(
+                """
+                SELECT task_id, run_id
+                FROM tasks
+                WHERE status = 'RUNNING'
+                """
+            ).fetchall()
+            if str(row["run_id"]) in active_runs
+        }
         references = connection.execute(
             """
             SELECT
@@ -1675,6 +1692,29 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
 
                 if container_id in referenced_sandbox:
                     continue
+
+                task_label = run_command(
+                    [
+                        "docker",
+                        "exec",
+                        ENGINE,
+                        "docker",
+                        "inspect",
+                        "--format",
+                        '{{ index .Config.Labels "hermes-task-id" }}',
+                        container_id,
+                    ],
+                    check=False,
+                )
+                container_task_id = (
+                    task_label.stdout.strip()
+                    if task_label.returncode == 0
+                    else ""
+                )
+
+                if container_task_id in active_task_ids:
+                    continue
+
                 if not name.startswith("hermesops-"):
                     continue
                 actions.append(

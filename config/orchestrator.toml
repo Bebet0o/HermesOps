@@ -1,0 +1,11 @@
+schema_version = 1
+
+[orchestrator]
+poll_seconds = 3
+global_parallel_tasks = 3
+worker_timeout_seconds = 1200
+review_timeout_seconds = 1200
+review_transport_attempts = 3
+review_retry_backoff_seconds = 15
+command_timeout_seconds = 300
+heartbeat_seconds = 5
