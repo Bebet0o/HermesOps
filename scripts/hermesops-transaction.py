@@ -1340,6 +1340,7 @@ def command_rollback(
             "SNAPSHOTTING",
             "RUNNING",
             "REVIEWING",
+            "WAITING_HUMAN",
             "RECOVERING",
             "FAILED",
         ):
@@ -1392,6 +1393,17 @@ def command_rollback(
         connection.execute("BEGIN IMMEDIATE")
 
         now = utc_now()
+
+        connection.execute(
+            """
+            UPDATE approvals
+            SET status = 'CANCELLED',
+                resolved_at = ?
+            WHERE run_id = ?
+              AND status = 'PENDING'
+            """,
+            (now, arguments.run),
+        )
 
         connection.execute(
             """
