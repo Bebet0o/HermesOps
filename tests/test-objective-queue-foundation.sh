@@ -38,7 +38,12 @@ grep -Fq 'global_parallel_objectives = 2' \
 grep -Fq 'planning_retry_backoff_seconds = 30' \
     "${REPO}/config/orchestrator.toml"
 
-[[ "$(sqlite3 "$DB" 'PRAGMA user_version;')" == "10" ]]
+# HERMESOPS_OBJECTIVE_QUEUE_MINIMUM_MIGRATION_V1
+OBJECTIVE_QUEUE_SCHEMA_VERSION="$(
+    sqlite3 "$DB" 'PRAGMA user_version;'
+)"
+[[ "$OBJECTIVE_QUEUE_SCHEMA_VERSION" =~ ^[0-9]+$ ]]
+[[ "$OBJECTIVE_QUEUE_SCHEMA_VERSION" -ge 10 ]]
 [[ "$(sqlite3 "$DB" 'PRAGMA quick_check;')" == "ok" ]]
 ! sqlite3 "$DB" 'PRAGMA foreign_key_check;' | grep -q .
 
@@ -202,12 +207,7 @@ PY
 [[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM project_locks;')" == "0" ]]
 [[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM projects WHERE enabled=1;')" == "0" ]]
 
-# HERMESOPS_4B_EXPECTED_PRECOMMIT_DIRTY_SET_V1
-#
-# This foundation test runs both before the milestone commit and after it.
-# Before the commit, only the exact 4B-owned source changes are permitted.
-# After the commit, an empty porcelain status is accepted. Any unrelated,
-# staged, deleted, renamed, or otherwise unexpected path remains fail-closed.
+# HERMESOPS_4C_EXPECTED_PRECOMMIT_DIRTY_SET_V1
 REPOSITORY_STATUS="$(
     git -C "$REPO" status --porcelain=v1 --untracked-files=all
 )"
@@ -220,57 +220,41 @@ if not lines:
     raise SystemExit(0)
 
 allowed = {
-    "config/orchestrator.toml",
-    "config/projects.d/transaction-fixture-b.toml",
-    "docs/OBJECTIVES.md",
+    "VERSION",
+    "config/notifier.toml",
+    "docs/NOTIFICATIONS.md",
     "docs/STATE.md",
-    "migrations/010_objective_queue.sql",
-    "scripts/hermesops-objectives.py",
-    "scripts/hermesops-orchestrator.py",
+    "migrations/011_notification_outbox.sql",
+    "scripts/configure-hermesops-telegram.sh",
+    "scripts/hermesops-control.py",
+    "scripts/hermesops-notifier.py",
+    "scripts/hermesopsctl",
+    "systemd/user/hermesops-notifier.service",
+    "tests/test-notification-foundation.sh",
     "tests/test-objective-queue-foundation.sh",
-    "tests/test-orchestration-foundation.sh",
-    "tests/test-supervisor-foundation.sh",
-    "tests/test-worker-foundation.sh",
 }
 
 observed = set()
 for line in lines:
     if len(line) < 4:
         raise AssertionError(f"Malformed porcelain entry: {line!r}")
-
     status = line[:2]
     path = line[3:]
-
     if path not in allowed:
         raise AssertionError(f"Unexpected repository change: {line}")
-
     if status not in {"??", " M"}:
         raise AssertionError(
             f"Unexpected change type for {path}: {status!r}"
         )
-
     if path in observed:
         raise AssertionError(f"Duplicate repository change: {path}")
     observed.add(path)
 
-required = {
-    "config/orchestrator.toml",
-    "config/projects.d/transaction-fixture-b.toml",
-    "docs/OBJECTIVES.md",
-    "docs/STATE.md",
-    "migrations/010_objective_queue.sql",
-    "scripts/hermesops-objectives.py",
-    "scripts/hermesops-orchestrator.py",
-    "tests/test-objective-queue-foundation.sh",
-    "tests/test-orchestration-foundation.sh",
-    "tests/test-supervisor-foundation.sh",
-    "tests/test-worker-foundation.sh",
-}
-
+required = allowed - {"VERSION"}
 missing = required - observed
 if missing:
     raise AssertionError(
-        "Expected pre-commit changes missing: "
+        "Expected 4C pre-commit changes missing: "
         + ", ".join(sorted(missing))
     )
 PY

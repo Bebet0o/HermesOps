@@ -1,0 +1,18 @@
+schema_version = 1
+
+[notifier]
+poll_seconds = 5
+heartbeat_seconds = 5
+batch_size = 20
+lease_seconds = 120
+max_attempts = 5
+base_backoff_seconds = 15
+
+[channels.file]
+enabled = true
+path = "/opt/docker/hermesops/runtime/notifications/delivered.jsonl"
+
+[channels.telegram]
+mode = "auto"
+secrets_file = "/opt/docker/hermesops/secrets/notifications.env"
+api_base = "https://api.telegram.org"
