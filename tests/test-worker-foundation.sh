@@ -22,7 +22,21 @@ grep -Fq 'def precreate_worker_sandbox' \
 [[ -f "${REPO}/config/worker-sandbox.lock.toml" ]]
 [[ -f "${REPO}/images/worker-sandbox.Dockerfile" ]]
 
-[[ "$(sqlite3 "$DB" 'PRAGMA user_version;')" == "4" ]]
+LATEST_MIGRATION_FILE="$(
+    find "${REPO}/migrations"         -maxdepth 1         -type f         -name '[0-9][0-9][0-9]_*.sql'         -printf '%f\n' |
+    sort |
+    tail -n 1
+)"
+
+[[ -n "$LATEST_MIGRATION_FILE" ]]
+
+LATEST_MIGRATION_NUMBER="$((
+    10#${LATEST_MIGRATION_FILE%%_*}
+))"
+
+[[ "$(
+    sqlite3 "$DB" 'PRAGMA user_version;'
+)" == "$LATEST_MIGRATION_NUMBER" ]]
 
 [[ "$(
     sqlite3 "$DB" \
