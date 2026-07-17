@@ -84,6 +84,7 @@ required_tables=(
     tasks
     project_locks
     snapshots
+    worker_executions
     events
     approvals
     review_results

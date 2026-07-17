@@ -10,9 +10,24 @@ FIXTURE_REPO="${ROOT}/workspaces/.fixtures/${FIXTURE_ID}"
 [[ -x "${REPO}/scripts/hermesops-transaction.py" ]]
 [[ -f "${REPO}/migrations/003_git_transactions.sql" ]]
 
-[[ "$(
+LATEST_MIGRATION_FILE="$(
+    find "${REPO}/migrations"         -maxdepth 1         -type f         -name '[0-9][0-9][0-9]_*.sql'         -printf '%f
+' |
+    sort |
+    tail -n 1
+)"
+
+[[ -n "$LATEST_MIGRATION_FILE" ]]
+
+LATEST_MIGRATION_NUMBER="$((
+    10#${LATEST_MIGRATION_FILE%%_*}
+))"
+
+CURRENT_MIGRATION_NUMBER="$(
     sqlite3 "$DB" 'PRAGMA user_version;'
-)" == "3" ]]
+)"
+
+[[ "$CURRENT_MIGRATION_NUMBER" == "$LATEST_MIGRATION_NUMBER" ]]
 
 [[ "$(
     sqlite3 "$DB" \

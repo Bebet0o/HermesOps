@@ -1,35 +1,7 @@
-# État du projet
+# State
 
-## Jalon validé
+Base commit: b6de953e867fe52ce76f51fab2a826afa6a59f6e
 
-`3A — transactions Git et worktrees isolés`
-
-## Infrastructure
-
-- Hermes Agent : sain
-- moteur sandbox : sain
-- Hermes WebUI : saine
-- modèle : GPT-5.6 Sol
-- profils spécialisés : six
-- Controller SQLite : migration 003
-
-## Transactions
-
-- snapshot Git avant écriture : validé
-- bundle vérifié : validé
-- worktree isolé : validé
-- verrou exclusif par projet : validé
-- second writer refusé : validé
-- commit obligatoire : validé
-- soumission `REVIEWING` : validée
-- `ROLLBACK_SAFE` : validé
-- branche principale non modifiée : validé
-
-## Projets
-
-- projet métier actif : aucun
-- fixture transactionnelle : présente mais désactivée
-
-## Prochaine étape
-
-`3B — lancement contrôlé des workers dans leurs worktrees`
+v4 proved that environment and constructor patching were active, but Hermes'
+internal `docker run` still returned 125. v5 avoids that create path entirely
+by pre-creating the audited sandbox and using label-based reuse.
