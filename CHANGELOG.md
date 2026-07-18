@@ -1,41 +1,52 @@
 # Changelog
 
+All notable changes to HermesOps will be documented in this file.
+
 ## [Unreleased]
 
 ### Added
 
-- installateur Debian 12 idempotent et reprenable ;
-- préflight, validation et désinstallation non destructive ;
-- contrôle anti-secrets local et en CI ;
-- exemples Agent, WebUI et Telegram ;
-- export et chargement vérifié de l'image worker.
+- public Debian 12 installer, preflight, validation, and conservative
+  uninstaller;
+- local and CI secret scanning;
+- examples for Hermes Agent, the temporary upstream WebUI, and notifications;
+- reproducible worker-image export and verified import;
+- Apache License 2.0;
+- English public README covering architecture, installation, sandbox
+  concepts, security, current limitations, and roadmap;
+- explicit long-term direction for HermesOps Console and Hermesfiles in
+  `v0.2.0-beta`.
 
 ### Changed
 
-- isolation des fixtures sous `tests/fixtures/projects/` ;
-- une installation publique neuve commence avec zéro projet enregistré ;
-- l'initialisation des fixtures nécessite une action de test explicite ;
-- version publique `0.1.0-alpha` ;
-- configuration locale TradingBot retirée du suivi Git ;
-- les deux fixtures de fondation sont versionnées uniquement sous `tests/fixtures/projects/` ;
-- la configuration locale TradingBot est remplacée dans le dépôt public par un exemple désactivé.
+- public version normalized to `0.1.0-alpha`;
+- a fresh public installation starts with zero registered projects;
+- local project configurations are ignored and test fixtures live only
+  under `tests/fixtures/projects/`;
+- the current upstream WebUI is documented as a temporary compatibility
+  interface rather than the final HermesOps product;
+- `v0.1.0-alpha` is explicitly positioned as the validated technical
+  foundation for future releases.
 
 ### Fixed
 
-- le préflight Debian minimal ne considère plus `rsync`, `sqlite3` ou
-  `python3-yaml` comme des prérequis déjà installés ;
-- le `PATH` inclut désormais `/usr/sbin` et `/sbin`, ce qui permet de détecter
-  correctement `runuser` ;
-- `util-linux` est une dépendance explicite de l’installateur.
-- les exceptions `.gitignore` qui republiaient les fixtures locales ont été supprimées.
-- le test du contrat `.gitignore` fonctionne désormais depuis une archive source sans métadonnées `.git`.
-- l’installation sans `auth.json` diffère maintenant la validation des profils IA au lieu d’échouer ;
-- la validation du layout accepte une installation issue d’une archive source sans répertoire `.git`.
-- les services utilisateur ne s’ordonnent plus après `default.target`, ce qui supprime le cycle de démarrage au reboot ;
-- l’installateur redémarre les services dans l’ordre puis vérifie explicitement leur état actif.
+- minimal Debian preflight no longer fails before installable dependencies
+  can be installed;
+- `/usr/sbin` and `/sbin` are included when locating administrative
+  commands;
+- `util-linux` is an explicit installer dependency;
+- local test fixtures are no longer accidentally tracked as active projects;
+- static validation works from source archives without `.git` metadata;
+- installation without `auth.json` defers AI-profile verification instead
+  of failing;
+- runtime layout validation accepts source-archive installations;
+- user systemd services no longer create a `default.target` ordering cycle;
+- the installer restarts user services deterministically and verifies that
+  all three are active.
 
 ### Security
 
-- couverture explicite de `auth.json` et des répertoires `secrets/` ;
-- sauvegarde avant mise à niveau divergente ;
-- aucun secret généré dans le dépôt.
+- explicit protection for `auth.json` and `secrets/`;
+- backups before divergent upgrades;
+- no generated secret is stored in the source repository;
+- host Docker socket is not exposed to workers.

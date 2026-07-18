@@ -1,106 +1,211 @@
 # HermesOps
 
-HermesOps est un contrôleur local d’agents IA pour exécuter des travaux de développement logiciel de manière **persistante, isolée, révisée et récupérable**.
+> **Current status: `v0.1.0-alpha` — foundation release**
+>
+> HermesOps is usable and its public installation lifecycle has been validated
+> on a fresh Debian 12 amd64 system. However, this release is intentionally a
+> technical foundation for the project that follows. It is not yet the final
+> end-user product, and daily operation is not yet WebUI-only.
 
-Au lieu de donner directement un dépôt à un agent unique, HermesOps sépare les responsabilités :
+HermesOps is an independent, open-source orchestration and project automation
+platform built around [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-- un **orchestrateur** transforme un objectif en plan ;
-- des **workers** travaillent dans des clones ou worktrees isolés ;
-- un **reviewer indépendant** vérifie le commit en lecture seule ;
-- un **intégrateur** applique uniquement les résultats approuvés ;
-- un **Recovery Manager** choisit entre `RESUME_SAFE`, `ROLLBACK_SAFE` et `BLOCK_HUMAN` ;
-- un **superviseur** surveille les services, les verrous et les travaux abandonnés ;
-- un **notifier** envoie les événements importants, notamment sur Telegram.
+Hermes Agent remains the upstream AI execution engine. HermesOps adds the
+control plane required to structure ambitious projects, decompose durable
+objectives, run isolated workers, obtain independent reviews, recover from
+failures, preserve project memory, and continue long-running work safely.
 
-> **État du projet : alpha fonctionnelle.**
-> Le pipeline complet a été validé sur un vrai dépôt : planification IA, worker isolé, commit local, revue indépendante, intégration transactionnelle, revalidation et notification Telegram.
+The long-term goal is not merely “an AI agent that writes code.” HermesOps aims
+to become a local project operations platform combining concepts commonly
+found in CI systems, project trackers, orchestration engines, recovery systems,
+and AI technical leadership.
 
----
+## Release direction
 
-## Ce qui fonctionne aujourd’hui
+### `v0.1.0-alpha` — the foundation available today
 
-- registre déclaratif multi-projets ;
-- état persistant dans SQLite avec journal WAL ;
-- file durable d’objectifs ;
-- planification IA en DAG ;
-- workers spécialisés code, tests et documentation ;
-- worktrees Git transactionnels avec snapshot préalable ;
-- sandboxes Docker dédiées sans accès au Docker de l’hôte ;
-- réseau désactivable par rôle ;
-- reviewer indépendant monté en lecture seule ;
-- intégration uniquement après verdict favorable ;
-- rollback automatique si la revue ou l’intégration échoue ;
-- watchdog et récupération après crash ou redémarrage ;
-- notifications durables fichier et Telegram ;
-- WebUI locale ;
-- absence de push automatique ;
-- historique complet des objectifs, plans, runs, workers, revues et intégrations.
+The current release provides:
 
-Le premier objectif réel validé a modifié uniquement un document du projet TradingBot. Le reviewer a approuvé le résultat, l’intégrateur l’a appliqué, puis Pytest et Ruff ont été relancés avec succès.
+- a persistent SQLite control plane;
+- durable projects, objectives, plans, tasks, runs, reviews, and notifications;
+- logical orchestrator, worker, reviewer, and recovery roles;
+- isolated worker execution through a dedicated Docker engine;
+- Git snapshots and transactional integration rules;
+- independent review before integration;
+- automatic supervisor, orchestrator, and notifier services;
+- restart persistence through user-level systemd services;
+- a reproducible prebuilt worker sandbox image;
+- public preflight, installation, validation, and conservative uninstall tools;
+- a temporary compatibility WebUI supplied by the upstream Hermes ecosystem.
 
----
+This version is the stable base on which the actual HermesOps user experience
+will be built. Some configuration and operational actions still require the
+terminal.
+
+### `v0.2.0-beta` — long-term product milestone
+
+`v0.2.0-beta` is planned as a major, long-term milestone.
+It has no committed release date and will require substantial development time.
+
+The target includes:
+
+- **HermesOps Console**, a dedicated WebUI developed specifically for
+  HermesOps;
+- WebUI-first project creation, objective submission, monitoring, review,
+  recovery, backup, and configuration;
+- functional, editable **Hermesfiles** for defining sandbox environments;
+- validation, build, test, activation, versioning, and rollback of sandbox
+  profiles from the WebUI;
+- automatic retrieval of the official default worker image;
+- multiple sandbox profiles selectable per project or role;
+- richer live run views, resource monitoring, memory, decisions, and audit
+  history.
+
+Until that milestone exists, the current upstream WebUI must be understood as a
+temporary compatibility interface, not as the final HermesOps Console.
+
+## What HermesOps is
+
+HermesOps is both:
+
+1. an add-on control plane around Hermes Agent; and
+2. a structured operating model for ambitious, long-running projects.
+
+A project in HermesOps is more than a directory. It can accumulate:
+
+- vision and constraints;
+- architectural decisions;
+- roadmaps and milestones;
+- durable objectives and task dependencies;
+- specialized worker runs;
+- independent review results;
+- recovery decisions;
+- project memory and operational history;
+- backups and transaction snapshots;
+- notification and approval state.
+
+A typical lifecycle is:
+
+```text
+User objective
+    ↓
+Orchestrator planning
+    ↓
+Persistent DAG of tasks
+    ↓
+Specialized worker executions
+    ↓
+Tests and produced commit
+    ↓
+Independent read-only review
+    ↓
+Integrate, fix, recover, or request human input
+    ↓
+Update durable state, memory, and backlog
+```
 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    U[Opérateur] --> Q[File durable d’objectifs]
-    Q --> O[Orchestrateur IA]
-    O --> P[Plan DAG persistant]
-    P --> T[Transaction Git + snapshot]
-    T --> W[Worker isolé]
-    W --> C[Commit local]
-    C --> R[Reviewer indépendant<br/>lecture seule]
-    R -->|APPROVE / PASS| I[Intégrateur]
-    R -->|REJECT / FIX| X[Rollback sûr]
-    R -->|BLOCK_HUMAN| H[Intervention humaine]
-    I --> V[Validation finale]
-    V --> N[Notification]
-    X --> N
-    H --> N
-    S[Supervisor / Recovery] --> Q
-    S --> T
-    S --> W
-    S --> R
+flowchart TB
+    USER["User"]
+
+    subgraph UI["Operator interfaces"]
+        CLI["HermesOps CLI<br/>current administration"]
+        WEB["Temporary upstream WebUI<br/>chat compatibility"]
+        FUTURE["Future HermesOps Console<br/>planned for v0.2.0-beta"]
+    end
+
+    subgraph CONTROL["HermesOps control plane"]
+        DB["SQLite durable state"]
+        ORCH["Orchestrator"]
+        SUP["Supervisor / Watchdog"]
+        REVIEW["Independent Reviewer"]
+        RECOVERY["Recovery Manager"]
+        NOTIFY["Notifier"]
+        REGISTRY["Projects, roles and policies"]
+    end
+
+    subgraph AI["AI execution"]
+        AGENT["Hermes Agent"]
+    end
+
+    subgraph SANDBOX["Isolated sandbox plane"]
+        ENGINE["Dedicated Docker sandbox engine"]
+        IMAGE["Worker sandbox image"]
+        W1["Ephemeral worker container"]
+        W2["Ephemeral worker container"]
+        W3["Ephemeral reviewer/test container"]
+    end
+
+    USER --> CLI
+    USER --> WEB
+    USER -. future .-> FUTURE
+
+    CLI --> CONTROL
+    FUTURE -. API .-> CONTROL
+    WEB --> AGENT
+
+    CONTROL <--> DB
+    ORCH --> AGENT
+    REVIEW --> AGENT
+    RECOVERY --> AGENT
+    CONTROL --> ENGINE
+
+    AGENT --> ENGINE
+    ENGINE --> IMAGE
+    IMAGE --> W1
+    IMAGE --> W2
+    IMAGE --> W3
 ```
 
-### Conteneurs permanents
+### Control plane and sandbox plane
 
-| Conteneur | Fonction | Exposition |
-|---|---|---|
-| `hermesops-agent` | Hermes Agent et gateway | `127.0.0.1:8642` |
-| `hermesops-webui` | interface Web | `127.0.0.1:8787` |
-| `hermesops-sandbox-engine` | moteur Docker isolé pour workers et reviewers | interne |
+The **control plane** decides what should happen:
 
-### Services utilisateur persistants
+- which project and objective are active;
+- how work is decomposed;
+- which role handles each task;
+- whether a result may be integrated;
+- whether a failed run can be resumed or rolled back;
+- what must be persisted, audited, or reported.
 
-```text
-hermesops-supervisor.service
-hermesops-orchestrator.service
-hermesops-notifier.service
-```
+The **sandbox plane** provides isolated Linux environments where commands and
+project work are executed.
 
----
+These are deliberately separate. The worker image does not contain the
+orchestration architecture. Orchestrator, worker, reviewer, and recovery are
+logical HermesOps roles defined by configuration and controller state.
 
-## Modèle de sécurité
+## Components
 
-HermesOps est conçu pour échouer de manière fermée.
+| Component | Purpose |
+| --- | --- |
+| Hermes Agent | Upstream AI gateway and agent execution engine |
+| HermesOps controller scripts | Durable objectives, orchestration, transactions, reviews, recovery, registry, and operator commands |
+| SQLite control database | Persistent project and run state |
+| `hermesops-supervisor` | Watchdog, stale-run detection, health checks, and recovery triggers |
+| `hermesops-orchestrator` | Persistent planning and DAG task execution |
+| `hermesops-notifier` | Durable notification outbox delivery |
+| Sandbox engine | Dedicated nested Docker daemon used only for isolated execution |
+| Worker image | Reproducible template from which temporary work containers are created |
+| Temporary upstream WebUI | Current compatibility interface on `127.0.0.1:8787` |
+| Future HermesOps Console | Dedicated HermesOps WebUI planned for `v0.2.0-beta` |
 
-- Les workers n’écrivent jamais directement sur la branche principale.
-- Le reviewer ne possède qu’un montage en lecture seule.
-- Le push Git est désactivé par défaut.
-- Une revue non concluante n’est jamais considérée comme une approbation.
-- Une branche principale divergente entraîne un blocage ou un rollback.
-- Les secrets ne sont pas montés dans les sandboxes de travail.
-- Les sandboxes utilisent notamment :
-  - `network_mode: none` lorsque le réseau n’est pas nécessaire ;
-  - `cap_drop: ALL` ;
-  - `no-new-privileges` ;
-  - des limites CPU, mémoire et PID ;
-  - un moteur Docker dédié, sans montage de `/var/run/docker.sock`.
-- Chaque transaction possède un snapshot Git vérifié avant intégration.
+## Roles
 
-Décisions de récupération autorisées :
+The default logical roles are:
+
+| Role | Responsibility |
+| --- | --- |
+| `ops-orchestrator` | Understand objectives, create plans, manage dependencies, and choose the next safe work |
+| `ops-worker-code` | Implement code changes in an isolated writable workspace |
+| `ops-worker-tests` | Create or run tests and validation tasks |
+| `ops-worker-docs` | Produce and maintain project documentation |
+| `ops-reviewer` | Independently inspect results with a read-only project view |
+| `ops-recovery` | Diagnose interrupted or inconsistent runs and choose a safe recovery path |
+
+The allowed recovery decisions are intentionally limited to:
 
 ```text
 RESUME_SAFE
@@ -108,568 +213,551 @@ ROLLBACK_SAFE
 BLOCK_HUMAN
 ```
 
----
+The reviewer can return more nuanced outcomes, including:
 
-## Prérequis
-
-La plateforme validée utilise :
-
-- Debian 12 amd64 ;
-- Docker Engine avec le plugin Docker Compose ;
-- Git ;
-- Python 3.11 ou plus récent ;
-- SQLite 3 ;
-- `systemd --user` ;
-- un compte utilisateur membre du groupe `docker` ;
-- un fournisseur compatible avec Hermes Agent ;
-- suffisamment d’espace pour les clones, worktrees, images et snapshots.
-
-Pour que les services utilisateur survivent à une déconnexion :
-
-```bash
-sudo loginctl enable-linger "$USER"
+```text
+PASS
+PASS_WITH_DEBT
+FIX
+SECURITY
+PERFORMANCE
+ARCHITECTURE
+HUMAN
 ```
 
----
+A transport failure is never treated as an approval.
+
+## Worker image, archive, engine, and containers
+
+These terms describe different things.
+
+```text
+hermesops-worker-sandbox-0.2.tar.gz
+        ↓ imported as
+hermesops-worker-sandbox:0.2
+        ↓ stored inside
+hermesops-sandbox-engine
+        ↓ used to create
+one or more temporary worker containers
+```
+
+### Worker image
+
+`hermesops-worker-sandbox:0.2` is a reusable Docker image containing the Linux
+tools expected by the current worker implementation.
+
+It is comparable to a machine template. It is not a running worker and it does
+not define the orchestrator/reviewer/recovery architecture.
+
+### Worker archive
+
+The release asset:
+
+```text
+hermesops-worker-sandbox-0.2.tar.gz
+```
+
+is a compressed export of that Docker image. Its checksum file is:
+
+```text
+hermesops-worker-sandbox-0.2.tar.gz.sha256
+```
+
+The archive exists so every `v0.1.0-alpha` installation can import the exact
+worker image that was tested for the release, without rebuilding it from
+mutable package repositories.
+
+It contains no project workspace, HermesOps database, `auth.json`, API key, or
+operator secret.
+
+### Sandbox engine
+
+`hermesops-sandbox-engine` is a dedicated Docker daemon running separately from
+the host Docker daemon. HermesOps imports the worker image into this isolated
+engine and asks it to create temporary work containers.
+
+Workers do not receive the host Docker socket.
+
+### Worker containers
+
+A worker container is one running instance created from the worker image for a
+specific execution. One image can create many containers, sequentially or
+concurrently.
+
+The practical concurrency limit depends on:
+
+- HermesOps policy;
+- CPU and memory;
+- disk and I/O capacity;
+- the number of safe simultaneous writers;
+- whether tasks touch the same repository state.
+
+The default policy allows only one writer per project while permitting limited
+parallel read-oriented work.
+
+## Hermesfiles — planned for `v0.2.0-beta`
+
+A **Hermesfile** will be a single declarative source file describing a sandbox
+profile.
+
+It will define concepts such as:
+
+- base image and immutable digest;
+- system and language packages;
+- workspace user and paths;
+- CPU, memory, PID, and timeout limits;
+- network policy;
+- filesystem policy;
+- capabilities and security restrictions;
+- validation commands.
+
+Conceptual example:
+
+```yaml
+version: 1
+
+name: cpp-worker
+
+base:
+  image: debian:12
+  digest: sha256:REQUIRED_IMMUTABLE_DIGEST
+
+packages:
+  apt:
+    - git
+    - cmake
+    - ninja-build
+    - clang
+
+workspace:
+  user: hermes
+  directory: /workspace
+
+runtime:
+  cpu: 4
+  memory: 8GiB
+  pids: 512
+  network: false
+
+security:
+  no_new_privileges: true
+  drop_capabilities: all
+  allow_secrets: false
+
+validation:
+  commands:
+    - git --version
+    - cmake --version
+    - clang --version
+```
+
+A Hermesfile will not eliminate Docker images internally. Instead, it will
+replace manual image handling from the user's perspective:
+
+```text
+Hermesfile
+    ↓ validate
+HermesOps sandbox builder
+    ↓ build and test
+Versioned Docker image
+    ↓ activate
+Temporary worker containers
+```
+
+The future HermesOps Console is intended to provide an editor and the complete
+validate/build/test/activate/rollback workflow.
+
+Hermesfiles are a roadmap feature and are **not functional in
+`v0.1.0-alpha`**.
+
+## Security model
+
+HermesOps follows several non-negotiable rules:
+
+- host Docker socket is not mounted into agents or workers;
+- project writes happen in isolated clones or worktrees;
+- workers do not write directly to `main` or `master`;
+- snapshots are required before write transactions;
+- completion requires a commit and a clean worktree;
+- integration requires independent approval;
+- the reviewer receives a read-only project view;
+- secrets are not passed to workers or reviewers by default;
+- automatic Git push is disabled;
+- CPU, memory, PID, timeout, and network policies are configurable;
+- unknown recovery states require human intervention;
+- `auth.json`, local environment files, SQLite databases, and project
+  registrations remain outside Git.
+
+HermesOps reduces operational risk, but an alpha release is not a security
+certification. Operators remain responsible for host hardening, network access,
+secrets, backups, model-provider credentials, and reviewing project policies.
+
+See also:
+
+- [`docs/SECURITY.md`](docs/SECURITY.md)
+- [`docs/POLICIES.md`](docs/POLICIES.md)
+- [`docs/RECOVERY.md`](docs/RECOVERY.md)
+- [`docs/TRANSACTIONS.md`](docs/TRANSACTIONS.md)
+
+## Requirements
+
+### Supported platform for `v0.1.0-alpha`
+
+- Debian 12 Bookworm;
+- amd64;
+- a normal user with UID/GID `1000:1000`;
+- `sudo` access;
+- membership in the `docker` group;
+- user-level systemd and linger;
+- Docker Engine;
+- Docker Compose plugin;
+- Internet access for the pinned upstream container images.
+
+The validated public installation used Docker Engine `29.6.1` and Docker
+Compose `5.3.x`.
+
+Recommended minimum for evaluation:
+
+- 4 CPU cores;
+- 8 GiB RAM;
+- 50 GiB free storage.
+
+Real project requirements can be significantly higher.
+
+### Network exposure
+
+The current services bind only to loopback:
+
+| Service | Address |
+| --- | --- |
+| Hermes Agent health/API gateway | `127.0.0.1:8642` |
+| Temporary upstream WebUI | `127.0.0.1:8787` |
+
+Use an SSH tunnel instead of exposing these ports directly.
 
 ## Installation
 
-### Installation automatisée
+### 1. Install Docker
 
-La release publique fournit désormais un bootstrap idempotent pour Debian 12
-amd64. Il préserve les secrets, bases, workspaces et configurations locales,
-et crée une sauvegarde avant toute mise à niveau divergente.
-
-```bash
-git clone git@github.com:Bebet0o/HermesOps.git
-cd HermesOps
-./preflight.sh
-./install.sh
-```
-
-Un `auth.json` existant et l'archive worker peuvent être fournis avec
-`--auth-file` et `--worker-image-archive`. Consultez
-`docs/PUBLIC_INSTALLATION.md`.
-
-### Installation manuelle de référence
-
-### 1. Installer les dépendances système
-
-Installez Docker Engine, Docker Compose, Git, Python 3, SQLite et les utilitaires usuels selon votre distribution.
-
-Vérification :
+Install Docker Engine and the Docker Compose plugin from Docker's official
+Debian repository, then verify:
 
 ```bash
 docker version
 docker compose version
-git --version
-python3 --version
-sqlite3 --version
+docker run --rm hello-world
 ```
 
-### 2. Préparer l’arborescence
+The user running HermesOps must be able to use Docker without `sudo`.
+
+### 2. Download the source and worker release assets
+
+Clone the matching release:
 
 ```bash
-export HERMESOPS_ROOT=/opt/docker/hermesops
-
-sudo install -d -m 0750 -o "$USER" -g "$USER" \
-  "$HERMESOPS_ROOT" \
-  "$HERMESOPS_ROOT/state" \
-  "$HERMESOPS_ROOT/state/controller" \
-  "$HERMESOPS_ROOT/state/hermes-home" \
-  "$HERMESOPS_ROOT/state/sandboxes" \
-  "$HERMESOPS_ROOT/runtime" \
-  "$HERMESOPS_ROOT/workspaces" \
-  "$HERMESOPS_ROOT/project-data" \
-  "$HERMESOPS_ROOT/backups" \
-  "$HERMESOPS_ROOT/secrets"
+git clone https://github.com/Bebet0o/HermesOps.git
+cd HermesOps
+git checkout v0.1.0-alpha
 ```
 
-### 3. Cloner HermesOps
+Download these assets from the same GitHub release into the user's home
+directory:
+
+```text
+hermesops-worker-sandbox-0.2.tar.gz
+hermesops-worker-sandbox-0.2.tar.gz.sha256
+```
+
+Verify the archive:
 
 ```bash
-git clone https://github.com/VOTRE_COMPTE/HermesOps.git \
-  /opt/docker/hermesops/repo
-
-cd /opt/docker/hermesops/repo
+cd "$HOME"
+sha256sum -c hermesops-worker-sandbox-0.2.tar.gz.sha256
 ```
 
-### 4. Configurer les secrets
+Return to the repository:
 
-Les éléments suivants ne doivent jamais être versionnés :
+```bash
+cd "$HOME/HermesOps"
+```
+
+### 3. Run the preflight
+
+```bash
+./preflight.sh
+```
+
+A successful result ends with:
+
+```text
+HERMESOPS_PREFLIGHT_PASS
+```
+
+Warnings about dependencies that `install.sh` can install are acceptable.
+
+### 4. Install
+
+```bash
+./install.sh \
+  --user "$USER" \
+  --worker-image-archive \
+  "$HOME/hermesops-worker-sandbox-0.2.tar.gz"
+```
+
+A successful result ends with:
+
+```text
+HERMESOPS_INSTALL_PASS
+```
+
+The default root is:
+
+```text
+/opt/docker/hermesops
+```
+
+The main directories are:
+
+```text
+/opt/docker/hermesops/repo
+/opt/docker/hermesops/state
+/opt/docker/hermesops/secrets
+/opt/docker/hermesops/workspaces
+/opt/docker/hermesops/project-data
+/opt/docker/hermesops/backups
+/opt/docker/hermesops/logs
+/opt/docker/hermesops/runtime
+```
+
+### 5. Installation without AI authentication
+
+`auth.json` is optional during installation. Without it:
+
+- the infrastructure, database, containers, and systemd services are installed;
+- the public registry starts with zero projects;
+- AI objectives remain unavailable until authentication is configured.
+
+This supported deferred state is useful for validating the public installation
+before adding private credentials.
+
+## Authentication
+
+Never commit, print, or share `auth.json`.
+
+Place an existing Hermes Agent authentication file at:
 
 ```text
 /opt/docker/hermesops/state/hermes-home/auth.json
-/opt/docker/hermesops/secrets/*.env
-/opt/docker/hermesops/state/controller/hermesops.db
 ```
 
-Permissions recommandées :
+Protect it:
 
 ```bash
-chmod 0700 /opt/docker/hermesops/secrets
-chmod 0600 /opt/docker/hermesops/state/hermes-home/auth.json
-chmod 0600 /opt/docker/hermesops/secrets/*.env
+chmod 0600 \
+  /opt/docker/hermesops/state/hermes-home/auth.json
 ```
 
-La configuration WebUI validée utilise notamment :
-
-```text
-HERMES_WEBUI_PASSWORD
-HERMES_WEBUI_GATEWAY_API_KEY
-HERMES_WEBUI_GATEWAY_BASE_URL
-HERMES_WEBUI_CHAT_BACKEND
-```
-
-Telegram est optionnel. Les identifiants du bot et du chat doivent rester dans :
-
-```text
-/opt/docker/hermesops/secrets/notifications.env
-```
-
-### 5. Démarrer la plateforme Docker
+Then restart the Agent and verify the role profiles:
 
 ```bash
-docker compose \
-  --project-directory /opt/docker/hermesops/repo/compose \
-  --env-file /opt/docker/hermesops/repo/compose/images.lock.env \
-  -f /opt/docker/hermesops/repo/compose/agent.yaml \
-  up -d
+docker restart hermesops-agent
+
+HERMESOPS_ROOT=/opt/docker/hermesops \
+  /opt/docker/hermesops/repo/scripts/hermesops-roles.py \
+  verify-profiles
 ```
 
-Vérification :
+Provider-specific authentication procedures remain the responsibility of
+Hermes Agent and the selected model provider.
+
+## Accessing the current WebUI
+
+The current WebUI is temporary and comes from the upstream Hermes ecosystem.
+It is not the future HermesOps Console.
+
+From the operator workstation:
 
 ```bash
-docker compose \
-  --project-directory /opt/docker/hermesops/repo/compose \
-  --env-file /opt/docker/hermesops/repo/compose/images.lock.env \
-  -f /opt/docker/hermesops/repo/compose/agent.yaml \
-  ps
+ssh \
+  -L 8787:127.0.0.1:8787 \
+  -L 8642:127.0.0.1:8642 \
+  user@server
 ```
 
-Tests de santé :
-
-```bash
-curl --fail http://127.0.0.1:8642/health
-curl --fail http://127.0.0.1:8787/health
-
-docker exec hermesops-sandbox-engine \
-  docker info --format \
-  'Server={{.ServerVersion}} Containers={{.Containers}} Images={{.Images}}'
-```
-
-### 6. Installer les services utilisateur
-
-```bash
-install -d -m 0750 "$HOME/.config/systemd/user"
-
-install -m 0644 \
-  /opt/docker/hermesops/repo/systemd/user/hermesops-supervisor.service \
-  /opt/docker/hermesops/repo/systemd/user/hermesops-orchestrator.service \
-  /opt/docker/hermesops/repo/systemd/user/hermesops-notifier.service \
-  "$HOME/.config/systemd/user/"
-
-systemctl --user daemon-reload
-
-systemctl --user enable --now \
-  hermesops-supervisor.service \
-  hermesops-orchestrator.service \
-  hermesops-notifier.service
-```
-
-Vérification :
-
-```bash
-systemctl --user is-active hermesops-supervisor.service
-systemctl --user is-active hermesops-orchestrator.service
-systemctl --user is-active hermesops-notifier.service
-```
-
-### 7. Initialiser et valider le contrôleur
-
-Sur une installation déjà migrée :
-
-```bash
-/opt/docker/hermesops/repo/scripts/hermesops-registry.py validate
-/opt/docker/hermesops/repo/scripts/hermesops-registry.py sync
-```
-
-Vérification de la base :
-
-```bash
-sqlite3 /opt/docker/hermesops/state/controller/hermesops.db \
-  'PRAGMA quick_check;'
-
-sqlite3 /opt/docker/hermesops/state/controller/hermesops.db \
-  'PRAGMA foreign_key_check;'
-
-sqlite3 /opt/docker/hermesops/state/controller/hermesops.db \
-  'PRAGMA journal_mode;'
-```
-
-Résultats attendus :
-
-```text
-ok
-<aucune ligne pour foreign_key_check>
-wal
-```
-
----
-
-## Accéder à la WebUI
-
-La WebUI écoute uniquement sur localhost.
-
-Depuis une autre machine :
-
-```bash
-ssh -L 8787:127.0.0.1:8787 utilisateur@serveur
-```
-
-Ouvrez ensuite :
+Open:
 
 ```text
 http://127.0.0.1:8787
 ```
 
-Le port `8642` du gateway peut être tunnelé de la même manière si nécessaire.
-
----
-
-## Enregistrer un projet
-
-### 1. Préparer le dépôt
-
-Exemple :
+Health endpoints:
 
 ```bash
-git clone URL_DU_PROJET \
-  /opt/docker/hermesops/workspaces/mon-projet
-
-install -d -m 0750 \
-  /opt/docker/hermesops/project-data/mon-projet
+curl --fail http://127.0.0.1:8642/health
+curl --fail http://127.0.0.1:8787/health
 ```
 
-Le dépôt doit être propre :
+## Registering a project
+
+Create the workspace and data paths:
 
 ```bash
-git -C /opt/docker/hermesops/workspaces/mon-projet \
-  status --short --branch
+mkdir -p \
+  /opt/docker/hermesops/workspaces/my-project \
+  /opt/docker/hermesops/project-data/my-project
 ```
 
-Désactivation recommandée du push :
+Clone or initialize the project repository inside the workspace. Do not make
+HermesOps operate directly on an irreplaceable original copy.
+
+Create a local project configuration:
 
 ```bash
-git -C /opt/docker/hermesops/workspaces/mon-projet \
-  config remote.origin.pushurl disabled://
+cd /opt/docker/hermesops/repo
 
-git -C /opt/docker/hermesops/workspaces/mon-projet \
-  config push.default nothing
+cp \
+  config/examples/project.example.toml \
+  config/projects.d/my-project.toml
 ```
 
-### 2. Créer la configuration projet
-
-Créez :
-
-```text
-config/projects.d/mon-projet.toml
-```
-
-Exemple :
+Edit the local file and set at least:
 
 ```toml
 schema_version = 1
 
 [project]
-id = "mon-projet"
-name = "Mon Projet"
+id = "my-project"
+name = "My Project"
 enabled = true
-policy = "default"
 
 [paths]
-repo = "/opt/docker/hermesops/workspaces/mon-projet"
-data = "/opt/docker/hermesops/project-data/mon-projet"
+repo = "/opt/docker/hermesops/workspaces/my-project"
+data = "/opt/docker/hermesops/project-data/my-project"
 
-[git]
-default_branch = "main"
-allow_push = false
-require_clean = true
-
-[execution]
-writer_concurrency = 1
-max_parallel_tasks = 2
-
-[review]
-required = true
+[policy]
+id = "default"
 ```
 
-### 3. Synchroniser le registre
+Local files under `config/projects.d/*.toml` are ignored by Git.
+
+Validate and synchronize:
 
 ```bash
-cd /opt/docker/hermesops/repo
-
-scripts/hermesops-registry.py validate
-scripts/hermesops-registry.py sync
+/opt/docker/hermesops/repo/scripts/hermesops-registry.py validate
+/opt/docker/hermesops/repo/scripts/hermesops-registry.py sync
+/opt/docker/hermesops/repo/scripts/hermesops-registry.py list
 ```
 
-Lister les projets enregistrés :
+## Operating HermesOps today
+
+Daily operation is not yet fully WebUI-based.
+
+Discover the operator commands:
 
 ```bash
-sqlite3 -header -column \
-  /opt/docker/hermesops/state/controller/hermesops.db \
-  'SELECT project_id, display_name, enabled, repo_path, data_path, policy_id
-   FROM projects
-   ORDER BY project_id;'
+/opt/docker/hermesops/repo/scripts/hermesopsctl --help
 ```
 
----
-
-## Utilisation quotidienne
-
-### 1. Écrire un objectif
-
-Un bon objectif doit être borné et vérifiable.
-
-Exemple :
+Useful status commands include:
 
 ```bash
-cat > "$HOME/objective.md" <<'EOF'
-Travaille uniquement dans le projet mon-projet.
+/opt/docker/hermesops/repo/scripts/hermesopsctl queue --active
 
-But :
-ajouter une documentation sur le système de sauvegarde.
-
-Périmètre autorisé :
-- docs/backup.md
-- README.md
-
-Interdictions :
-- ne pas modifier src/
-- ne pas modifier les dépendances
-- ne pas accéder aux secrets
-- ne pas pousser
-
-Validation :
-- git diff --check
-- tests hors ligne du projet
-- exactement un commit local
-- revue indépendante obligatoire
-EOF
-```
-
-Précisez toujours :
-
-- le projet ;
-- le résultat attendu ;
-- les chemins autorisés ;
-- les chemins interdits ;
-- les commandes de validation ;
-- le nombre ou le sujet de commit attendu ;
-- les accès réseau ou secrets interdits ;
-- les critères d’acceptation.
-
-### 2. Soumettre l’objectif
-
-```bash
-RESULT="$(
-  /opt/docker/hermesops/repo/scripts/hermesops-control.py submit \
-    --project mon-projet \
-    --file "$HOME/objective.md" \
-    --priority 10 \
-    --max-parallel 1 \
-    --planning-attempts 3
-)"
-
-printf '%s\n' "$RESULT"
-```
-
-Récupérer l’identifiant :
-
-```bash
-OBJECTIVE_ID="$(
-  python3 -c \
-    'import json,sys; print(json.load(sys.stdin)["objective"]["objective_id"])' \
-    <<<"$RESULT"
-)"
-
-echo "$OBJECTIVE_ID"
-```
-
-### 3. Suivre l’objectif
-
-```bash
-/opt/docker/hermesops/repo/scripts/hermesopsctl \
-  show "$OBJECTIVE_ID"
-```
-
-Journaux de l’orchestrateur :
-
-```bash
-journalctl --user \
-  -u hermesops-orchestrator.service \
-  -f
-```
-
-Journaux du notifier :
-
-```bash
-journalctl --user \
-  -u hermesops-notifier.service \
-  -f
-```
-
-### 4. Comprendre les états
-
-Cycle normal :
-
-```text
-QUEUED
-  → PLANNING
-  → RUNNING
-  → COMPLETED
-```
-
-États possibles en cas de problème :
-
-```text
-FAILED
-CANCELLED
-PAUSED
-BLOCKED
-```
-
-Un objectif `FAILED` ne signifie pas nécessairement que le système est cassé. Il peut signifier que le reviewer a correctement refusé un commit. Dans ce cas, la branche principale reste inchangée et la transaction est annulée.
-
----
-
-## Ce que fait HermesOps après la soumission
-
-1. L’objectif est écrit dans la base.
-2. L’orchestrateur IA construit un plan.
-3. Le plan est enregistré avant exécution.
-4. Une transaction Git prend un snapshot.
-5. Un worker reçoit un clone ou worktree isolé.
-6. Le worker produit un commit local.
-7. Un reviewer séparé inspecte le commit en lecture seule.
-8. L’intégrateur vérifie :
-   - le snapshot ;
-   - la base du commit ;
-   - l’actualité de la revue ;
-   - la propreté de la branche principale ;
-   - le verdict.
-9. Le commit est intégré uniquement avec `APPROVE / PASS`.
-10. Le projet est revalidé.
-11. Telegram et l’outbox durable reçoivent le résultat.
-
----
-
-## Diagnostic rapide
-
-### État des conteneurs
-
-```bash
-docker ps \
-  --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-```
-
-### État du superviseur
-
-```bash
-/opt/docker/hermesops/repo/scripts/hermesops-supervisor.py \
-  status
-```
-
-### État de l’orchestrateur
-
-```bash
 /opt/docker/hermesops/repo/scripts/hermesops-orchestrator.py \
   daemon-status
-```
 
-### État du notifier
+/opt/docker/hermesops/repo/scripts/hermesops-supervisor.py \
+  status
 
-```bash
 /opt/docker/hermesops/repo/scripts/hermesops-notifier.py \
   status
 ```
 
-### Travaux actifs
+Before submitting a real objective, inspect the exact CLI contract shipped by
+the installed version:
 
 ```bash
-sqlite3 -header -column \
-  /opt/docker/hermesops/state/controller/hermesops.db \
-  "
-  SELECT COUNT(*) AS active_locks FROM project_locks;
-
-  SELECT COUNT(*) AS active_runs
-  FROM runs
-  WHERE status NOT IN ('COMPLETED','FAILED','CANCELLED');
-
-  SELECT COUNT(*) AS active_objectives
-  FROM objective_queue
-  WHERE status NOT IN ('COMPLETED','FAILED','CANCELLED');
-  "
+/opt/docker/hermesops/repo/scripts/hermesopsctl submit --help
 ```
 
-### Notifications non drainées
+This avoids copying flags from a different release.
+
+## Runtime verification
+
+Containers:
 
 ```bash
-sqlite3 -header -column \
-  /opt/docker/hermesops/state/controller/hermesops.db \
-  "
-  SELECT status, COUNT(*) AS count
-  FROM notification_outbox
-  GROUP BY status
-  ORDER BY status;
-  "
+docker ps --format \
+  'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
 
-### Détecter les ressources orphelines
-
-Lecture seule :
+User services:
 
 ```bash
-/opt/docker/hermesops/repo/scripts/hermesops-recovery.py \
-  cleanup-orphans --dry-run
+systemctl --user is-active \
+  hermesops-supervisor.service \
+  hermesops-orchestrator.service \
+  hermesops-notifier.service
 ```
 
----
-
-## Récupération manuelle
-
-Évaluer un run :
+Full runtime validation with configured authentication:
 
 ```bash
-/opt/docker/hermesops/repo/scripts/hermesops-recovery.py \
-  assess --run RUN_ID
+cd /opt/docker/hermesops/repo
+./validate.sh --runtime
 ```
 
-Appliquer une décision seulement après avoir vérifié le diagnostic :
+Worker image inside the isolated sandbox engine:
 
 ```bash
-/opt/docker/hermesops/repo/scripts/hermesops-recovery.py \
-  recover \
-  --run RUN_ID \
-  --owner operator-manual \
-  --expected-decision ROLLBACK_SAFE
+docker exec hermesops-sandbox-engine \
+  docker image inspect \
+  hermesops-worker-sandbox:0.2 \
+  --format 'id={{.Id}}'
 ```
 
-Ne forcez jamais une décision différente de celle calculée sans comprendre l’état du snapshot, du worktree et de la branche principale.
+## Persistence
 
----
-
-## Sauvegardes
-
-HermesOps conserve notamment :
+The public installation has been exercised through:
 
 ```text
-/opt/docker/hermesops/backups/
-/opt/docker/hermesops/backups/transactions/
-/opt/docker/hermesops/state/controller/hermesops.db
+preflight
+→ installation
+→ complete host reboot
+→ automatic container recovery
+→ automatic user-service recovery
+→ health verification
+→ worker image persistence
+→ conservative uninstall
 ```
 
-Créer une sauvegarde Git du contrôleur :
+User-level linger is required so the three HermesOps services can start without
+an interactive login.
+
+## Backups and state
+
+Important persistent paths:
+
+```text
+/opt/docker/hermesops/state/controller/hermesops.db
+/opt/docker/hermesops/state/hermes-home
+/opt/docker/hermesops/secrets
+/opt/docker/hermesops/workspaces
+/opt/docker/hermesops/project-data
+/opt/docker/hermesops/backups
+```
+
+Example manual database backup:
+
+```bash
+mkdir -p /opt/docker/hermesops/backups
+
+sqlite3 \
+  /opt/docker/hermesops/state/controller/hermesops.db \
+  ".backup '/opt/docker/hermesops/backups/controller-manual.sqlite'"
+```
+
+Example infrastructure Git bundle:
 
 ```bash
 git -C /opt/docker/hermesops/repo \
@@ -678,90 +766,118 @@ git -C /opt/docker/hermesops/repo \
   --all
 ```
 
-Sauvegarder SQLite :
+Project repositories and external project data require their own backup policy.
+
+## Conservative uninstall
+
+From the source tree:
 
 ```bash
-sqlite3 /opt/docker/hermesops/state/controller/hermesops.db \
-  ".backup '/opt/docker/hermesops/backups/controller-manual.sqlite'"
+./uninstall.sh --user "$USER"
 ```
 
-Vérifier :
+The conservative uninstall:
 
-```bash
-git bundle verify \
-  /opt/docker/hermesops/backups/hermesops-manual.bundle
+- stops and removes HermesOps containers;
+- disables and removes HermesOps user systemd units;
+- preserves the installed repository;
+- preserves SQLite state;
+- preserves secrets;
+- preserves workspaces and project data;
+- preserves backups.
 
-sqlite3 \
-  /opt/docker/hermesops/backups/controller-manual.sqlite \
-  'PRAGMA quick_check;'
-```
+Review `./uninstall.sh --help` before requesting destructive removal.
 
----
+## Current limitations
 
-## Structure du dépôt
+`v0.1.0-alpha` is a foundation release. Important limitations include:
+
+- the dedicated HermesOps Console does not exist yet;
+- the current WebUI is a temporary upstream compatibility interface;
+- project and objective administration still uses CLI tools;
+- sandbox profiles cannot yet be edited in the WebUI;
+- Hermesfiles are not implemented;
+- the default worker image must be imported from a release archive;
+- custom worker images are not yet a supported first-class workflow;
+- public installation currently targets Debian 12 amd64 only;
+- installation currently assumes UID/GID `1000:1000`;
+- high worker concurrency has not been validated as a public release target;
+- operators must still understand Git, Docker, systemd, and recovery policy;
+- this alpha should be evaluated on disposable or well-backed-up projects
+  before production use.
+
+## Roadmap
+
+### `v0.1.0-alpha`
+
+- publish the validated foundation;
+- provide the source release and worker image asset;
+- document installation, architecture, security, and limitations;
+- gather real installation feedback.
+
+### `v0.2.0-beta` — long-term, no committed date
+
+- HermesOps Controller API;
+- dedicated HermesOps Console;
+- WebUI-first daily operation;
+- functional Hermesfile schema;
+- sandbox profile editor;
+- build, validation, test, activation, and rollback workflows;
+- automatic official worker-image retrieval;
+- multiple versioned sandbox profiles;
+- project creation and onboarding from the WebUI;
+- objective, task, review, recovery, memory, and backup views;
+- structured audit log and role/model configuration.
+
+Later milestones may expand multi-project scheduling, notifications, provider
+adapters, distributed workers, richer project memory, and advanced resource
+management.
+
+## Relationship with Hermes Agent
+
+HermesOps does not replace Hermes Agent.
 
 ```text
-compose/              Déploiement Docker et images verrouillées
-config/               Contrôleur, rôles, projets et politiques
-docs/                 Architecture, état et procédures
-migrations/           Migrations SQLite
-profiles/             Contrats des rôles Hermes
-scripts/              CLI et services du contrôleur
-systemd/user/         Services persistants utilisateur
-tests/                Tests de fondation et de récupération
-VERSION                Version du contrôleur
+Hermes Agent
+= upstream AI execution engine
+
+HermesOps
+= project orchestration, safety, persistence, isolation, review, recovery,
+  automation, and the future dedicated WebUI
 ```
 
-Arborescence runtime :
+HermesOps should remain sufficiently separated from Hermes Agent that upstream
+Agent updates can be adopted without rewriting the HermesOps control plane.
 
-```text
-/opt/docker/hermesops/
-├── repo/
-├── state/
-│   ├── controller/
-│   ├── hermes-home/
-│   └── sandboxes/
-├── runtime/
-├── workspaces/
-├── project-data/
-├── backups/
-└── secrets/
-```
+## Contributing
 
----
+The project is early and interfaces may change.
 
-## Limites actuelles
-
-- Le bootstrap public est actuellement validé uniquement pour Debian 12 amd64.
-- La WebUI n’expose pas encore toutes les fonctions administratives du CLI.
-- Les approbations humaines restent principalement pilotées côté contrôleur.
-- Les profils et politiques sont encore destinés à des opérateurs techniques.
-- La compatibilité hors Debian 12 n’est pas encore validée.
-- Aucun push automatique vers un remote n’est autorisé.
-- HermesOps reste une alpha : utilisez-le uniquement avec des dépôts sauvegardés.
-
----
-
-## Prochaine étape du projet
-
-La priorité est la validation de la release `0.1.0-alpha` :
-
-1. appliquer le package de publication et revoir son commit ;
-2. exporter l'image worker validée comme asset de release ;
-3. tester l'installation sur une Debian 12 vierge ;
-4. choisir et ajouter explicitement la licence ;
-5. publier la release et son archive worker ;
-6. seulement ensuite reprendre TradingBot et les fonctions avancées.
-
----
-
-## Avant de publier sur GitHub
+Before contributing:
 
 ```bash
+./preflight.sh
 ./validate.sh --static
-./scripts/check-secrets.sh
-git status --short
 ```
 
-La release doit inclure l'archive worker et son fichier SHA-256. Le push, le tag
-et la création de la release restent des actions manuelles de l'opérateur.
+Do not include:
+
+- `auth.json`;
+- real `.env` files;
+- secrets;
+- private project registrations;
+- SQLite databases;
+- project workspaces;
+- generated runtime state.
+
+Security-sensitive findings should not be placed in a public issue with
+reproduction secrets. See [`SECURITY.md`](SECURITY.md).
+
+## License
+
+HermesOps is licensed under the **Apache License 2.0**.
+
+See [`LICENSE`](LICENSE).
+
+Third-party components, including Hermes Agent and the temporary upstream
+WebUI, retain their own licenses and copyrights.
