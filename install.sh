@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1
 
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,7 +137,7 @@ ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
     exit 1
 }
 
-BASE_PACKAGES=(ca-certificates curl git gzip python3 python3-yaml rsync sqlite3)
+BASE_PACKAGES=(ca-certificates curl git gzip python3 python3-yaml rsync sqlite3 util-linux)
 MISSING_PACKAGES=()
 for package in "${BASE_PACKAGES[@]}"; do
     dpkg-query -W -f='${Status}' "$package" 2>/dev/null |
@@ -151,6 +152,11 @@ if ((${#MISSING_PACKAGES[@]})); then
     sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
         --no-install-recommends "${MISSING_PACKAGES[@]}"
 fi
+
+command -v runuser >/dev/null 2>&1 || {
+    echo "runuser reste absent après installation de util-linux." >&2
+    exit 1
+}
 
 HOST_LOCK="${SOURCE}/config/host-packages.lock.toml"
 [[ -f "$HOST_LOCK" ]] || {

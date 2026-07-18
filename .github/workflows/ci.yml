@@ -21,7 +21,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             python3-yaml \
-            sqlite3
+            rsync \
+            sqlite3 \
+            util-linux
 
       - name: Validate repository
         run: ./validate.sh --static

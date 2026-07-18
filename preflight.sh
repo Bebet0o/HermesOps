@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 export LC_ALL=C
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${HERMESOPS_ROOT:-/opt/docker/hermesops}"
@@ -63,27 +64,47 @@ fi
 
 for command_name in \
     bash tar sha256sum systemctl loginctl timeout flock install \
-    stat find grep sed awk apt-get apt-cache dpkg-query getent runuser
+    stat find grep sed awk apt-get apt-cache dpkg-query getent
  do
     command -v "$command_name" >/dev/null 2>&1 \
         && pass "Commande système présente: $command_name" \
         || fail "Commande système absente: $command_name"
 done
 
+STATIC_VALIDATION_READY=1
+
 for command_name in git python3 sqlite3 curl rsync gzip; do
-    command -v "$command_name" >/dev/null 2>&1 \
-        && pass "Dépendance présente: $command_name" \
-        || warn "Dépendance absente; install.sh peut installer: $command_name"
+    if command -v "$command_name" >/dev/null 2>&1; then
+        pass "Dépendance présente: $command_name"
+    else
+        warn "Dépendance absente; install.sh peut installer: $command_name"
+        case "$command_name" in
+            python3|sqlite3|rsync)
+                STATIC_VALIDATION_READY=0
+                ;;
+        esac
+    fi
 done
 
+if command -v runuser >/dev/null 2>&1; then
+    pass "Commande système présente: runuser"
+else
+    warn "runuser absent; install.sh installera le paquet util-linux"
+fi
+
 if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY' >/dev/null 2>&1 \
-        && pass "Module Python yaml présent" \
-        || warn "Module Python yaml absent; install.sh installera python3-yaml"
+    if python3 - <<'PY' >/dev/null 2>&1
 import yaml
 PY
+    then
+        pass "Module Python yaml présent"
+    else
+        warn "Module Python yaml absent; install.sh installera python3-yaml"
+        STATIC_VALIDATION_READY=0
+    fi
 else
     warn "Contrôle du module yaml reporté"
+    STATIC_VALIDATION_READY=0
 fi
 
 if [[ "$EUID" != 0 ]] && ! command -v sudo >/dev/null 2>&1; then
@@ -153,14 +174,14 @@ else
 fi
 
 if [[ -x "${SOURCE}/validate.sh" ]]; then
-    if command -v python3 >/dev/null 2>&1 &&
+    if [[ "$STATIC_VALIDATION_READY" == "1" ]] &&
        command -v docker >/dev/null 2>&1 &&
        docker compose version >/dev/null 2>&1; then
         "${SOURCE}/validate.sh" --static --quiet \
             && pass "Validation statique complète" \
             || fail "Validation statique complète"
     else
-        warn "Validation Compose complète reportée à install.sh"
+        warn "Validation statique complète reportée après installation des dépendances"
     fi
 else
     fail "validate.sh absent"

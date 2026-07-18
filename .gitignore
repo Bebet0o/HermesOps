@@ -43,5 +43,3 @@ config/projects.d/*.toml
 # Public exceptions
 !compose/images.lock.env
 !compose/*.env.example
-!config/projects.d/transaction-fixture.toml
-!config/projects.d/transaction-fixture-b.toml
