@@ -1,6 +1,5 @@
 [Unit]
 Description=HermesOps durable notification outbox
-After=default.target
 StartLimitIntervalSec=60
 StartLimitBurst=6
 

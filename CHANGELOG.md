@@ -31,6 +31,8 @@
 - le test du contrat `.gitignore` fonctionne désormais depuis une archive source sans métadonnées `.git`.
 - l’installation sans `auth.json` diffère maintenant la validation des profils IA au lieu d’échouer ;
 - la validation du layout accepte une installation issue d’une archive source sans répertoire `.git`.
+- les services utilisateur ne s’ordonnent plus après `default.target`, ce qui supprime le cycle de démarrage au reboot ;
+- l’installateur redémarre les services dans l’ordre puis vérifie explicitement leur état actif.
 
 ### Security
 

@@ -1,7 +1,6 @@
 [Unit]
 Description=HermesOps automatic Supervisor and Watchdog
 Documentation=file:///opt/docker/hermesops/repo/docs/SUPERVISOR.md
-After=default.target
 
 [Service]
 Type=simple

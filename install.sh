@@ -507,9 +507,26 @@ done
 sudo_run loginctl enable-linger "$TARGET_USER"
 
 if [[ "$SKIP_START" == 0 ]]; then
+    USER_UNITS=(
+        hermesops-supervisor.service
+        hermesops-orchestrator.service
+        hermesops-notifier.service
+    )
+
     user_run systemctl --user daemon-reload
-    user_run systemctl --user enable --now \
-        hermesops-supervisor.service hermesops-orchestrator.service hermesops-notifier.service
+    user_run systemctl --user enable "${USER_UNITS[@]}"
+
+    user_run systemctl --user restart hermesops-supervisor.service
+    user_run systemctl --user restart hermesops-orchestrator.service
+    user_run systemctl --user restart hermesops-notifier.service
+
+    for unit in "${USER_UNITS[@]}"; do
+        user_run systemctl --user is-active --quiet "$unit" || {
+            echo "Service utilisateur inactif après installation: $unit" >&2
+            exit 1
+        }
+    done
+
     if [[ -f "${ROOT}/state/hermes-home/auth.json" ]]; then
         user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/validate.sh" --runtime
     else
