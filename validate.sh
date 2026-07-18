@@ -39,6 +39,11 @@ static_validation() {
         tests/test-systemd-user-boot-order.sh \
         tests/test-release-documentation.sh \
         tests/test-controller-contracts.sh \
+        tests/test-controller-api.sh tests/test_controller_api.py \
+        scripts/hermesops-controller-api.py \
+        controller_api/__init__.py controller_api/core.py \
+        controller_api/server.py \
+        docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -124,6 +129,7 @@ PY
     "${REPO}/tests/test-systemd-user-boot-order.sh"
     "${REPO}/tests/test-release-documentation.sh"
     "${REPO}/tests/test-controller-contracts.sh"
+    "${REPO}/tests/test-controller-api.sh"
 
     TMP="$(mktemp -d)"
     mkdir -p \
