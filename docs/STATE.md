@@ -22,3 +22,10 @@ Le projet réel `tradingbot` est enregistré sur la branche `master` dans
 du dépôt historique a été sauvegardé puis importé dans un checkpoint local
 propre. Le push est désactivé, la revue est obligatoire et le dépôt historique
 reste intact.
+
+## TradingBot — premier objectif réel 4D-B
+
+L'objectif `objective-3ea998f036434087ba1e5b12d3b3ebcf` a terminé le pipeline AI complet sur le projet
+`tradingbot`. Le commit intégré est `59d232008a89a5a671462af7f0805dfa5e50ca55`. Le changement est
+strictement documentaire, la revalidation hors ligne et Ruff sont passés, et
+Telegram a reçu l'événement `OBJECTIVE_COMPLETED`.
