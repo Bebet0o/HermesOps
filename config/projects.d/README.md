@@ -1,11 +1,29 @@
-# Registre actif des projets
+# Projets HermesOps
 
-Chaque fichier `*.toml` de ce répertoire représente un projet géré par
-HermesOps.
+Ce répertoire mélange volontairement deux catégories :
 
-Le répertoire est vide tant que les tests de panne de l'infrastructure ne sont
-pas validés.
+- les fixtures publiques de fondation, versionnées et toujours désactivées ;
+- les projets réels propres à l'installation, ignorés par Git.
 
-Un exemple complet est disponible dans :
+Les seuls fichiers `*.toml` autorisés dans l'index public sont :
 
-`config/examples/project.example.toml`
+```text
+transaction-fixture.toml
+transaction-fixture-b.toml
+```
+
+Pour ajouter un projet local :
+
+```bash
+cp ../examples/project.example.toml ./mon-projet.toml
+```
+
+Adapter ensuite les chemins, puis exécuter :
+
+```bash
+/opt/docker/hermesops/repo/scripts/hermesops-registry.py validate
+/opt/docker/hermesops/repo/scripts/hermesops-registry.py sync
+```
+
+Les configurations de projets réels ne doivent pas être publiées. Les deux
+fixtures doivent rester avec `enabled = false`.

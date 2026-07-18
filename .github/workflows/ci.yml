@@ -1,0 +1,32 @@
+name: HermesOps CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-yaml \
+            sqlite3
+
+      - name: Validate repository
+        run: ./validate.sh --static
+
+      - name: Show version
+        run: |
+          printf 'HermesOps version: '
+          cat VERSION

@@ -134,20 +134,24 @@ sudo loginctl enable-linger "$USER"
 
 ## Installation
 
-### Important avant une installation publique
+### Installation automatisée
 
-L’instance actuelle est pleinement fonctionnelle, mais elle a été construite et validée par jalons. Le dépôt contient le runtime, les migrations, les tests, les unités systemd et les fichiers Compose, mais le **bootstrap public en une seule commande n’est pas encore consolidé**.
+La release publique fournit désormais un bootstrap idempotent pour Debian 12
+amd64. Il préserve les secrets, bases, workspaces et configurations locales,
+et crée une sauvegarde avant toute mise à niveau divergente.
 
-Avant d’annoncer une installation « clone and run », il reste à publier un `install.sh` idempotent qui :
+```bash
+git clone git@github.com:Bebet0o/HermesOps.git
+cd HermesOps
+./preflight.sh
+./install.sh
+```
 
-1. crée l’arborescence ;
-2. initialise la base et applique les migrations ;
-3. installe les profils Hermes ;
-4. installe les unités systemd utilisateur ;
-5. vérifie les secrets et l’authentification ;
-6. lance les tests de fondation.
+Un `auth.json` existant et l'archive worker peuvent être fournis avec
+`--auth-file` et `--worker-image-archive`. Consultez
+`docs/PUBLIC_INSTALLATION.md`.
 
-Les instructions ci-dessous correspondent à l’installation alpha actuellement validée.
+### Installation manuelle de référence
 
 ### 1. Installer les dépendances système
 
@@ -728,7 +732,7 @@ Arborescence runtime :
 
 ## Limites actuelles
 
-- Le bootstrap propre d’un hôte vierge n’est pas encore regroupé dans un installateur public unique.
+- Le bootstrap public est actuellement validé uniquement pour Debian 12 amd64.
 - La WebUI n’expose pas encore toutes les fonctions administratives du CLI.
 - Les approbations humaines restent principalement pilotées côté contrôleur.
 - Les profils et politiques sont encore destinés à des opérateurs techniques.
@@ -740,66 +744,24 @@ Arborescence runtime :
 
 ## Prochaine étape du projet
 
-Le moteur n’a plus besoin d’un nouveau jalon fondamental avant d’être utilisé.
+La priorité est la validation de la release `0.1.0-alpha` :
 
-La priorité est maintenant la **mise en produit** :
-
-1. créer un installateur idempotent pour hôte vierge ;
-2. ajouter des fichiers `.env.example` sans secret ;
-3. ajouter un contrôle pré-push contre les secrets et bases SQLite ;
-4. ajouter une CI pour les tests de fondation ;
-5. documenter l’ajout d’un fournisseur autre qu’OpenAI Codex ;
-6. créer une release `0.1.0-alpha` ;
-7. seulement ensuite reprendre les fonctions avancées et les nouveaux projets.
+1. appliquer le package de publication et revoir son commit ;
+2. exporter l'image worker validée comme asset de release ;
+3. tester l'installation sur une Debian 12 vierge ;
+4. choisir et ajouter explicitement la licence ;
+5. publier la release et son archive worker ;
+6. seulement ensuite reprendre TradingBot et les fonctions avancées.
 
 ---
 
 ## Avant de publier sur GitHub
 
-Vérifiez qu’aucun secret ou état runtime n’est suivi :
-
 ```bash
-cd /opt/docker/hermesops/repo
-
+./validate.sh --static
+./scripts/check-secrets.sh
 git status --short
-
-git ls-files |
-grep -Ei \
-  '(^|/)(auth\.json|secrets?/|.*\.env$|.*\.sqlite$|.*\.db$|controller-validation-evidence\.json$)' \
-  && {
-    echo "ERREUR : fichier sensible suivi par Git"
-    exit 1
-  } || true
 ```
 
-Vérifiez également :
-
-```bash
-git grep -nEi \
-  '(api[_-]?key|bot[_-]?token|password|secret)[[:space:]]*[:=][[:space:]]*[^<[:space:]]+' \
-  -- . \
-  ':!README.md' \
-  ':!docs/' || true
-```
-
-Commit du README :
-
-```bash
-git add README.md
-git commit -m "docs: add public installation and usage guide"
-```
-
-Configurer le remote, seulement s’il n’existe pas :
-
-```bash
-git remote add origin \
-  git@github.com:VOTRE_COMPTE/HermesOps.git
-```
-
-Publication :
-
-```bash
-git push -u origin main
-```
-
-Le push doit être effectué manuellement par l’opérateur. Les workers HermesOps ne doivent jamais publier le dépôt.
+La release doit inclure l'archive worker et son fichier SHA-256. Le push, le tag
+et la création de la release restent des actions manuelles de l'opérateur.
