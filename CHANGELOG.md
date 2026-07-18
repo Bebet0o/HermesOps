@@ -29,6 +29,8 @@
 - `util-linux` est une dépendance explicite de l’installateur.
 - les exceptions `.gitignore` qui republiaient les fixtures locales ont été supprimées.
 - le test du contrat `.gitignore` fonctionne désormais depuis une archive source sans métadonnées `.git`.
+- l’installation sans `auth.json` diffère maintenant la validation des profils IA au lieu d’échouer ;
+- la validation du layout accepte une installation issue d’une archive source sans répertoire `.git`.
 
 ### Security
 

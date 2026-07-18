@@ -23,10 +23,16 @@ for directory in "${required_directories[@]}"; do
     }
 done
 
-[[ -d "${REPO}/.git" ]] || {
-    echo "Le dépôt Git est absent." >&2
-    exit 1
-}
+for file in \
+    "${REPO}/VERSION" \
+    "${REPO}/compose/agent.yaml" \
+    "${REPO}/config/controller.toml"
+do
+    [[ -f "$file" ]] || {
+        echo "ABSENT: $file" >&2
+        exit 1
+    }
+done
 
 secret_mode="$(stat -c '%a' "${ROOT}/secrets")"
 
@@ -35,6 +41,14 @@ secret_mode="$(stat -c '%a' "${ROOT}/secrets")"
     exit 1
 }
 
-git -C "$REPO" rev-parse --verify HEAD >/dev/null
-
-echo "HermesOps layout: PASS"
+if [[ -d "${REPO}/.git" ]]; then
+    git -C "$REPO" rev-parse --verify HEAD >/dev/null
+    echo "HermesOps layout: PASS (git checkout)"
+else
+    version="$(tr -d '\r\n' <"${REPO}/VERSION")"
+    [[ -n "$version" ]] || {
+        echo "VERSION vide dans la source installée." >&2
+        exit 1
+    }
+    echo "HermesOps layout: PASS (source archive ${version})"
+fi

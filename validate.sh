@@ -35,6 +35,7 @@ static_validation() {
         scripts/export-worker-image.sh scripts/init-test-fixtures.sh \
         tests/test-public-empty-registry.sh \
         tests/test-preflight-minimal-host.sh \
+        tests/test-install-no-auth-contract.sh \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -116,6 +117,7 @@ PY
 
     "${REPO}/tests/test-public-empty-registry.sh"
     "${REPO}/tests/test-preflight-minimal-host.sh"
+    "${REPO}/tests/test-install-no-auth-contract.sh"
 
     TMP="$(mktemp -d)"
     mkdir -p \

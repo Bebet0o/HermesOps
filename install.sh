@@ -487,7 +487,14 @@ PY
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-db.py" migrate
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-db.py" integrity
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-roles.py" sync
-    user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-roles.py" verify-profiles
+
+    if [[ -f "${ROOT}/state/hermes-home/auth.json" ]]; then
+        user_run env HERMESOPS_ROOT="$ROOT" \
+            "${REPO}/scripts/hermesops-roles.py" verify-profiles
+    else
+        echo "ATTENTION: auth.json absent; validation des profils IA reportée."
+    fi
+
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-registry.py" validate
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-registry.py" sync
 fi
