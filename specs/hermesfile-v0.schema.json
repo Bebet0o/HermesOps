@@ -313,7 +313,7 @@
             "readOnlyRoot",
             "capabilities",
             "seccompProfile",
-            "allowSecrets",
+            "secrets",
             "allowDockerSocket",
             "allowDeviceAccess"
           ],
@@ -358,8 +358,9 @@
                 "default"
               ]
             },
-            "allowSecrets": {
-              "type": "boolean"
+            "secrets": {
+              "const": false,
+              "description": "Runtime secret bindings are not supported by Hermesfile v0alpha1."
             },
             "allowDockerSocket": {
               "const": false
@@ -591,7 +592,7 @@
             "add": []
           },
           "seccompProfile": "default",
-          "allowSecrets": false,
+          "secrets": false,
           "allowDockerSocket": false,
           "allowDeviceAccess": false
         },

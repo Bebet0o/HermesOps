@@ -22,6 +22,18 @@ All notable changes to HermesOps will be documented in this file.
 - accepted architecture decisions covering state ownership, privilege
   boundaries, Agent adaptation, immutable images, replay, and confirmations.
 
+### Fixed
+
+- synchronized the complete Controller HTTP documentation with OpenAPI;
+- preserved multi-project objectives and numeric queue priorities in API v1;
+- added a machine-readable AsyncAPI WebSocket contract;
+- removed forward-compatibility contradictions from response and event schemas;
+- prohibited unsupported Hermesfile v0 secret eligibility;
+- documented the persistence delta required before Controller writes.
+
+- scanner-safe CSRF and Hermesfile schema identifiers that preserve the
+  security contract without resembling tracked secret assignments;
+
 ### Changed
 
 - public version normalized to `0.1.0-alpha`;

@@ -318,11 +318,18 @@ The API never returns private Git credentials.
 ### Objectives
 
 ```text
+GET  /objectives
+POST /objectives
 GET  /projects/{project_id}/objectives
 POST /projects/{project_id}/objectives
 GET  /objectives/{objective_id}
 POST /objectives/{objective_id}/commands/{command}
 ```
+
+The top-level collection is canonical and preserves the current HermesOps
+ability to submit one objective across multiple projects. The nested project
+collection is a convenience view and injects the path project as the only
+project when creating an objective.
 
 Initial objective commands:
 
@@ -340,9 +347,13 @@ Objective creation body:
 
 ```json
 {
+  "project_ids": ["tradingbot"],
   "title": "Implement persistent market replay",
   "description": "Create the next independently reviewable milestone.",
-  "priority": "high",
+  "priority": 100,
+  "not_before": null,
+  "max_parallel_tasks": 1,
+  "planning_max_attempts": 3,
   "constraints": [
     "No direct push",
     "Preserve existing replay parity"
@@ -565,6 +576,30 @@ GET /audit/{audit_id}
 
 Audit data is read-only through the public API.
 
+## Machine-readable surface parity
+
+[`../../specs/controller-api-v1.openapi.json`](../../specs/controller-api-v1.openapi.json)
+is normative for HTTP. Every endpoint listed in this document must exist in
+that OpenAPI document in the same commit. The contract regression test compares
+the two surfaces exactly.
+
+[`../../specs/controller-events-v1.asyncapi.json`](../../specs/controller-events-v1.asyncapi.json)
+is normative for the authenticated WebSocket transport.
+
+The API is a domain projection, not a direct table-shaped wrapper. The mapping
+from the current SQLite model and the persistence required by later milestones
+is defined in
+[`../architecture/CONTROLLER_PERSISTENCE_DELTA.md`](../architecture/CONTROLLER_PERSISTENCE_DELTA.md).
+
+### Objective compatibility
+
+The existing runtime stores `project_scope_json`, accepts repeated `--project`
+arguments, uses numeric priority `-1000..1000` with lower values first, and
+supports `not_before`, task concurrency, and planning-attempt limits. API v1
+preserves those semantics. A future Console may display friendly priority
+labels, but labels are presentation only and are never persisted as the API
+value.
+
 ## Resource state models
 
 ### Objective
@@ -641,8 +676,8 @@ The Controller is the only authority for transitions.
 ## API versioning
 
 - Base namespace: `/api/v1`.
-- Additive fields may be introduced without a new namespace.
-- Clients must ignore unknown response fields.
+- Additive response fields may be introduced without a new namespace.
+- Clients must ignore unknown response fields; response schemas therefore remain forward-compatible.
 - Clients must not send unknown request fields.
 - Removed or behavior-breaking fields require a new API namespace after the
   first beta.

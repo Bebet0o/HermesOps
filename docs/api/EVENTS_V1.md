@@ -4,6 +4,7 @@ Status: **Design contract**
 Transport: authenticated WebSocket
 Endpoint: `/api/v1/events`
 Schema: [`../../specs/events-v1.schema.json`](../../specs/events-v1.schema.json)
+Transport contract: [`../../specs/controller-events-v1.asyncapi.json`](../../specs/controller-events-v1.asyncapi.json)
 
 ## Purpose
 

@@ -15,3 +15,5 @@ tests/test-controller-contracts.sh
 
 The schemas are not proof that the runtime exists. Implementation milestones
 must claim support only after corresponding integration and security tests pass.
+
+- `controller-events-v1.asyncapi.json`: authenticated replayable WebSocket transport.

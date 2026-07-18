@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hermesops.dev/schemas/events-v1.schema.json",
   "title": "HermesOps Event Envelope v1",
-  "description": "Persisted redacted event envelope emitted by HermesOps Controller.",
+  "description": "Persisted redacted event envelope emitted by HermesOps Controller. Unknown well-formed event types are valid and must be preserved by consumers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -30,7 +30,8 @@
     },
     "type": {
       "type": "string",
-      "enum": [
+      "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$",
+      "x-hermesops-known-event-types": [
         "system.component_state_changed",
         "system.health_changed",
         "system.capacity_changed",

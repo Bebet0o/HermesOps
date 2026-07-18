@@ -119,11 +119,15 @@ Milestone 2A is complete when:
 6. Hermes Agent is accessed only through a Controller adapter;
 7. the event stream has stable event IDs, persisted sequence numbers, and
    replay semantics;
-8. the Hermesfile schema rejects privileged mode and arbitrary host mounts;
+8. the Hermesfile schema rejects privileged mode, arbitrary host mounts, and unsupported secret eligibility;
 9. base images require immutable SHA-256 digests;
 10. the repository's static validation runs the contract regression test;
 11. no runtime behavior changes as part of this milestone;
-12. the branch remains clean and all existing runtime validation still passes.
+12. the branch remains clean and all existing runtime validation still passes;
+13. HTTP documentation and OpenAPI expose exactly the same endpoint surface;
+14. WebSocket transport has a machine-readable AsyncAPI contract;
+15. the API preserves current multi-project objective and numeric-priority semantics;
+16. forward-compatible response fields and event types do not contradict the schemas.
 
 ## Compatibility rules
 
@@ -137,8 +141,8 @@ Milestone 2A is complete when:
   in a later milestone.
 - Unknown fields are rejected in Hermesfile v0 to prevent silent security
   policy drift.
-- Event consumers must ignore unknown event types but must never ignore a
-  schema-version mismatch.
+- Event consumers must preserve unknown well-formed event types but must never
+  ignore a schema-version mismatch.
 
 ## Next milestone
 

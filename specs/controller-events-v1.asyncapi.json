@@ -1,0 +1,189 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "HermesOps Controller Events",
+    "version": "1.0.0-design-rc1",
+    "description": "Authenticated replayable WebSocket contract for HermesOps Console.",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "servers": {
+    "local": {
+      "host": "127.0.0.1:{port}",
+      "pathname": "/api/v1/events",
+      "protocol": "ws",
+      "variables": {
+        "port": {
+          "default": "8080"
+        }
+      },
+      "security": [
+        {
+          "$ref": "#/components/securitySchemes/sessionCookie"
+        }
+      ]
+    }
+  },
+  "channels": {
+    "controllerEvents": {
+      "address": "/api/v1/events",
+      "messages": {
+        "subscribe": {
+          "$ref": "#/components/messages/Subscribe"
+        },
+        "serverFrame": {
+          "$ref": "#/components/messages/ServerFrame"
+        }
+      }
+    }
+  },
+  "operations": {
+    "subscribeToControllerEvents": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/controllerEvents"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/controllerEvents/messages/subscribe"
+        }
+      ]
+    },
+    "receiveControllerEvents": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/controllerEvents"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/controllerEvents/messages/serverFrame"
+        }
+      ]
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "httpApiKey",
+        "in": "cookie",
+        "name": "hermesops_session"
+      }
+    },
+    "messages": {
+      "Subscribe": {
+        "name": "subscribe",
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "after_sequence",
+            "topics"
+          ],
+          "properties": {
+            "type": {
+              "const": "subscribe"
+            },
+            "after_sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "topics": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 64
+            }
+          }
+        }
+      },
+      "ServerFrame": {
+        "name": "serverFrame",
+        "payload": {
+          "oneOf": [
+            {
+              "$ref": "https://hermesops.dev/schemas/events-v1.schema.json"
+            },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "type",
+                "connection_id",
+                "replay_from",
+                "latest_sequence"
+              ],
+              "properties": {
+                "type": {
+                  "const": "subscribed"
+                },
+                "connection_id": {
+                  "type": "string"
+                },
+                "replay_from": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "latest_sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "type",
+                "oldest_available_sequence",
+                "latest_sequence",
+                "required_action"
+              ],
+              "properties": {
+                "type": {
+                  "const": "replay_unavailable"
+                },
+                "oldest_available_sequence": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "latest_sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "required_action": {
+                  "const": "refresh_snapshot"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": true,
+              "required": [
+                "type",
+                "latest_sequence",
+                "occurred_at"
+              ],
+              "properties": {
+                "type": {
+                  "const": "heartbeat"
+                },
+                "latest_sequence": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "occurred_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

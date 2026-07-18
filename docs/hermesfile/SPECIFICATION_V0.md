@@ -10,7 +10,7 @@ contract to be implemented on the path to `v0.2.0-beta`.
 
 ## Purpose
 
-A Hermesfile is one declarative source file describing a reproducible HermesOps
+A Hermesfile is one declarative source file describing a reproducibility-oriented HermesOps
 sandbox profile.
 
 It replaces manual archive handling from the operator's perspective, but it
@@ -219,9 +219,16 @@ build:
         - --version
 ```
 
-### Reproducibility
+### Reproducibility and build identity
 
-Package declarations should be version-pinned where the ecosystem supports it.
+The base image is immutable, but external package repositories can still
+change. Package declarations must be version-pinned where the ecosystem
+supports it, and production-quality builders should use repository snapshots
+or lock metadata.
+
+A Hermesfile alone does not guarantee byte-for-byte rebuilding forever. The
+compiled resolution record and resulting image digest are the authoritative
+execution identity.
 
 The compiled build record stores:
 
@@ -419,7 +426,7 @@ security:
     add: []
 
   seccompProfile: default
-  allowSecrets: false
+  secrets: false
   allowDockerSocket: false
   allowDeviceAccess: false
 ```
@@ -540,11 +547,12 @@ The Hermesfile only declares:
 
 ```yaml
 security:
-  allowSecrets: false
+  secrets: false
 ```
 
-When `true` becomes supported, it means “eligible for Controller-approved
-bindings,” not “all secrets are available.”
+Hermesfile `v0alpha1` requires this value to remain `false`. A future schema
+version may introduce explicit Controller-approved secret bindings; v0 does not
+permit enabling them.
 
 ## Role binding
 
@@ -731,7 +739,7 @@ spec:
         - ALL
       add: []
     seccompProfile: default
-    allowSecrets: false
+    secrets: false
     allowDockerSocket: false
     allowDeviceAccess: false
 
