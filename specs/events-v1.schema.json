@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermesops.dev/schemas/events-v1.schema.json",
+  "title": "HermesOps Event Envelope v1",
+  "description": "Persisted redacted event envelope emitted by HermesOps Controller.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sequence",
+    "event_id",
+    "type",
+    "occurred_at",
+    "actor",
+    "aggregate",
+    "correlation_id",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_[A-Za-z0-9_-]{8,}$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "system.component_state_changed",
+        "system.health_changed",
+        "system.capacity_changed",
+        "system.degraded",
+        "system.recovered",
+        "project.created",
+        "project.updated",
+        "project.enabled",
+        "project.disabled",
+        "project.archived",
+        "project.deleted",
+        "project.health_changed",
+        "project.blocker_added",
+        "project.blocker_resolved",
+        "objective.created",
+        "objective.updated",
+        "objective.state_changed",
+        "objective.plan_requested",
+        "objective.plan_accepted",
+        "objective.plan_rejected",
+        "objective.archived",
+        "task.created",
+        "task.dependency_added",
+        "task.state_changed",
+        "task.claimed",
+        "task.blocked",
+        "task.unblocked",
+        "task.cancelled",
+        "run.created",
+        "run.state_changed",
+        "run.progress_updated",
+        "run.heartbeat_recorded",
+        "run.log_available",
+        "run.artifact_available",
+        "run.interrupted",
+        "run.recovery_required",
+        "review.created",
+        "review.state_changed",
+        "review.verdict_recorded",
+        "review.evidence_available",
+        "review.debt_acknowledged",
+        "recovery.opened",
+        "recovery.evidence_updated",
+        "recovery.decision_proposed",
+        "recovery.confirmation_required",
+        "recovery.decision_applied",
+        "recovery.blocked_human",
+        "recovery.closed",
+        "sandbox.created",
+        "sandbox.updated",
+        "sandbox.validation_failed",
+        "sandbox.build_created",
+        "sandbox.build_state_changed",
+        "sandbox.build_log_available",
+        "sandbox.image_verified",
+        "sandbox.activated",
+        "sandbox.rolled_back",
+        "sandbox.archived",
+        "sandbox.deleted",
+        "backup.created",
+        "backup.verified",
+        "backup.restore_started",
+        "backup.restore_completed",
+        "backup.failed",
+        "backup.deleted",
+        "notification.queued",
+        "notification.sent",
+        "notification.retry_scheduled",
+        "notification.failed",
+        "confirmation.created",
+        "confirmation.consumed",
+        "confirmation.expired",
+        "audit.recorded"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "operator",
+            "system",
+            "agent",
+            "worker"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "id",
+        "revision"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "system",
+            "project",
+            "objective",
+            "task",
+            "run",
+            "review",
+            "recovery",
+            "sandbox",
+            "sandbox_build",
+            "backup",
+            "notification",
+            "confirmation",
+            "audit"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^corr_[A-Za-z0-9_-]{8,}$"
+    },
+    "causation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "objective_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data": {
+      "type": "object",
+      "description": "Redacted event-specific payload. Secret values are forbidden.",
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "sequence": 1843,
+      "event_id": "evt_01J4EXAMPLE",
+      "type": "run.state_changed",
+      "occurred_at": "2026-07-18T19:14:53Z",
+      "actor": {
+        "type": "system",
+        "id": "system:orchestrator"
+      },
+      "aggregate": {
+        "type": "run",
+        "id": "run_01J4EXAMPLE",
+        "revision": 7
+      },
+      "correlation_id": "corr_01J4EXAMPLE",
+      "causation_id": "cmd_01J4EXAMPLE",
+      "project_id": "project_01J4EXAMPLE",
+      "objective_id": "objective_01J4EXAMPLE",
+      "data": {
+        "previous_state": "running",
+        "state": "waiting_review"
+      }
+    }
+  ]
+}

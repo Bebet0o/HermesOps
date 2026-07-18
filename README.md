@@ -833,6 +833,17 @@ Later milestones may expand multi-project scheduling, notifications, provider
 adapters, distributed workers, richer project memory, and advanced resource
 management.
 
+### Development contracts
+
+The first `v0.2.0-beta` architecture contracts are maintained in:
+
+- [`docs/V020_BETA_ARCHITECTURE.md`](docs/V020_BETA_ARCHITECTURE.md)
+
+They define the future Controller API, event stream, Console boundary,
+Hermesfile schema, sandbox-management rules, and accepted architecture
+decisions. They are design contracts and do not mean those runtime features are
+already implemented.
+
 ## Relationship with Hermes Agent
 
 HermesOps does not replace Hermes Agent.

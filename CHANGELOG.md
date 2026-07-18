@@ -16,6 +16,11 @@ All notable changes to HermesOps will be documented in this file.
   concepts, security, current limitations, and roadmap;
 - explicit long-term direction for HermesOps Console and Hermesfiles in
   `v0.2.0-beta`.
+- Milestone 2A architecture contracts for the future Controller, Console,
+  replayable event stream, and Hermesfile sandbox profiles;
+- machine-readable OpenAPI and JSON Schema design contracts;
+- accepted architecture decisions covering state ownership, privilege
+  boundaries, Agent adaptation, immutable images, replay, and confirmations.
 
 ### Changed
 
