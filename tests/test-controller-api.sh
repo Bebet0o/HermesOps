@@ -50,5 +50,42 @@ then
 fi
 
 echo "Controller API stdlib dependency contract: PASS"
+python3 - "$REPO/controller_api/core.py" "$REPO/controller_api/server.py" <<'PY'
+from pathlib import Path
+import sys
+
+core = Path(sys.argv[1]).read_text(encoding="utf-8")
+server = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+required_core = (
+    "mode=ro",
+    "PRAGMA query_only = ON",
+    "O_NOFOLLOW",
+    "st_nlink != 1",
+    "metadata.st_uid != os.geteuid()",
+)
+for marker in required_core:
+    if marker not in core:
+        raise SystemExit(f"Missing security marker in core.py: {marker}")
+
+for forbidden in ("repo_path\":", "data_path\":", "PRAGMA quick_check"):
+    if forbidden in core:
+        raise SystemExit(f"Forbidden API/runtime marker remains: {forbidden}")
+
+required_server = (
+    "BoundedSemaphore",
+    "request.settimeout",
+    "max_num_fields=MAX_QUERY_FIELDS",
+    "Connection\", \"close",
+    "do_TRACE = _method_not_allowed",
+    "Misdirected request",
+)
+for marker in required_server:
+    if marker not in server:
+        raise SystemExit(f"Missing HTTP hardening marker: {marker}")
+
+print("Controller API adversarial hardening contract: PASS")
+PY
+
 echo "Controller API read-only skeleton: PASS"
 echo "HERMESOPS_CONTROLLER_API_SKELETON_PASS"

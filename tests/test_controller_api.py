@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import socket
 import threading
 import unittest
 from contextlib import closing
@@ -123,6 +124,8 @@ default_branch = "main"
         *,
         authenticated: bool = False,
         request_id: str | None = None,
+        headers_override: dict[str, str] | None = None,
+        body: bytes | None = None,
     ) -> tuple[int, dict[str, str], dict[str, object] | None]:
         connection = http.client.HTTPConnection(
             "127.0.0.1",
@@ -134,7 +137,14 @@ default_branch = "main"
             headers["Cookie"] = f"hermesops_session={TOKEN}"
         if request_id:
             headers["X-Request-ID"] = request_id
-        connection.request(method, path, headers=headers)
+        if headers_override:
+            headers.update(headers_override)
+        connection.request(
+            method,
+            path,
+            body=body,
+            headers=headers,
+        )
         response = connection.getresponse()
         raw = response.read()
         response_headers = {
@@ -278,6 +288,166 @@ class ControllerAPITest(unittest.TestCase):
         self.assertFalse(features["project_writes"])
         self.assertFalse(features["websocket_events"])
         self.assertFalse(features["hermesfile_builds"])
+
+
+    def test_project_payload_does_not_leak_host_paths(self) -> None:
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects/alpha",
+            authenticated=True,
+        )
+        self.assertEqual(status, 200)
+        project = payload["data"]
+        self.assertNotIn("repo_path", project)
+        self.assertNotIn("data_path", project)
+
+    def test_duplicate_session_cookie_is_rejected(self) -> None:
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects",
+            headers_override={
+                "Cookie": (
+                    f"hermesops_session={TOKEN}; "
+                    f"hermesops_session={TOKEN}"
+                )
+            },
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "authentication_required")
+
+    def test_percent_encoded_cookie_is_rejected(self) -> None:
+        encoded = "%61" + TOKEN[1:]
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects",
+            headers_override={
+                "Cookie": f"hermesops_session={encoded}"
+            },
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["code"], "authentication_required")
+
+    def test_session_symlink_is_rejected(self) -> None:
+        real_file = self.fixture.session_file.with_name("real-session")
+        self.fixture.session_file.rename(real_file)
+        self.fixture.session_file.symlink_to(real_file)
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects",
+            headers_override={
+                "Cookie": f"hermesops_session={TOKEN}"
+            },
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "controller_auth_unavailable")
+
+    def test_unknown_query_parameter_is_rejected(self) -> None:
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects?unexpected=1",
+            authenticated=True,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "unknown_query_parameter")
+
+    def test_excessive_query_fields_are_rejected(self) -> None:
+        query = "&".join(f"x{i}=1" for i in range(9))
+        status, _, payload = self.fixture.request(
+            "GET",
+            f"/api/v1/projects?{query}",
+            authenticated=True,
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "invalid_query")
+
+    def test_invalid_host_is_rejected(self) -> None:
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/health",
+            headers_override={"Host": "attacker.example"},
+        )
+        self.assertEqual(status, 421)
+        self.assertEqual(payload["code"], "misdirected_request")
+
+    def test_security_headers_are_present(self) -> None:
+        status, headers, _ = self.fixture.request("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["x-frame-options"], "DENY")
+        self.assertEqual(
+            headers["cross-origin-resource-policy"],
+            "same-origin",
+        )
+        self.assertEqual(headers["referrer-policy"], "no-referrer")
+        self.assertIn("default-src 'none'", headers["content-security-policy"])
+
+    def test_get_body_is_rejected_and_connection_closed(self) -> None:
+        status, headers, payload = self.fixture.request(
+            "GET",
+            "/health",
+            body=b"unexpected",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "request_body_not_allowed")
+        self.assertEqual(headers["connection"], "close")
+
+    def test_write_method_with_body_closes_connection(self) -> None:
+        status, headers, payload = self.fixture.request(
+            "POST",
+            "/api/v1/projects",
+            body=b'{"ignored":true}',
+        )
+        self.assertEqual(status, 405)
+        self.assertEqual(payload["code"], "method_not_allowed")
+        self.assertEqual(headers["connection"], "close")
+
+    def test_trace_is_json_405_and_closes_connection(self) -> None:
+        status, headers, payload = self.fixture.request(
+            "TRACE",
+            "/api/v1/projects",
+        )
+        self.assertEqual(status, 405)
+        self.assertEqual(payload["code"], "method_not_allowed")
+        self.assertEqual(headers["connection"], "close")
+
+    def test_readiness_does_not_run_full_integrity_scan(self) -> None:
+        statements: list[str] = []
+        database = ReadOnlyDatabase(self.fixture.settings)
+        original_connect = database.connect
+
+        def traced_connect() -> sqlite3.Connection:
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        database.connect = traced_connect  # type: ignore[method-assign]
+        ready, reason = database.readiness()
+        self.assertTrue(ready, reason)
+        self.assertFalse(
+            any("quick_check" in sql.lower() for sql in statements)
+        )
+
+    def test_database_failure_is_reported_as_503(self) -> None:
+        def broken_connect() -> sqlite3.Connection:
+            raise sqlite3.OperationalError("synthetic failure")
+
+        self.fixture.server.service.database.connect = broken_connect  # type: ignore[method-assign]
+        status, _, payload = self.fixture.request(
+            "GET",
+            "/api/v1/projects",
+            authenticated=True,
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "database_unavailable")
+
+    def test_server_applies_connection_timeout(self) -> None:
+        self.assertEqual(
+            self.fixture.server.service.settings.socket_timeout_seconds,
+            10.0,
+        )
+        self.assertEqual(
+            self.fixture.server.service.settings.max_concurrent_requests,
+            32,
+        )
 
 
 class MissingAuthenticationConfigurationTest(unittest.TestCase):

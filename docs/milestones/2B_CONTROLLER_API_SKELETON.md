@@ -120,3 +120,39 @@ and durable session management belong to a later milestone.
 - Console code;
 - database migrations;
 - Internet exposure.
+
+
+## Adversarial review hardening
+
+The post-implementation review found and corrected the following issues before
+merge:
+
+- project responses exposed absolute host repository and data paths even
+  though the Console does not require them;
+- readiness and operator health endpoints ran `PRAGMA quick_check`, turning a
+  frequent HTTP probe into an unbounded integrity scan;
+- `GET`, `HEAD`, and disabled write methods could leave request bodies unread on
+  HTTP/1.1 persistent connections;
+- the threaded server had no per-connection timeout or concurrency bound;
+- duplicate and percent-encoded session cookies were ambiguous;
+- session files could be followed through symbolic links and were not checked
+  for owner or hard links;
+- arbitrary Host headers were accepted;
+- query parsing had no field limit and silently accepted unknown parameters;
+- SQLite read errors could escape as generic internal errors;
+- API responses lacked several defensive browser-facing headers.
+
+The corrected skeleton now:
+
+- omits local filesystem paths from project API payloads;
+- reserves `PRAGMA quick_check` for offline validation;
+- closes connections whenever a request body cannot be safely consumed;
+- limits concurrent request threads and applies socket timeouts;
+- rejects ambiguous cookies and unsafe session files;
+- validates loopback Host authorities;
+- bounds and validates query parameters;
+- maps SQLite failures to a stable `503 database_unavailable` problem;
+- emits same-origin, frame, referrer, and content-type defenses.
+
+These protections do not make the standard-library server Internet-facing.
+Loopback-only binding remains mandatory.

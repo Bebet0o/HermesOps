@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
-import json
 import os
 import re
 import sqlite3
@@ -14,12 +13,13 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 from . import API_VERSION, SERVICE_NAME
 
 PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 SESSION_COOKIE = "hermesops_session"
+SESSION_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
+MAX_CONFIG_BYTES = 1024 * 1024
 
 
 class ControllerError(RuntimeError):
@@ -50,6 +50,8 @@ class Settings:
     session_file: Path
     host: str = "127.0.0.1"
     port: int = 8765
+    socket_timeout_seconds: float = 10.0
+    max_concurrent_requests: int = 32
 
     @classmethod
     def from_root(
@@ -60,6 +62,8 @@ class Settings:
         port: int = 8765,
         database: Path | None = None,
         session_file: Path | None = None,
+        socket_timeout_seconds: float = 10.0,
+        max_concurrent_requests: int = 32,
     ) -> "Settings":
         resolved_root = root.resolve(strict=False)
         return cls(
@@ -77,6 +81,8 @@ class Settings:
             ).resolve(strict=False),
             host=host,
             port=port,
+            socket_timeout_seconds=socket_timeout_seconds,
+            max_concurrent_requests=max_concurrent_requests,
         )
 
     @classmethod
@@ -125,6 +131,20 @@ class Settings:
                 "Invalid port",
                 "Port must be between 0 and 65535.",
             )
+        if not 1.0 <= self.socket_timeout_seconds <= 120.0:
+            raise ControllerError(
+                400,
+                "invalid_socket_timeout",
+                "Invalid socket timeout",
+                "Socket timeout must be between 1 and 120 seconds.",
+            )
+        if not 1 <= self.max_concurrent_requests <= 256:
+            raise ControllerError(
+                400,
+                "invalid_concurrency_limit",
+                "Invalid concurrency limit",
+                "Maximum concurrent requests must be between 1 and 256.",
+            )
 
 
 class ReadOnlyDatabase:
@@ -144,19 +164,37 @@ class ReadOnlyDatabase:
                 "The HermesOps control database does not exist.",
             )
         uri = f"{self.settings.database.as_uri()}?mode=ro"
-        connection = sqlite3.connect(
-            uri,
-            uri=True,
-            timeout=5,
-            check_same_thread=False,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 3000")
+        try:
+            connection = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=5,
+                check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 3000")
+        except sqlite3.Error as error:
+            raise ControllerError(
+                503,
+                "database_unavailable",
+                "Controller database unavailable",
+                "The HermesOps control database cannot be opened read-only.",
+            ) from error
         return connection
 
+    @staticmethod
+    def _database_failure(error: sqlite3.Error) -> ControllerError:
+        return ControllerError(
+            503,
+            "database_unavailable",
+            "Controller database unavailable",
+            "The HermesOps control database cannot serve this request.",
+        )
+
     def readiness(self) -> tuple[bool, str]:
+        """Cheap liveness/readiness check; integrity scans stay offline."""
         try:
             with closing(self.connect()) as connection:
                 tables = {
@@ -172,33 +210,57 @@ class ReadOnlyDatabase:
                 missing = sorted(self.REQUIRED_TABLES - tables)
                 if missing:
                     return False, "required database tables are missing"
-                row = connection.execute("PRAGMA quick_check").fetchone()
-                if row is None or row[0] != "ok":
-                    return False, "SQLite quick_check did not return ok"
+                connection.execute(
+                    "SELECT project_id FROM projects LIMIT 1"
+                ).fetchone()
+                connection.execute(
+                    "SELECT version FROM schema_migrations "
+                    "ORDER BY version DESC LIMIT 1"
+                ).fetchone()
         except (sqlite3.Error, ControllerError):
             return False, "database cannot be read"
         return True, "ready"
 
-    def _default_branch(self, row: sqlite3.Row) -> str:
-        source = Path(str(row["config_source"])).resolve(strict=False)
+    def _read_default_branch(self, row: sqlite3.Row) -> str:
+        configured = Path(str(row["config_source"]))
         allowed = (
-            self.settings.root
-            / "repo"
-            / "config"
-            / "projects.d"
+            self.settings.root / "repo" / "config" / "projects.d"
         ).resolve(strict=False)
+
         try:
-            source.relative_to(allowed)
-        except ValueError:
+            candidate = configured.resolve(strict=True)
+            relative = candidate.relative_to(allowed)
+        except (OSError, ValueError):
             return "unknown"
-        if source.suffix != ".toml" or not source.is_file():
+
+        if (
+            len(relative.parts) != 1
+            or candidate.suffix != ".toml"
+        ):
             return "unknown"
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+
         try:
-            with source.open("rb") as stream:
+            descriptor = os.open(candidate, flags)
+        except OSError:
+            return "unknown"
+
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                return "unknown"
+            if metadata.st_size > MAX_CONFIG_BYTES:
+                return "unknown"
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
                 data = tomllib.load(stream)
             value = data.get("git", {}).get("default_branch")
         except (OSError, tomllib.TOMLDecodeError, AttributeError):
             return "unknown"
+        finally:
+            os.close(descriptor)
+
         return value if isinstance(value, str) and value else "unknown"
 
     @staticmethod
@@ -215,14 +277,12 @@ class ReadOnlyDatabase:
             "slug": project_id,
             "name": str(row["display_name"]),
             "state": "enabled" if int(row["enabled"]) else "disabled",
-            "default_branch": self._default_branch(row),
+            "default_branch": self._read_default_branch(row),
             "policy_id": str(row["policy_id"]),
             "sandbox_profile_id": None,
             "resource_revision": self._revision(str(row["config_hash"])),
             "created_at": str(row["registered_at"]),
             "updated_at": str(row["updated_at"]),
-            "repo_path": str(row["repo_path"]),
-            "data_path": str(row["data_path"]),
         }
 
     def list_projects(
@@ -245,12 +305,11 @@ class ReadOnlyDatabase:
                 "Invalid pagination cursor",
                 "cursor must be a valid project identifier.",
             )
+
         sql = """
             SELECT
                 project_id,
                 display_name,
-                repo_path,
-                data_path,
                 policy_id,
                 enabled,
                 config_source,
@@ -265,8 +324,13 @@ class ReadOnlyDatabase:
             parameters.append(cursor)
         sql += " ORDER BY project_id LIMIT ?"
         parameters.append(limit + 1)
-        with closing(self.connect()) as connection:
-            rows = list(connection.execute(sql, parameters))
+
+        try:
+            with closing(self.connect()) as connection:
+                rows = list(connection.execute(sql, parameters))
+        except sqlite3.Error as error:
+            raise self._database_failure(error) from error
+
         has_more = len(rows) > limit
         selected = rows[:limit]
         projects = [self._project(row) for row in selected]
@@ -285,25 +349,28 @@ class ReadOnlyDatabase:
                 "Invalid project identifier",
                 "The project identifier does not match the public contract.",
             )
-        with closing(self.connect()) as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    project_id,
-                    display_name,
-                    repo_path,
-                    data_path,
-                    policy_id,
-                    enabled,
-                    config_source,
-                    config_hash,
-                    registered_at,
-                    updated_at
-                FROM projects
-                WHERE project_id = ?
-                """,
-                (project_id,),
-            ).fetchone()
+
+        try:
+            with closing(self.connect()) as connection:
+                row = connection.execute(
+                    """
+                    SELECT
+                        project_id,
+                        display_name,
+                        policy_id,
+                        enabled,
+                        config_source,
+                        config_hash,
+                        registered_at,
+                        updated_at
+                    FROM projects
+                    WHERE project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise self._database_failure(error) from error
+
         if row is None:
             raise ControllerError(
                 404,
@@ -332,53 +399,116 @@ class ControllerService:
 
     def session_token(self) -> str:
         path = self.settings.session_file
-        if not path.is_file():
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError as error:
             raise ControllerError(
                 503,
                 "controller_auth_not_configured",
                 "Controller authentication is not configured",
                 "Create the Controller session file before using protected endpoints.",
-            )
-        mode = stat.S_IMODE(path.stat().st_mode)
-        if mode != 0o600:
-            raise ControllerError(
-                503,
-                "controller_auth_permissions_invalid",
-                "Controller authentication is unavailable",
-                "The Controller session file must have mode 0600.",
-            )
-        try:
-            token = path.read_text(encoding="utf-8").strip()
+            ) from error
         except OSError as error:
             raise ControllerError(
                 503,
                 "controller_auth_unavailable",
                 "Controller authentication is unavailable",
+                "The Controller session file cannot be opened safely.",
             ) from error
-        if not 32 <= len(token) <= 4096:
+
+        try:
+            metadata = os.fstat(descriptor)
+            mode = stat.S_IMODE(metadata.st_mode)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ControllerError(
+                    503,
+                    "controller_auth_file_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session path must be a regular file.",
+                )
+            if metadata.st_uid != os.geteuid():
+                raise ControllerError(
+                    503,
+                    "controller_auth_owner_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must be owned by the service user.",
+                )
+            if mode != 0o600:
+                raise ControllerError(
+                    503,
+                    "controller_auth_permissions_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must have mode 0600.",
+                )
+            if metadata.st_nlink != 1:
+                raise ControllerError(
+                    503,
+                    "controller_auth_links_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must not have additional hard links.",
+                )
+            if metadata.st_size > 512:
+                raise ControllerError(
+                    503,
+                    "controller_auth_invalid",
+                    "Controller authentication is unavailable",
+                    "The configured session value is too large.",
+                )
+            with os.fdopen(
+                descriptor,
+                "r",
+                encoding="ascii",
+                closefd=False,
+            ) as stream:
+                token = stream.read(513).strip()
+        except UnicodeError as error:
             raise ControllerError(
                 503,
                 "controller_auth_invalid",
                 "Controller authentication is unavailable",
-                "The configured session value has an invalid length.",
+                "The configured session value must be ASCII.",
+            ) from error
+        finally:
+            os.close(descriptor)
+
+        if not SESSION_VALUE_PATTERN.fullmatch(token):
+            raise ControllerError(
+                503,
+                "controller_auth_invalid",
+                "Controller authentication is unavailable",
+                "The configured session value has an invalid format.",
             )
         return token
 
     def authenticate(self, cookie_header: str | None) -> None:
         expected = self.session_token()
-        supplied = ""
-        if cookie_header:
-            for segment in cookie_header.split(";"):
-                name, separator, value = segment.strip().partition("=")
-                if separator and name == SESSION_COOKIE:
-                    supplied = unquote(value)
-                    break
-        if not supplied or not hmac.compare_digest(supplied, expected):
+        if not cookie_header or len(cookie_header) > 4096:
             raise ControllerError(
                 401,
                 "authentication_required",
                 "Authentication required",
                 "A valid HermesOps Controller session cookie is required.",
+            )
+
+        supplied: list[str] = []
+        for segment in cookie_header.split(";"):
+            name, separator, value = segment.strip().partition("=")
+            if separator and name == SESSION_COOKIE:
+                supplied.append(value)
+
+        if (
+            len(supplied) != 1
+            or not SESSION_VALUE_PATTERN.fullmatch(supplied[0])
+            or not hmac.compare_digest(supplied[0], expected)
+        ):
+            raise ControllerError(
+                401,
+                "authentication_required",
+                "Authentication required",
+                "A valid unambiguous HermesOps Controller session cookie is required.",
             )
 
     @staticmethod
