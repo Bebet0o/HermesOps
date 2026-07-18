@@ -43,11 +43,28 @@ then
     exit 1
 fi
 
-git -C "$REPO" check-ignore -q --no-index     config/projects.d/example-local.toml
+TMP_GITIGNORE_REPO="$(mktemp -d)"
+cleanup_gitignore_test() {
+    rm -rf "$TMP_GITIGNORE_REPO"
+}
+trap cleanup_gitignore_test EXIT
 
-git -C "$REPO" check-ignore -q --no-index     config/projects.d/transaction-fixture.toml
+git -C "$TMP_GITIGNORE_REPO" init -q
+cp "${REPO}/.gitignore" "${TMP_GITIGNORE_REPO}/.gitignore"
+mkdir -p "${TMP_GITIGNORE_REPO}/config/projects.d"
 
-git -C "$REPO" check-ignore -q --no-index     config/projects.d/transaction-fixture-b.toml
+for relative_path in \
+    config/projects.d/example-local.toml \
+    config/projects.d/transaction-fixture.toml \
+    config/projects.d/transaction-fixture-b.toml
+do
+    touch "${TMP_GITIGNORE_REPO}/${relative_path}"
+    git -C "$TMP_GITIGNORE_REPO" check-ignore -q --no-index \
+        "$relative_path"
+done
+
+cleanup_gitignore_test
+trap - EXIT
 
 bash -n "$PREFLIGHT"
 bash -n "$INSTALLER"

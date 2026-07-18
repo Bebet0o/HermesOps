@@ -28,6 +28,7 @@
   correctement `runuser` ;
 - `util-linux` est une dépendance explicite de l’installateur.
 - les exceptions `.gitignore` qui republiaient les fixtures locales ont été supprimées.
+- le test du contrat `.gitignore` fonctionne désormais depuis une archive source sans métadonnées `.git`.
 
 ### Security
 
