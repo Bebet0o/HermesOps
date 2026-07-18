@@ -1,0 +1,599 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import os
+import re
+import sqlite3
+import stat
+import tomllib
+import uuid
+from contextlib import closing
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from . import API_VERSION, SERVICE_NAME
+
+PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+SESSION_COOKIE = "hermesops_session"
+SESSION_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{32,256}$")
+MAX_CONFIG_BYTES = 1024 * 1024
+
+
+class ControllerError(RuntimeError):
+    """Expected Controller API failure."""
+
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        title: str,
+        detail: str = "",
+        *,
+        resource: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(detail or title)
+        self.status = status
+        self.code = code
+        self.title = title
+        self.detail = detail
+        self.resource = resource
+
+
+@dataclass(frozen=True)
+class Settings:
+    root: Path
+    database: Path
+    version_file: Path
+    session_file: Path
+    host: str = "127.0.0.1"
+    port: int = 8765
+    socket_timeout_seconds: float = 10.0
+    max_concurrent_requests: int = 32
+
+    @classmethod
+    def from_root(
+        cls,
+        root: Path,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        database: Path | None = None,
+        session_file: Path | None = None,
+        socket_timeout_seconds: float = 10.0,
+        max_concurrent_requests: int = 32,
+    ) -> "Settings":
+        resolved_root = root.resolve(strict=False)
+        return cls(
+            root=resolved_root,
+            database=(
+                database
+                or resolved_root / "state" / "controller" / "hermesops.db"
+            ).resolve(strict=False),
+            version_file=(
+                resolved_root / "repo" / "VERSION"
+            ).resolve(strict=False),
+            session_file=(
+                session_file
+                or resolved_root / "secrets" / "controller-session"
+            ).resolve(strict=False),
+            host=host,
+            port=port,
+            socket_timeout_seconds=socket_timeout_seconds,
+            max_concurrent_requests=max_concurrent_requests,
+        )
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+    ) -> "Settings":
+        root = Path(
+            os.environ.get("HERMESOPS_ROOT", "/opt/docker/hermesops")
+        )
+        database = os.environ.get("HERMESOPS_CONTROLLER_DATABASE")
+        session_file = os.environ.get(
+            "HERMESOPS_CONTROLLER_SESSION_FILE"
+        )
+        return cls.from_root(
+            root,
+            host=host,
+            port=port,
+            database=Path(database) if database else None,
+            session_file=Path(session_file) if session_file else None,
+        )
+
+    def validate_bind(self) -> None:
+        try:
+            address = ipaddress.ip_address(self.host)
+        except ValueError as error:
+            raise ControllerError(
+                400,
+                "invalid_bind_address",
+                "Invalid bind address",
+                "The Controller API accepts a literal loopback IP address only.",
+            ) from error
+        if not address.is_loopback:
+            raise ControllerError(
+                400,
+                "non_loopback_bind_forbidden",
+                "Non-loopback binding is forbidden",
+                "Milestone 2B may listen only on a loopback address.",
+            )
+        if not 0 <= self.port <= 65535:
+            raise ControllerError(
+                400,
+                "invalid_port",
+                "Invalid port",
+                "Port must be between 0 and 65535.",
+            )
+        if not 1.0 <= self.socket_timeout_seconds <= 120.0:
+            raise ControllerError(
+                400,
+                "invalid_socket_timeout",
+                "Invalid socket timeout",
+                "Socket timeout must be between 1 and 120 seconds.",
+            )
+        if not 1 <= self.max_concurrent_requests <= 256:
+            raise ControllerError(
+                400,
+                "invalid_concurrency_limit",
+                "Invalid concurrency limit",
+                "Maximum concurrent requests must be between 1 and 256.",
+            )
+
+
+class ReadOnlyDatabase:
+    """Small SQLite read adapter that cannot open a writable connection."""
+
+    REQUIRED_TABLES = {"projects", "schema_migrations"}
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def connect(self) -> sqlite3.Connection:
+        if not self.settings.database.is_file():
+            raise ControllerError(
+                503,
+                "database_unavailable",
+                "Controller database unavailable",
+                "The HermesOps control database does not exist.",
+            )
+        uri = f"{self.settings.database.as_uri()}?mode=ro"
+        try:
+            connection = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=5,
+                check_same_thread=False,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 3000")
+        except sqlite3.Error as error:
+            raise ControllerError(
+                503,
+                "database_unavailable",
+                "Controller database unavailable",
+                "The HermesOps control database cannot be opened read-only.",
+            ) from error
+        return connection
+
+    @staticmethod
+    def _database_failure(error: sqlite3.Error) -> ControllerError:
+        return ControllerError(
+            503,
+            "database_unavailable",
+            "Controller database unavailable",
+            "The HermesOps control database cannot serve this request.",
+        )
+
+    def readiness(self) -> tuple[bool, str]:
+        """Cheap liveness/readiness check; integrity scans stay offline."""
+        try:
+            with closing(self.connect()) as connection:
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT name
+                        FROM sqlite_master
+                        WHERE type = 'table'
+                        """
+                    )
+                }
+                missing = sorted(self.REQUIRED_TABLES - tables)
+                if missing:
+                    return False, "required database tables are missing"
+                connection.execute(
+                    "SELECT project_id FROM projects LIMIT 1"
+                ).fetchone()
+                connection.execute(
+                    "SELECT version FROM schema_migrations "
+                    "ORDER BY version DESC LIMIT 1"
+                ).fetchone()
+        except (sqlite3.Error, ControllerError):
+            return False, "database cannot be read"
+        return True, "ready"
+
+    def _read_default_branch(self, row: sqlite3.Row) -> str:
+        configured = Path(str(row["config_source"]))
+        allowed = (
+            self.settings.root / "repo" / "config" / "projects.d"
+        ).resolve(strict=False)
+
+        try:
+            candidate = configured.resolve(strict=True)
+            relative = candidate.relative_to(allowed)
+        except (OSError, ValueError):
+            return "unknown"
+
+        if (
+            len(relative.parts) != 1
+            or candidate.suffix != ".toml"
+        ):
+            return "unknown"
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+
+        try:
+            descriptor = os.open(candidate, flags)
+        except OSError:
+            return "unknown"
+
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                return "unknown"
+            if metadata.st_size > MAX_CONFIG_BYTES:
+                return "unknown"
+            with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                data = tomllib.load(stream)
+            value = data.get("git", {}).get("default_branch")
+        except (OSError, tomllib.TOMLDecodeError, AttributeError):
+            return "unknown"
+        finally:
+            os.close(descriptor)
+
+        return value if isinstance(value, str) and value else "unknown"
+
+    @staticmethod
+    def _revision(config_hash: str) -> int:
+        if re.fullmatch(r"[0-9a-fA-F]{16,}", config_hash):
+            return int(config_hash[:15], 16)
+        digest = hashlib.sha256(config_hash.encode("utf-8")).hexdigest()
+        return int(digest[:15], 16)
+
+    def _project(self, row: sqlite3.Row) -> dict[str, Any]:
+        project_id = str(row["project_id"])
+        return {
+            "id": project_id,
+            "slug": project_id,
+            "name": str(row["display_name"]),
+            "state": "enabled" if int(row["enabled"]) else "disabled",
+            "default_branch": self._read_default_branch(row),
+            "policy_id": str(row["policy_id"]),
+            "sandbox_profile_id": None,
+            "resource_revision": self._revision(str(row["config_hash"])),
+            "created_at": str(row["registered_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    def list_projects(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        if not 1 <= limit <= 200:
+            raise ControllerError(
+                400,
+                "invalid_limit",
+                "Invalid pagination limit",
+                "limit must be between 1 and 200.",
+            )
+        if cursor is not None and not PROJECT_ID_PATTERN.fullmatch(cursor):
+            raise ControllerError(
+                400,
+                "invalid_cursor",
+                "Invalid pagination cursor",
+                "cursor must be a valid project identifier.",
+            )
+
+        sql = """
+            SELECT
+                project_id,
+                display_name,
+                policy_id,
+                enabled,
+                config_source,
+                config_hash,
+                registered_at,
+                updated_at
+            FROM projects
+        """
+        parameters: list[Any] = []
+        if cursor is not None:
+            sql += " WHERE project_id > ?"
+            parameters.append(cursor)
+        sql += " ORDER BY project_id LIMIT ?"
+        parameters.append(limit + 1)
+
+        try:
+            with closing(self.connect()) as connection:
+                rows = list(connection.execute(sql, parameters))
+        except sqlite3.Error as error:
+            raise self._database_failure(error) from error
+
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        projects = [self._project(row) for row in selected]
+        next_cursor = (
+            str(selected[-1]["project_id"])
+            if has_more and selected
+            else None
+        )
+        return projects, next_cursor
+
+    def get_project(self, project_id: str) -> dict[str, Any]:
+        if not PROJECT_ID_PATTERN.fullmatch(project_id):
+            raise ControllerError(
+                400,
+                "invalid_project_id",
+                "Invalid project identifier",
+                "The project identifier does not match the public contract.",
+            )
+
+        try:
+            with closing(self.connect()) as connection:
+                row = connection.execute(
+                    """
+                    SELECT
+                        project_id,
+                        display_name,
+                        policy_id,
+                        enabled,
+                        config_source,
+                        config_hash,
+                        registered_at,
+                        updated_at
+                    FROM projects
+                    WHERE project_id = ?
+                    """,
+                    (project_id,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise self._database_failure(error) from error
+
+        if row is None:
+            raise ControllerError(
+                404,
+                "project_not_found",
+                "Project not found",
+                f"No project exists with identifier {project_id!r}.",
+                resource={"type": "project", "id": project_id},
+            )
+        return self._project(row)
+
+
+class ControllerService:
+    def __init__(self, settings: Settings) -> None:
+        settings.validate_bind()
+        self.settings = settings
+        self.database = ReadOnlyDatabase(settings)
+
+    def version(self) -> str:
+        try:
+            value = self.settings.version_file.read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            return "unknown"
+        return value or "unknown"
+
+    def session_token(self) -> str:
+        path = self.settings.session_file
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError as error:
+            raise ControllerError(
+                503,
+                "controller_auth_not_configured",
+                "Controller authentication is not configured",
+                "Create the Controller session file before using protected endpoints.",
+            ) from error
+        except OSError as error:
+            raise ControllerError(
+                503,
+                "controller_auth_unavailable",
+                "Controller authentication is unavailable",
+                "The Controller session file cannot be opened safely.",
+            ) from error
+
+        try:
+            metadata = os.fstat(descriptor)
+            mode = stat.S_IMODE(metadata.st_mode)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ControllerError(
+                    503,
+                    "controller_auth_file_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session path must be a regular file.",
+                )
+            if metadata.st_uid != os.geteuid():
+                raise ControllerError(
+                    503,
+                    "controller_auth_owner_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must be owned by the service user.",
+                )
+            if mode != 0o600:
+                raise ControllerError(
+                    503,
+                    "controller_auth_permissions_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must have mode 0600.",
+                )
+            if metadata.st_nlink != 1:
+                raise ControllerError(
+                    503,
+                    "controller_auth_links_invalid",
+                    "Controller authentication is unavailable",
+                    "The Controller session file must not have additional hard links.",
+                )
+            if metadata.st_size > 512:
+                raise ControllerError(
+                    503,
+                    "controller_auth_invalid",
+                    "Controller authentication is unavailable",
+                    "The configured session value is too large.",
+                )
+            with os.fdopen(
+                descriptor,
+                "r",
+                encoding="ascii",
+                closefd=False,
+            ) as stream:
+                token = stream.read(513).strip()
+        except UnicodeError as error:
+            raise ControllerError(
+                503,
+                "controller_auth_invalid",
+                "Controller authentication is unavailable",
+                "The configured session value must be ASCII.",
+            ) from error
+        finally:
+            os.close(descriptor)
+
+        if not SESSION_VALUE_PATTERN.fullmatch(token):
+            raise ControllerError(
+                503,
+                "controller_auth_invalid",
+                "Controller authentication is unavailable",
+                "The configured session value has an invalid format.",
+            )
+        return token
+
+    def authenticate(self, cookie_header: str | None) -> None:
+        expected = self.session_token()
+        if not cookie_header or len(cookie_header) > 4096:
+            raise ControllerError(
+                401,
+                "authentication_required",
+                "Authentication required",
+                "A valid HermesOps Controller session cookie is required.",
+            )
+
+        supplied: list[str] = []
+        for segment in cookie_header.split(";"):
+            name, separator, value = segment.strip().partition("=")
+            if separator and name == SESSION_COOKIE:
+                supplied.append(value)
+
+        if (
+            len(supplied) != 1
+            or not SESSION_VALUE_PATTERN.fullmatch(supplied[0])
+            or not hmac.compare_digest(supplied[0], expected)
+        ):
+            raise ControllerError(
+                401,
+                "authentication_required",
+                "Authentication required",
+                "A valid unambiguous HermesOps Controller session cookie is required.",
+            )
+
+    @staticmethod
+    def request_id(candidate: str | None = None) -> str:
+        if candidate and re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", candidate):
+            return candidate
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def meta(
+        request_id: str,
+        *,
+        resource_revision: int | None = None,
+        next_cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "request_id": request_id,
+            "resource_revision": resource_revision,
+            "next_cursor": next_cursor,
+            "snapshot_sequence": None,
+        }
+
+    def readiness(self) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        database_ready, database_reason = self.database.readiness()
+        if not database_ready:
+            reasons.append(database_reason)
+        try:
+            self.session_token()
+        except ControllerError as error:
+            reasons.append(error.code)
+        return not reasons, reasons
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "api_versions": [API_VERSION],
+            "event_schema_versions": [1],
+            "hermesfile_versions": ["v0alpha1"],
+            "features": {
+                "read_only_controller_api": True,
+                "project_reads": True,
+                "project_writes": False,
+                "objective_reads": False,
+                "objective_writes": False,
+                "websocket_events": False,
+                "hermesfile_builds": False,
+                "console": False,
+            },
+        }
+
+    def system_status(self) -> dict[str, Any]:
+        database_ready, _ = self.database.readiness()
+        components = [
+            {"name": SERVICE_NAME, "status": "healthy"},
+            {
+                "name": "sqlite",
+                "status": "healthy" if database_ready else "unavailable",
+            },
+            {"name": "hermes-agent", "status": "unknown"},
+            {"name": "sandbox-engine", "status": "unknown"},
+        ]
+        return {
+            "status": "healthy" if database_ready else "unavailable",
+            "components": components,
+            "capabilities": {
+                key: value
+                for key, value in self.capabilities().items()
+                if key != "features"
+            },
+        }
+
+    @staticmethod
+    def problem(
+        error: ControllerError,
+        request_id: str,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "type": f"urn:hermesops:problem:{error.code}",
+            "title": error.title,
+            "status": error.status,
+            "code": error.code,
+            "request_id": request_id,
+        }
+        if error.detail:
+            payload["detail"] = error.detail
+        if error.resource is not None:
+            payload["resource"] = error.resource
+        return payload
