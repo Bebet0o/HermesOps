@@ -1,18 +1,15 @@
-# Projets HermesOps
+# Projets locaux HermesOps
 
-Ce répertoire mélange volontairement deux catégories :
+Ce répertoire contient uniquement les projets activés ou conservés sur
+l'installation locale.
 
-- les fixtures publiques de fondation, versionnées et toujours désactivées ;
-- les projets réels propres à l'installation, ignorés par Git.
+Les fichiers `*.toml` de ce répertoire sont volontairement ignorés par Git :
+ils contiennent des chemins propres à la machine et ne doivent pas être
+publiés dans le dépôt générique.
 
-Les seuls fichiers `*.toml` autorisés dans l'index public sont :
+Une installation publique neuve commence avec **zéro projet enregistré**.
 
-```text
-transaction-fixture.toml
-transaction-fixture-b.toml
-```
-
-Pour ajouter un projet local :
+Pour ajouter un projet :
 
 ```bash
 cp ../examples/project.example.toml ./mon-projet.toml
@@ -25,5 +22,8 @@ Adapter ensuite les chemins, puis exécuter :
 /opt/docker/hermesops/repo/scripts/hermesops-registry.py sync
 ```
 
-Les configurations de projets réels ne doivent pas être publiées. Les deux
-fixtures doivent rester avec `enabled = false`.
+Les exemples publiables restent dans `config/examples/`.
+
+Les projets `transaction-fixture*` sont exclusivement des fixtures de
+fondation. Leurs modèles sont dans `tests/fixtures/projects/` et ils ne sont
+créés qu'après invocation explicite de `scripts/init-test-fixtures.sh`.

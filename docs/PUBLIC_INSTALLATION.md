@@ -54,6 +54,22 @@ L'image worker est chargée dans le moteur Docker isolé. Son ID exact doit
 correspondre à `config/worker-sandbox.lock.toml`, sinon l'installation échoue
 fermée.
 
+
+## Registre initial
+
+Une installation publique neuve ne crée aucun projet métier et n'enregistre
+aucune fixture. Après migration, la table `projects` doit contenir zéro ligne.
+
+Les fixtures de fondation sont conservées sous `tests/fixtures/projects/`.
+Elles ne sont installées qu'après une action explicite :
+
+```bash
+HERMESOPS_ENABLE_TEST_FIXTURES=1   /opt/docker/hermesops/repo/scripts/init-test-fixtures.sh
+```
+
+Cette commande est réservée aux tests du moteur et ne fait pas partie du
+bootstrap normal.
+
 ## Reprise et sauvegardes
 
 Avant une mise à niveau divergente, l'installateur crée :

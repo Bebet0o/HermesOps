@@ -12,6 +12,9 @@
 
 ### Changed
 
+- isolation des fixtures sous `tests/fixtures/projects/` ;
+- une installation publique neuve commence avec zéro projet enregistré ;
+- l'initialisation des fixtures nécessite une action de test explicite ;
 - version publique `0.1.0-alpha` ;
 - configuration locale TradingBot retirée du suivi Git ;
 - les deux fixtures de fondation restent versionnées et désactivées ;

@@ -33,6 +33,7 @@ static_validation() {
         install.sh uninstall.sh preflight.sh validate.sh \
         scripts/check-secrets.sh scripts/check-secrets.py \
         scripts/export-worker-image.sh scripts/init-test-fixtures.sh \
+        tests/test-public-empty-registry.sh \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -68,24 +69,34 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1])
-allowed = {
-    "config/projects.d/transaction-fixture.toml",
-    "config/projects.d/transaction-fixture-b.toml",
-}
 result = subprocess.run(
     ["git", "-C", str(root), "ls-files", "config/projects.d/*.toml"],
     check=True,
     text=True,
     stdout=subprocess.PIPE,
 )
-tracked = {line for line in result.stdout.splitlines() if line}
-unexpected = sorted(tracked - allowed)
-missing = sorted(allowed - tracked)
-if unexpected:
-    raise SystemExit(f"Local project config tracked: {unexpected}")
+tracked = sorted(
+    line for line in result.stdout.splitlines() if line
+)
+if tracked:
+    raise SystemExit(
+        f"Active project configuration tracked: {tracked}"
+    )
+
+required = (
+    root / "tests/fixtures/projects/transaction-fixture.toml",
+    root / "tests/fixtures/projects/transaction-fixture-b.toml",
+)
+missing = [
+    path.relative_to(root).as_posix()
+    for path in required
+    if not path.is_file()
+]
 if missing:
-    raise SystemExit(f"Foundation fixture config missing: {missing}")
-print("Tracked project configuration allowlist: PASS")
+    raise SystemExit(f"Test fixture templates missing: {missing}")
+
+print("Tracked active project configurations: NONE")
+print("Test fixture templates: PASS")
 PY
     fi
 
@@ -101,6 +112,8 @@ if versions != list(range(1, len(versions) + 1)):
     raise SystemExit(f"Migration sequence invalid: {versions}")
 print(f"Migration sequence: PASS ({len(versions)})")
 PY
+
+    "${REPO}/tests/test-public-empty-registry.sh"
 
     TMP="$(mktemp -d)"
     mkdir -p \

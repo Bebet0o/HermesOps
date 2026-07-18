@@ -482,7 +482,6 @@ PY
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-db.py" integrity
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-roles.py" sync
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-roles.py" verify-profiles
-    user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/init-test-fixtures.sh"
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-registry.py" validate
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-registry.py" sync
 fi
