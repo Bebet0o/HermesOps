@@ -38,6 +38,7 @@ static_validation() {
         tests/test-install-no-auth-contract.sh \
         tests/test-systemd-user-boot-order.sh \
         tests/test-release-documentation.sh \
+        tests/test-controller-contracts.sh \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -122,6 +123,7 @@ PY
     "${REPO}/tests/test-install-no-auth-contract.sh"
     "${REPO}/tests/test-systemd-user-boot-order.sh"
     "${REPO}/tests/test-release-documentation.sh"
+    "${REPO}/tests/test-controller-contracts.sh"
 
     TMP="$(mktemp -d)"
     mkdir -p \

@@ -16,6 +16,23 @@ All notable changes to HermesOps will be documented in this file.
   concepts, security, current limitations, and roadmap;
 - explicit long-term direction for HermesOps Console and Hermesfiles in
   `v0.2.0-beta`.
+- Milestone 2A architecture contracts for the future Controller, Console,
+  replayable event stream, and Hermesfile sandbox profiles;
+- machine-readable OpenAPI and JSON Schema design contracts;
+- accepted architecture decisions covering state ownership, privilege
+  boundaries, Agent adaptation, immutable images, replay, and confirmations.
+
+### Fixed
+
+- synchronized the complete Controller HTTP documentation with OpenAPI;
+- preserved multi-project objectives and numeric queue priorities in API v1;
+- added a machine-readable AsyncAPI WebSocket contract;
+- removed forward-compatibility contradictions from response and event schemas;
+- prohibited unsupported Hermesfile v0 secret eligibility;
+- documented the persistence delta required before Controller writes.
+
+- scanner-safe CSRF and Hermesfile schema identifiers that preserve the
+  security contract without resembling tracked secret assignments;
 
 ### Changed
 
