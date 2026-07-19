@@ -123,6 +123,97 @@ default_branch = "main"
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE roles (
+                    role_id TEXT PRIMARY KEY,
+                    profile_name TEXT NOT NULL,
+                    workspace_mode TEXT NOT NULL
+                );
+                CREATE TABLE runs (
+                    run_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    heartbeat_at TEXT
+                );
+                CREATE TABLE events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id TEXT,
+                    run_id TEXT,
+                    task_id TEXT,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE worker_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    role_id TEXT NOT NULL,
+                    source_profile TEXT NOT NULL,
+                    runtime_profile TEXT NOT NULL,
+                    outer_container_name TEXT NOT NULL,
+                    sandbox_container_id TEXT,
+                    prompt_path TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    workspace_mode TEXT NOT NULL,
+                    network_enabled INTEGER NOT NULL,
+                    cpu_limit INTEGER NOT NULL,
+                    memory_mb INTEGER NOT NULL,
+                    mount_verified INTEGER NOT NULL,
+                    isolation_verified INTEGER NOT NULL,
+                    exit_code INTEGER,
+                    result_json TEXT NOT NULL,
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE TABLE orchestration_tasks (
+                    orchestration_task_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    task_key TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    project_id TEXT,
+                    role_id TEXT,
+                    status TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    instruction TEXT NOT NULL,
+                    acceptance_json TEXT NOT NULL,
+                    marker TEXT,
+                    max_attempts INTEGER NOT NULL,
+                    attempt_count INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    heartbeat_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE TABLE orchestration_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    orchestration_task_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    executor_instance_id TEXT,
+                    run_id TEXT,
+                    worker_execution_id TEXT,
+                    review_execution_id TEXT,
+                    integration_id TEXT,
+                    result_json TEXT NOT NULL,
+                    failure_reason TEXT,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    finished_at TEXT
+                );
+                CREATE TABLE orchestration_dependencies (
+                    plan_id TEXT NOT NULL,
+                    orchestration_task_id TEXT NOT NULL,
+                    depends_on_task_id TEXT NOT NULL,
+                    dependency_condition TEXT NOT NULL
+                );
                 INSERT INTO schema_migrations VALUES (
                     1, '2026-07-18T00:00:00.000Z'
                 );

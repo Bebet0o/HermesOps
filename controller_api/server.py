@@ -17,6 +17,8 @@ MAX_REQUEST_TARGET_BYTES = 4096
 MAX_QUERY_FIELDS = 8
 ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
+ALLOWED_EXECUTION_LIST_QUERY_FIELDS = {"cursor", "limit"}
+ALLOWED_LOG_QUERY_FIELDS = {"after_sequence", "limit"}
 
 
 class ControllerHTTPServer(ThreadingHTTPServer):
@@ -458,6 +460,136 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "data": objectives,
                 "meta": service.meta(request_id, next_cursor=next_cursor),
             }, {}
+
+        objective_prefix = "/api/v1/objectives/"
+        objective_tasks_suffix = "/tasks"
+        if path.startswith(objective_prefix) and path.endswith(objective_tasks_suffix):
+            objective_id = unquote(
+                path[len(objective_prefix):-len(objective_tasks_suffix)]
+            )
+            if not objective_id or "/" in objective_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            unknown = set(query) - ALLOWED_EXECUTION_LIST_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor and limit are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            if len(raw_limit) != 1 or len(raw_cursor) > 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(400, "invalid_limit", "Invalid pagination limit") from error
+            tasks, next_cursor = service.executions.list_objective_tasks(
+                objective_id,
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": tasks,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        task_prefix = "/api/v1/tasks/"
+        task_runs_suffix = "/runs"
+        if path.startswith(task_prefix) and path.endswith(task_runs_suffix):
+            task_id = unquote(path[len(task_prefix):-len(task_runs_suffix)])
+            if not task_id or "/" in task_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            unknown = set(query) - ALLOWED_EXECUTION_LIST_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor and limit are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            if len(raw_limit) != 1 or len(raw_cursor) > 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(400, "invalid_limit", "Invalid pagination limit") from error
+            runs, next_cursor = service.executions.list_task_runs(
+                task_id,
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": runs,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        run_prefix = "/api/v1/runs/"
+        run_logs_suffix = "/logs"
+        if path.startswith(run_prefix) and path.endswith(run_logs_suffix):
+            run_id = unquote(path[len(run_prefix):-len(run_logs_suffix)])
+            if not run_id or "/" in run_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            unknown = set(query) - ALLOWED_LOG_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only after_sequence and limit are supported.",
+                )
+            raw_after = query.get("after_sequence", ["0"])
+            raw_limit = query.get("limit", ["200"])
+            if len(raw_after) != 1 or len(raw_limit) != 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                after_sequence = int(raw_after[0])
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(400, "invalid_log_query", "Invalid log query") from error
+            chunk, snapshot_sequence = service.executions.get_run_logs(
+                run_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            return 200, {
+                "data": chunk,
+                "meta": service.meta(
+                    request_id,
+                    snapshot_sequence=snapshot_sequence,
+                ),
+            }, {}
+
+        if path.startswith(task_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            task_id = unquote(path[len(task_prefix):])
+            if not task_id or "/" in task_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            task = service.executions.get_task(task_id)
+            revision = int(task["resource_revision"])
+            return 200, {
+                "data": task,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
+        if path.startswith(run_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            run_id = unquote(path[len(run_prefix):])
+            if not run_id or "/" in run_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            run = service.executions.get_run(run_id)
+            revision = int(run["resource_revision"])
+            return 200, {
+                "data": run,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
 
         objective_prefix = "/api/v1/objectives/"
         if path.startswith(objective_prefix):

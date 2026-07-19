@@ -153,10 +153,17 @@ class ReadOnlyDatabase:
     REQUIRED_TABLES = {
         "projects",
         "schema_migrations",
+        "roles",
+        "runs",
+        "events",
+        "worker_executions",
         "objective_queue",
         "objective_attempts",
         "objective_events",
         "orchestration_plans",
+        "orchestration_tasks",
+        "orchestration_attempts",
+        "orchestration_dependencies",
     }
 
     def __init__(self, settings: Settings) -> None:
@@ -395,7 +402,9 @@ class ControllerService:
         self.settings = settings
         self.database = ReadOnlyDatabase(settings)
         from .objective_reads import ObjectiveReadStore
+        from .execution_reads import ExecutionReadStore
         self.objectives = ObjectiveReadStore(settings)
+        self.executions = ExecutionReadStore(settings)
 
     def version(self) -> str:
         try:
@@ -533,12 +542,13 @@ class ControllerService:
         *,
         resource_revision: int | None = None,
         next_cursor: str | None = None,
+        snapshot_sequence: int | None = None,
     ) -> dict[str, Any]:
         return {
             "request_id": request_id,
             "resource_revision": resource_revision,
             "next_cursor": next_cursor,
-            "snapshot_sequence": None,
+            "snapshot_sequence": snapshot_sequence,
         }
 
     def readiness(self) -> tuple[bool, list[str]]:
@@ -564,6 +574,12 @@ class ControllerService:
                 "objective_reads": True,
                 "operation_reads": True,
                 "legacy_operation_projection": True,
+                "task_reads": True,
+                "run_reads": True,
+                "worker_execution_reads": True,
+                "persisted_event_log_reads": True,
+                "raw_worker_log_reads": False,
+                "run_artifact_reads": False,
                 "durable_controller_operations": False,
                 "objective_writes": False,
                 "websocket_events": False,
