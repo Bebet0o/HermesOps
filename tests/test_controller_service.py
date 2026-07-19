@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+import hashlib
+import http.client
+import os
+import sqlite3
+import tempfile
+import threading
+import unittest
+from unittest import mock
+from pathlib import Path
+
+from controller_api.core import Settings
+from controller_api.server import build_server
+from controller_api.service_support import (
+    ServiceSupportError,
+    _write_new_session,
+    ensure_session,
+    probe_controller,
+    read_session,
+    rotate_session,
+)
+
+
+class ControllerServiceSupportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "root"
+        self.secrets = self.root / "secrets"
+        self.secrets.mkdir(parents=True)
+        os.chmod(self.secrets, 0o700)
+        self.session = self.secrets / "controller-session"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_ensure_is_private_and_idempotent(self) -> None:
+        output = ensure_session(self.session)
+        self.assertEqual(output, "created")
+        before = hashlib.sha256(self.session.read_bytes()).hexdigest()
+        self.assertEqual(oct(self.session.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(ensure_session(self.session), "valid")
+        after = hashlib.sha256(self.session.read_bytes()).hexdigest()
+        self.assertEqual(before, after)
+        self.assertGreaterEqual(len(read_session(self.session)), 32)
+
+    def test_exclusive_create_never_deletes_existing(self) -> None:
+        ensure_session(self.session)
+        before = self.session.read_bytes()
+        with self.assertRaises(FileExistsError):
+            _write_new_session(self.session, "b" * 64)
+        self.assertEqual(self.session.read_bytes(), before)
+        self.assertEqual(read_session(self.session), before.decode("ascii").strip())
+
+    def test_rotate_changes_value_atomically(self) -> None:
+        ensure_session(self.session)
+        before = read_session(self.session)
+        self.assertEqual(rotate_session(self.session), "rotated")
+        after = read_session(self.session)
+        self.assertNotEqual(before, after)
+        self.assertEqual(oct(self.session.stat().st_mode & 0o777), "0o600")
+
+    def test_new_session_syncs_file_and_parent_directory(self) -> None:
+        with mock.patch(
+            "controller_api.service_support.os.fsync",
+            wraps=os.fsync,
+        ) as synchronized:
+            self.assertEqual(ensure_session(self.session), "created")
+        self.assertGreaterEqual(synchronized.call_count, 2)
+
+    def test_rotate_syncs_parent_directory(self) -> None:
+        ensure_session(self.session)
+        with mock.patch(
+            "controller_api.service_support.os.fsync",
+            wraps=os.fsync,
+        ) as synchronized:
+            self.assertEqual(rotate_session(self.session), "rotated")
+        self.assertGreaterEqual(synchronized.call_count, 3)
+
+    def test_symlink_is_rejected(self) -> None:
+        target = self.secrets / "real-session"
+        target.write_text("a" * 64 + "\n", encoding="ascii")
+        os.chmod(target, 0o600)
+        self.session.symlink_to(target)
+        with self.assertRaises(ServiceSupportError):
+            read_session(self.session)
+
+    def test_insecure_parent_is_rejected(self) -> None:
+        os.chmod(self.secrets, 0o750)
+        with self.assertRaises(ServiceSupportError):
+            ensure_session(self.session)
+
+
+class ControllerProbeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name) / "root"
+        (self.root / "repo").mkdir(parents=True)
+        (self.root / "repo" / "VERSION").write_text(
+            "0.1.0-alpha\n",
+            encoding="utf-8",
+        )
+        projects = self.root / "repo" / "config" / "projects.d"
+        projects.mkdir(parents=True)
+        project_config = projects / "alpha.toml"
+        project_config.write_text(
+            'schema_version = 1\n[git]\ndefault_branch = "main"\n',
+            encoding="utf-8",
+        )
+
+        secrets_dir = self.root / "secrets"
+        secrets_dir.mkdir()
+        os.chmod(secrets_dir, 0o700)
+        self.session = secrets_dir / "controller-session"
+        ensure_session(self.session)
+
+        database = self.root / "state" / "controller" / "hermesops.db"
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                CREATE TABLE projects (
+                    project_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    repo_path TEXT NOT NULL UNIQUE,
+                    data_path TEXT NOT NULL UNIQUE,
+                    policy_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    config_source TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    registered_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations VALUES (
+                    1, '2026-07-19T00:00:00.000Z'
+                );
+                """
+            )
+
+        settings = Settings.from_root(
+            self.root,
+            host="127.0.0.1",
+            port=0,
+        )
+        self.server = build_server(settings)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            daemon=True,
+        )
+        self.thread.start()
+        self.port = int(self.server.server_address[1])
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary.cleanup()
+
+    def test_authenticated_probe(self) -> None:
+        result = probe_controller(
+            f"http://127.0.0.1:{self.port}",
+            self.session,
+            wait_seconds=2,
+        )
+        self.assertEqual(result.health_status, 200)
+        self.assertEqual(result.ready_status, 200)
+        self.assertEqual(result.capabilities_status, 200)
+
+    def test_probe_rejects_non_loopback(self) -> None:
+        with self.assertRaises(ServiceSupportError):
+            probe_controller(
+                "http://192.0.2.1:8765",
+                self.session,
+                wait_seconds=0,
+            )
+
+    def test_probe_rejects_localhost_hostname(self) -> None:
+        with self.assertRaises(ServiceSupportError):
+            probe_controller(
+                "http://localhost:8765",
+                self.session,
+                wait_seconds=0,
+            )
+
+    def test_live_rotation_invalidates_old_cookie_without_restart(self) -> None:
+        old_token = read_session(self.session)
+        self.assertEqual(rotate_session(self.session), "rotated")
+        new_token = read_session(self.session)
+        self.assertNotEqual(old_token, new_token)
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.port,
+            timeout=2,
+        )
+        try:
+            connection.request(
+                "GET",
+                "/api/v1/system/capabilities",
+                headers={
+                    "Cookie": f"hermesops_session={old_token}",
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 401)
+        finally:
+            connection.close()
+
+        result = probe_controller(
+            f"http://127.0.0.1:{self.port}",
+            self.session,
+            wait_seconds=2,
+        )
+        self.assertEqual(result.capabilities_status, 200)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
