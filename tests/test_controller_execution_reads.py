@@ -598,6 +598,73 @@ class ExecutionReadTest(unittest.TestCase):
         self.assertNotEqual(headers["etag"], first)
         self.assertEqual(payload["data"]["worker_execution"]["cpu_limit"], 3)
 
+    def test_worker_role_mismatch_fails_closed(self) -> None:
+        self.fixture.execute(
+            "INSERT INTO roles VALUES('worker_other','ops-worker-other','read')"
+        )
+        self.fixture.execute(
+            "UPDATE worker_executions SET role_id = 'worker_other' "
+            "WHERE execution_id = ?",
+            (WORKER_ONE,),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "run_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
+    def test_worker_profile_mismatch_fails_closed(self) -> None:
+        self.fixture.execute(
+            "UPDATE worker_executions SET source_profile = 'ops-worker-other' "
+            "WHERE execution_id = ?",
+            (WORKER_ONE,),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "run_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
+    def test_worker_workspace_mismatch_fails_closed(self) -> None:
+        self.fixture.execute(
+            "UPDATE worker_executions SET workspace_mode = 'read' "
+            "WHERE execution_id = ?",
+            (WORKER_ONE,),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "run_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
+    def test_transaction_project_mismatch_fails_closed(self) -> None:
+        self.fixture.execute(
+            "UPDATE runs SET project_id = 'other' WHERE run_id = ?",
+            (LEGACY_TWO,),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "run_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
+    def test_malformed_worker_numeric_value_maps_to_projection_error(self) -> None:
+        self.fixture.execute(
+            "UPDATE worker_executions SET cpu_limit = 'PRIVATE_NUMERIC' "
+            "WHERE execution_id = ?",
+            (WORKER_ONE,),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "run_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
+    def test_event_timestamp_path_fails_closed_without_exposure(self) -> None:
+        self.fixture.execute(
+            "UPDATE events SET created_at = '/host/private/timestamp' "
+            "WHERE event_id = 1"
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/runs/{RUN_TWO}/logs")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "log_projection_invalid")
+        self.assert_no_sensitive_values(problem)
+
     def test_run_cursor_is_signed_and_bound_to_task(self) -> None:
         path = f"/api/v1/tasks/{TASK_ONE}/runs?limit=1"
         status, _, payload = self.fixture.request(path)

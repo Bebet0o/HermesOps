@@ -6,6 +6,7 @@ import hmac
 import json
 import re
 import sqlite3
+from datetime import datetime
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
@@ -56,6 +57,7 @@ RUN_STATES = {
     "recovery_required",
 }
 EVENT_SEVERITIES = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+WORKSPACE_MODES = {"read", "write"}
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,146 @@ class ExecutionReadStore:
                 resource={"type": resource_type, "id": resource_id},
             )
         return candidate
+
+    @staticmethod
+    def _projection_error(
+        *,
+        code: str,
+        title: str,
+        detail: str,
+        resource_type: str,
+        resource_id: str,
+    ) -> ControllerError:
+        return ControllerError(
+            503,
+            code,
+            title,
+            detail,
+            resource={"type": resource_type, "id": resource_id},
+        )
+
+    @classmethod
+    def _integer(
+        cls,
+        value: Any,
+        *,
+        minimum: int | None,
+        maximum: int | None = None,
+        code: str,
+        title: str,
+        resource_type: str,
+        resource_id: str,
+    ) -> int:
+        if type(value) is not int:
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an invalid numeric value.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        if minimum is not None and value < minimum:
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an out-of-range numeric value.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        if maximum is not None and value > maximum:
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an out-of-range numeric value.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        return value
+
+    @classmethod
+    def _flag(
+        cls,
+        value: Any,
+        *,
+        code: str,
+        title: str,
+        resource_type: str,
+        resource_id: str,
+    ) -> bool:
+        integer = cls._integer(
+            value,
+            minimum=0,
+            maximum=1,
+            code=code,
+            title=title,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        return bool(integer)
+
+    @classmethod
+    def _timestamp(
+        cls,
+        value: Any,
+        *,
+        required: bool,
+        code: str,
+        title: str,
+        resource_type: str,
+        resource_id: str,
+    ) -> str | None:
+        if value is None:
+            if not required:
+                return None
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains a missing timestamp.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        if not isinstance(value, str):
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an invalid timestamp.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        encoded = value.encode("utf-8")
+        if (
+            not value
+            or len(encoded) > 64
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an invalid timestamp.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        try:
+            parsed = datetime.fromisoformat(
+                value[:-1] + "+00:00" if value.endswith("Z") else value
+            )
+        except ValueError as error:
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains an invalid timestamp.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            ) from error
+        if parsed.tzinfo is None:
+            raise cls._projection_error(
+                code=code,
+                title=title,
+                detail="Stored execution data contains a timezone-free timestamp.",
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
+        return value
 
     @staticmethod
     def _task_state(raw: str) -> str:
@@ -494,29 +636,83 @@ class ExecutionReadStore:
                 "A task references an invalid project identifier.",
                 resource={"type": "task", "id": task_id},
             )
+        workspace_mode = str(row["workspace_mode"] or "")
+        if raw_role != "system" and workspace_mode not in WORKSPACE_MODES:
+            raise self._projection_error(
+                code="task_projection_invalid",
+                title="Task projection unavailable",
+                detail="A task references an invalid registered workspace mode.",
+                resource_type="task",
+                resource_id=task_id,
+            )
         state = self._task_state(str(row["raw_status"]))
-        updated_at = row["finished_at"] or row["heartbeat_at"] or row["started_at"] or row["created_at"]
+        created_at = self._timestamp(
+            row["created_at"], required=True,
+            code="task_projection_invalid", title="Task projection unavailable",
+            resource_type="task", resource_id=task_id,
+        )
+        started_at = self._timestamp(
+            row["started_at"], required=False,
+            code="task_projection_invalid", title="Task projection unavailable",
+            resource_type="task", resource_id=task_id,
+        )
+        heartbeat_at = self._timestamp(
+            row["heartbeat_at"], required=False,
+            code="task_projection_invalid", title="Task projection unavailable",
+            resource_type="task", resource_id=task_id,
+        )
+        finished_at = self._timestamp(
+            row["finished_at"], required=False,
+            code="task_projection_invalid", title="Task projection unavailable",
+            resource_type="task", resource_id=task_id,
+        )
+        updated_at = finished_at or heartbeat_at or started_at or created_at
+        priority = self._integer(
+            row["priority"], minimum=0, code="task_projection_invalid",
+            title="Task projection unavailable", resource_type="task",
+            resource_id=task_id,
+        )
+        attempt_count = self._integer(
+            row["attempt_count"], minimum=0, code="task_projection_invalid",
+            title="Task projection unavailable", resource_type="task",
+            resource_id=task_id,
+        )
+        max_attempts = self._integer(
+            row["max_attempts"], minimum=1, code="task_projection_invalid",
+            title="Task projection unavailable", resource_type="task",
+            resource_id=task_id,
+        )
+        dependency_count = self._integer(
+            row["dependency_count"], minimum=0, code="task_projection_invalid",
+            title="Task projection unavailable", resource_type="task",
+            resource_id=task_id,
+        )
+        dependent_count = self._integer(
+            row["dependent_count"], minimum=0, code="task_projection_invalid",
+            title="Task projection unavailable", resource_type="task",
+            resource_id=task_id,
+        )
         has_result = str(row["result_json"] or "") not in {"", "{}", "null"}
         payload: dict[str, Any] = {
             "id": task_id,
-            "created_at": str(row["created_at"]),
-            "updated_at": str(updated_at),
+            "created_at": created_at,
+            "updated_at": updated_at,
             "state": state,
             "objective_id": objective_id,
             "title": self._title(task_key),
             "role_id": raw_role,
-            "writer": str(row["workspace_mode"] or "") == "write",
+            "writer": workspace_mode == "write",
             "plan_id": plan_id,
             "task_key": task_key,
             "kind": kind,
             "project_id": project_id,
-            "priority": int(row["priority"]),
-            "attempt_count": int(row["attempt_count"]),
-            "max_attempts": int(row["max_attempts"]),
-            "dependency_count": int(row["dependency_count"]),
-            "dependent_count": int(row["dependent_count"]),
-            "started_at": str(row["started_at"]) if row["started_at"] else None,
-            "finished_at": str(row["finished_at"]) if row["finished_at"] else None,
+            "priority": priority,
+            "attempt_count": attempt_count,
+            "max_attempts": max_attempts,
+            "dependency_count": dependency_count,
+            "dependent_count": dependent_count,
+            "started_at": started_at,
+            "finished_at": finished_at,
             "result": (
                 {"available": True, "legacy_payload_redacted": True}
                 if has_result else None
@@ -682,6 +878,7 @@ class ExecutionReadStore:
                 a.heartbeat_at AS attempt_heartbeat_at,
                 a.finished_at AS attempt_finished_at,
                 t.plan_id,
+                t.project_id AS task_project_id,
                 t.role_id AS task_role_id,
                 (
                     SELECT q2.objective_id
@@ -697,7 +894,9 @@ class ExecutionReadStore:
                 ) AS objective_count,
                 r.role_id AS registered_role_id,
                 r.profile_name,
+                r.workspace_mode AS registered_workspace_mode,
                 lr.run_id AS joined_legacy_run_id,
+                lr.project_id AS transaction_project_id,
                 lr.status AS legacy_run_status,
                 w.execution_id AS joined_worker_execution_id,
                 w.run_id AS worker_legacy_run_id,
@@ -841,7 +1040,45 @@ class ExecutionReadStore:
                     "The worker execution is linked to a different transaction.",
                     resource={"type": "run", "id": run_id},
                 )
-        role_id = str(row["task_role_id"] or row["worker_role_id"] or "system")
+        task_project_id = (
+            str(row["task_project_id"])
+            if row["task_project_id"] is not None
+            else None
+        )
+        if task_project_id is not None and not PROJECT_ID_PATTERN.fullmatch(task_project_id):
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="A run references an invalid task project identifier.",
+                resource_type="run", resource_id=run_id,
+            )
+        transaction_project_id = (
+            str(row["transaction_project_id"])
+            if row["transaction_project_id"] is not None
+            else None
+        )
+        if internal_transaction_key is not None:
+            if (
+                transaction_project_id is None
+                or not PROJECT_ID_PATTERN.fullmatch(transaction_project_id)
+                or transaction_project_id != task_project_id
+            ):
+                raise self._projection_error(
+                    code="run_projection_invalid", title="Run projection unavailable",
+                    detail="The linked transaction belongs to a different or invalid project.",
+                    resource_type="run", resource_id=run_id,
+                )
+        task_role_id = str(row["task_role_id"]) if row["task_role_id"] else None
+        worker_role_id = str(row["worker_role_id"]) if row["worker_role_id"] else None
+        if worker_id is not None and (
+            worker_role_id is None
+            or (task_role_id is not None and worker_role_id != task_role_id)
+        ):
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="The worker execution role does not match the task role.",
+                resource_type="run", resource_id=run_id,
+            )
+        role_id = str(task_role_id or worker_role_id or "system")
         registered_role = (
             str(row["registered_role_id"])
             if row["registered_role_id"] is not None
@@ -858,48 +1095,117 @@ class ExecutionReadStore:
                 "A run references an invalid or unregistered role identifier.",
                 resource={"type": "run", "id": run_id},
             )
-        sandbox_profile_id = str(row["source_profile"] or row["profile_name"] or role_id)
+        registered_profile = str(row["profile_name"] or "")
+        registered_workspace_mode = str(row["registered_workspace_mode"] or "")
+        if role_id != "system" and (
+            not PROFILE_ID_PATTERN.fullmatch(registered_profile)
+            or registered_workspace_mode not in WORKSPACE_MODES
+        ):
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="The registered role contains invalid public execution metadata.",
+                resource_type="run", resource_id=run_id,
+            )
+        source_profile = str(row["source_profile"] or "")
+        workspace_mode = str(row["workspace_mode"] or "")
+        if worker_id is not None and (
+            source_profile != registered_profile
+            or workspace_mode != registered_workspace_mode
+        ):
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="The worker execution metadata does not match its registered role.",
+                resource_type="run", resource_id=run_id,
+            )
+        sandbox_profile_id = source_profile or registered_profile or role_id
         if sandbox_profile_id != "system" and not PROFILE_ID_PATTERN.fullmatch(sandbox_profile_id):
-            raise ControllerError(
-                503,
-                "run_projection_invalid",
-                "Run projection unavailable",
-                "A run references an invalid sandbox profile.",
-                resource={"type": "run", "id": run_id},
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="A run references an invalid sandbox profile.",
+                resource_type="run", resource_id=run_id,
             )
         runtime_profile = str(row["runtime_profile"] or "")
         if worker_id is not None and not PROFILE_ID_PATTERN.fullmatch(runtime_profile):
-            raise ControllerError(
-                503,
-                "run_projection_invalid",
-                "Run projection unavailable",
-                "A worker execution references an invalid runtime profile.",
-                resource={"type": "run", "id": run_id},
+            raise self._projection_error(
+                code="run_projection_invalid", title="Run projection unavailable",
+                detail="A worker execution references an invalid runtime profile.",
+                resource_type="run", resource_id=run_id,
             )
         state = self._run_state(
             str(row["attempt_status"]),
             str(row["legacy_run_status"]) if row["legacy_run_status"] else None,
         )
-        updated_at = row["attempt_finished_at"] or row["attempt_heartbeat_at"] or row["attempt_started_at"]
+        attempt_started_at = self._timestamp(
+            row["attempt_started_at"], required=True, code="run_projection_invalid",
+            title="Run projection unavailable", resource_type="run", resource_id=run_id,
+        )
+        attempt_heartbeat_at = self._timestamp(
+            row["attempt_heartbeat_at"], required=True, code="run_projection_invalid",
+            title="Run projection unavailable", resource_type="run", resource_id=run_id,
+        )
+        attempt_finished_at = self._timestamp(
+            row["attempt_finished_at"], required=False, code="run_projection_invalid",
+            title="Run projection unavailable", resource_type="run", resource_id=run_id,
+        )
+        updated_at = attempt_finished_at or attempt_heartbeat_at or attempt_started_at
+        attempt_number = self._integer(
+            row["attempt_number"], minimum=1, code="run_projection_invalid",
+            title="Run projection unavailable", resource_type="run", resource_id=run_id,
+        )
         attempt_has_result = str(row["attempt_result_json"] or "") not in {"", "{}", "null"}
         worker: dict[str, Any] | None = None
         if worker_id is not None:
             worker_has_result = str(row["worker_result_json"] or "") not in {"", "{}", "null"}
+            worker_created_at = self._timestamp(
+                row["worker_created_at"], required=True, code="run_projection_invalid",
+                title="Run projection unavailable", resource_type="run", resource_id=run_id,
+            )
+            worker_started_at = self._timestamp(
+                row["worker_started_at"], required=False, code="run_projection_invalid",
+                title="Run projection unavailable", resource_type="run", resource_id=run_id,
+            )
+            worker_finished_at = self._timestamp(
+                row["worker_finished_at"], required=False, code="run_projection_invalid",
+                title="Run projection unavailable", resource_type="run", resource_id=run_id,
+            )
+            exit_code = (
+                self._integer(
+                    row["exit_code"], minimum=-255, maximum=255,
+                    code="run_projection_invalid", title="Run projection unavailable",
+                    resource_type="run", resource_id=run_id,
+                )
+                if row["exit_code"] is not None else None
+            )
             worker = {
                 "id": worker_id,
                 "kind": "worker",
-                "source_profile": str(row["source_profile"]),
+                "source_profile": source_profile,
                 "runtime_profile": runtime_profile,
-                "workspace_mode": str(row["workspace_mode"]),
-                "network_enabled": bool(row["network_enabled"]),
-                "cpu_limit": int(row["cpu_limit"]),
-                "memory_mb": int(row["memory_mb"]),
-                "mount_verified": bool(row["mount_verified"]),
-                "isolation_verified": bool(row["isolation_verified"]),
-                "exit_code": int(row["exit_code"]) if row["exit_code"] is not None else None,
-                "created_at": str(row["worker_created_at"]),
-                "started_at": str(row["worker_started_at"]) if row["worker_started_at"] else None,
-                "finished_at": str(row["worker_finished_at"]) if row["worker_finished_at"] else None,
+                "workspace_mode": workspace_mode,
+                "network_enabled": self._flag(
+                    row["network_enabled"], code="run_projection_invalid",
+                    title="Run projection unavailable", resource_type="run", resource_id=run_id,
+                ),
+                "cpu_limit": self._integer(
+                    row["cpu_limit"], minimum=1, code="run_projection_invalid",
+                    title="Run projection unavailable", resource_type="run", resource_id=run_id,
+                ),
+                "memory_mb": self._integer(
+                    row["memory_mb"], minimum=1, code="run_projection_invalid",
+                    title="Run projection unavailable", resource_type="run", resource_id=run_id,
+                ),
+                "mount_verified": self._flag(
+                    row["mount_verified"], code="run_projection_invalid",
+                    title="Run projection unavailable", resource_type="run", resource_id=run_id,
+                ),
+                "isolation_verified": self._flag(
+                    row["isolation_verified"], code="run_projection_invalid",
+                    title="Run projection unavailable", resource_type="run", resource_id=run_id,
+                ),
+                "exit_code": exit_code,
+                "created_at": worker_created_at,
+                "started_at": worker_started_at,
+                "finished_at": worker_finished_at,
                 "result": (
                     {"available": True, "legacy_payload_redacted": True}
                     if worker_has_result else None
@@ -911,21 +1217,21 @@ class ExecutionReadStore:
             }
         payload: dict[str, Any] = {
             "id": run_id,
-            "created_at": str(row["attempt_started_at"]),
-            "updated_at": str(updated_at),
+            "created_at": attempt_started_at,
+            "updated_at": updated_at,
             "state": state,
             "task_id": task_id,
             "role_id": role_id,
             "sandbox_profile_id": sandbox_profile_id,
             "sandbox_image_digest": self._image_digest(row["worker_result_json"]),
             "objective_id": objective_id,
-            "attempt_number": int(row["attempt_number"]),
+            "attempt_number": attempt_number,
             "transaction_run_id": transaction_reference,
             "worker_execution": worker,
             "review_execution_available": row["review_execution_id"] is not None,
             "integration_available": row["integration_id"] is not None,
             "executor_instance_available": row["executor_instance_id"] is not None,
-            "finished_at": str(row["attempt_finished_at"]) if row["attempt_finished_at"] else None,
+            "finished_at": attempt_finished_at,
             "result": (
                 {"available": True, "legacy_payload_redacted": True}
                 if attempt_has_result else None
@@ -1074,7 +1380,7 @@ class ExecutionReadStore:
                 else:
                     rows = list(connection.execute(
                         """
-                        SELECT event_id, event_type, severity, payload_json, created_at
+                        SELECT event_id, project_id, event_type, severity, payload_json, created_at
                         FROM events
                         WHERE run_id = ? AND event_id > ? AND event_id <= ?
                         ORDER BY event_id
@@ -1088,13 +1394,26 @@ class ExecutionReadStore:
         selected = rows[:limit]
         entries: list[dict[str, Any]] = []
         for event in selected:
-            sequence = int(event["event_id"])
+            sequence = self._integer(
+                event["event_id"], minimum=1, code="log_projection_invalid",
+                title="Run logs unavailable", resource_type="run", resource_id=run_id,
+            )
             event_type = str(event["event_type"])
             severity = str(event["severity"])
+            event_project_id = (
+                str(event["project_id"]) if event["project_id"] is not None else None
+            )
+            expected_project_id = (
+                str(row["transaction_project_id"])
+                if row["transaction_project_id"] is not None else None
+            )
             if (
-                sequence < 1
-                or not EVENT_TYPE_PATTERN.fullmatch(event_type)
+                not EVENT_TYPE_PATTERN.fullmatch(event_type)
                 or severity not in EVENT_SEVERITIES
+                or (
+                    event_project_id is not None
+                    and event_project_id != expected_project_id
+                )
             ):
                 raise ControllerError(
                     503,
@@ -1113,7 +1432,11 @@ class ExecutionReadStore:
                     payload_valid = False
             entries.append({
                 "sequence": sequence,
-                "timestamp": str(event["created_at"]),
+                "timestamp": self._timestamp(
+                    event["created_at"], required=True,
+                    code="log_projection_invalid", title="Run logs unavailable",
+                    resource_type="run", resource_id=run_id,
+                ),
                 "severity": severity.lower(),
                 "event_type": event_type,
                 "message": self._event_message(event_type),
