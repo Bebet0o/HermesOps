@@ -11,6 +11,7 @@ export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 python3 -m compileall -q \
     controller_api \
     scripts/hermesops-controller-api.py \
+    scripts/hermesops-controller-objective-probe.py \
     tests/test_controller_api.py
 
 python3 tests/test_controller_api.py
@@ -31,6 +32,10 @@ implemented = {
     "/system/capabilities": "get",
     "/projects": "get",
     "/projects/{project_id}": "get",
+    "/objectives": "get",
+    "/objectives/{objective_id}": "get",
+    "/projects/{project_id}/objectives": "get",
+    "/operations/{operation_id}": "get",
 }
 for path, method in implemented.items():
     if path not in contract["paths"]:
