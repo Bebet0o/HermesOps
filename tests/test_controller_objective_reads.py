@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import http.client
 import json
 import os
@@ -345,6 +346,287 @@ class ObjectiveReadTest(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload["code"], "objective_projection_invalid")
         self.assertNotIn("secret", json.dumps(payload))
+
+
+    def test_latest_operation_is_selected_by_attempt_number(self) -> None:
+        objective = "objective-" + "2" * 32
+        first = "objective-attempt-" + "c" * 32
+        second = "objective-attempt-" + "a" * 32
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                INSERT INTO objective_attempts VALUES(
+                    ?,?,2,'RUNNING','executor-new',NULL,NULL,'{}',
+                    NULL,?,?,NULL,NULL
+                )
+                """,
+                (
+                    second,
+                    objective,
+                    "2026-07-19T02:00:00.000Z",
+                    "2026-07-19T02:01:00.000Z",
+                ),
+            )
+            connection.commit()
+
+        status, _, listing = self.fixture.request(
+            "/api/v1/objectives?limit=50"
+        )
+        self.assertEqual(status, 200)
+        listed = next(
+            item for item in listing["data"] if item["id"] == objective
+        )
+        self.assertEqual(listed["attempt_count"], 2)
+        self.assertEqual(listed["latest_operation_id"], second)
+
+        status, _, detail = self.fixture.request(
+            f"/api/v1/objectives/{objective}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            detail["data"]["operation_ids"],
+            [first, second],
+        )
+        self.assertEqual(detail["data"]["latest_operation_id"], second)
+
+    def test_state_filters_match_projected_transition_and_plan_state(self) -> None:
+        pause_requested = "objective-" + "5" * 32
+        queued = "objective-" + "0" * 32
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                "INSERT INTO orchestration_plans VALUES(?,?)",
+                ("plan-blocked-transition", "BLOCKED"),
+            )
+            connection.execute(
+                "UPDATE objective_queue SET plan_id = ? WHERE objective_id = ?",
+                ("plan-blocked-transition", pause_requested),
+            )
+            # Simulate a damaged legacy reference. Projection follows the
+            # joined plan, not merely a non-null foreign-key value.
+            connection.execute(
+                "UPDATE objective_queue SET plan_id = ? WHERE objective_id = ?",
+                ("missing-plan", queued),
+            )
+            connection.commit()
+
+        status, _, detail = self.fixture.request(
+            f"/api/v1/objectives/{pause_requested}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["data"]["state"], "running")
+        self.assertEqual(detail["data"]["requested_transition"], "pause")
+
+        status, _, running = self.fixture.request(
+            "/api/v1/objectives?state=running&limit=50"
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(
+            pause_requested,
+            {item["id"] for item in running["data"]},
+        )
+
+        status, _, queued_detail = self.fixture.request(
+            f"/api/v1/objectives/{queued}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(queued_detail["data"]["state"], "draft")
+
+        _, _, drafts = self.fixture.request(
+            "/api/v1/objectives?state=draft&limit=50"
+        )
+        _, _, planned = self.fixture.request(
+            "/api/v1/objectives?state=planned&limit=50"
+        )
+        self.assertIn(queued, {item["id"] for item in drafts["data"]})
+        self.assertNotIn(queued, {item["id"] for item in planned["data"]})
+
+    def test_unsigned_and_tampered_cursors_are_rejected(self) -> None:
+        status, _, first = self.fixture.request(
+            "/api/v1/objectives?limit=2"
+        )
+        self.assertEqual(status, 200)
+        cursor = first["meta"]["next_cursor"]
+        self.assertIsInstance(cursor, str)
+
+        last = first["data"][-1]
+        forged_payload = json.dumps(
+            {
+                "v": 1,
+                "c": last["created_at"],
+                "i": last["id"],
+                "p": None,
+                "s": None,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        forged = base64.urlsafe_b64encode(
+            forged_payload
+        ).rstrip(b"=").decode("ascii")
+        status, _, payload = self.fixture.request(
+            f"/api/v1/objectives?limit=2&cursor={forged}"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "invalid_cursor")
+
+        decoded = bytearray(
+            base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        )
+        decoded[-1] ^= 1
+        tampered = base64.urlsafe_b64encode(
+            decoded
+        ).rstrip(b"=").decode("ascii")
+        status, _, payload = self.fixture.request(
+            f"/api/v1/objectives?limit=2&cursor={tampered}"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "invalid_cursor")
+
+    def test_etags_cover_all_projected_mutable_fields(self) -> None:
+        objective = "objective-" + "3" * 32
+        status, headers, before = self.fixture.request(
+            f"/api/v1/objectives/{objective}"
+        )
+        self.assertEqual(status, 200)
+        before_etag = headers["etag"]
+        before_heartbeat = before["data"]["updated_at"]
+
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                UPDATE objective_queue
+                SET objective = ?, priority = ?
+                WHERE objective_id = ?
+                """,
+                ("Changed title\nChanged details", 999, objective),
+            )
+            connection.commit()
+
+        status, headers, after = self.fixture.request(
+            f"/api/v1/objectives/{objective}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(after["data"]["updated_at"], before_heartbeat)
+        self.assertNotEqual(headers["etag"], before_etag)
+        self.assertNotEqual(
+            after["data"]["resource_revision"],
+            before["data"]["resource_revision"],
+        )
+
+        operation = "objective-attempt-" + "c" * 32
+        status, headers, before_operation = self.fixture.request(
+            f"/api/v1/operations/{operation}"
+        )
+        self.assertEqual(status, 200)
+        operation_etag = headers["etag"]
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                UPDATE objective_attempts
+                SET executor_instance_id = ?
+                WHERE objective_attempt_id = ?
+                """,
+                ("executor-updated", operation),
+            )
+            connection.commit()
+        status, headers, after_operation = self.fixture.request(
+            f"/api/v1/operations/{operation}"
+        )
+        self.assertEqual(status, 200)
+        self.assertNotEqual(headers["etag"], operation_etag)
+        self.assertNotEqual(
+            after_operation["data"]["resource_revision"],
+            before_operation["data"]["resource_revision"],
+        )
+
+    def test_project_filter_survives_unrelated_malformed_scope(self) -> None:
+        malformed = "objective-" + "0" * 32
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                UPDATE objective_queue
+                SET project_scope_json = ?
+                WHERE objective_id = ?
+                """,
+                ('{"private":"malformed"}', malformed),
+            )
+            connection.commit()
+
+        status, _, payload = self.fixture.request(
+            "/api/v1/projects/beta/objectives?limit=50"
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["data"])
+        self.assertNotIn("private", json.dumps(payload))
+        self.assertTrue(
+            all("beta" in item["project_ids"] for item in payload["data"])
+        )
+
+    def test_invalid_legacy_identifiers_fail_closed(self) -> None:
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                INSERT INTO objective_queue VALUES(
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                )
+                """,
+                (
+                    "legacy/private-objective",
+                    "Private objective",
+                    "AI",
+                    "QUEUED",
+                    1,
+                    "2026-07-19T03:00:00.000Z",
+                    '["alpha"]',
+                    1,
+                    3,
+                    0,
+                    None,
+                    None,
+                    "2026-07-19T03:00:00.000Z",
+                    None,
+                    "2026-07-19T03:00:00.000Z",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            connection.commit()
+
+        status, _, payload = self.fixture.request(
+            "/api/v1/objectives?limit=50"
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "objective_projection_invalid")
+        self.assertNotIn("legacy/private-objective", json.dumps(payload))
+
+        operation = "objective-attempt-" + "c" * 32
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute(
+                """
+                UPDATE objective_attempts
+                SET objective_id = ?
+                WHERE objective_attempt_id = ?
+                """,
+                ("private-objective-target", operation),
+            )
+            connection.commit()
+        status, _, payload = self.fixture.request(
+            f"/api/v1/operations/{operation}"
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "operation_projection_invalid")
+        self.assertNotIn("private-objective-target", json.dumps(payload))
+
+    def test_missing_objective_table_maps_to_database_unavailable(self) -> None:
+        with closing(sqlite3.connect(self.fixture.db)) as connection:
+            connection.execute("DROP TABLE objective_events")
+            connection.commit()
+        status, _, payload = self.fixture.request(
+            "/api/v1/objectives?limit=1"
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "database_unavailable")
 
     def test_reads_do_not_modify_objective_tables(self) -> None:
         def counts():

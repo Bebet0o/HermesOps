@@ -492,7 +492,7 @@ class ControllerService:
             )
         return token
 
-    def authenticate(self, cookie_header: str | None) -> None:
+    def authenticate(self, cookie_header: str | None) -> str:
         expected = self.session_token()
         if not cookie_header or len(cookie_header) > 4096:
             raise ControllerError(
@@ -519,6 +519,7 @@ class ControllerService:
                 "Authentication required",
                 "A valid unambiguous HermesOps Controller session cookie is required.",
             )
+        return expected
 
     @staticmethod
     def request_id(candidate: str | None = None) -> str:

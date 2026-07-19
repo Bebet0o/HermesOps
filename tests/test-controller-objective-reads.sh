@@ -53,7 +53,9 @@ for marker in (
     "ReadOnlyDatabase",
     "legacy_payload_redacted",
     "MAX_CURSOR_BYTES",
-    "json_each(q.project_scope_json)",
+    "json_valid(q.project_scope_json)",
+    "hmac.compare_digest",
+    "latest.attempt_number DESC",
     "2**53",
 ):
     if marker not in store:
@@ -112,6 +114,21 @@ for marker in (
             f"Objective probe standalone bootstrap missing: {marker}"
         )
 print("Controller objective probe standalone bootstrap: PASS")
+PY
+
+python3 - "$REPO/controller_api/core.py" "$REPO/controller_api/server.py" <<'PY'
+from pathlib import Path
+import sys
+
+core = Path(sys.argv[1]).read_text(encoding="utf-8")
+server = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+if "def authenticate(self, cookie_header: str | None) -> str:" not in core:
+    raise SystemExit("Authentication must return the validated cursor secret.")
+if "cursor_secret=session_token" not in server:
+    raise SystemExit("Objective cursor signing secret is not wired to routes.")
+
+print("Controller objective cursor authentication binding: PASS")
 PY
 
 echo "HERMESOPS_CONTROLLER_OBJECTIVE_READS_PASS"

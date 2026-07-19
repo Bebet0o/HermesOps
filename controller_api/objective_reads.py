@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import re
 import sqlite3
@@ -48,13 +49,16 @@ class ObjectiveReadStore:
         self.database = ReadOnlyDatabase(settings)
 
     @staticmethod
-    def _revision(*parts: object) -> int:
-        digest = hashlib.sha256()
-        for part in parts:
-            digest.update(str(part if part is not None else "").encode("utf-8"))
-            digest.update(b"\0")
+    def _revision(payload: dict[str, Any]) -> int:
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(canonical).hexdigest()
         # 13 hexadecimal digits stay below JavaScript's 2**53 safe integer.
-        return int(digest.hexdigest()[:13], 16)
+        return int(digest[:13], 16)
 
     @staticmethod
     def _title(description: str) -> str:
@@ -96,9 +100,13 @@ class ObjectiveReadStore:
         return value
 
     @staticmethod
-    def _state(raw: str, plan_status: str | None) -> tuple[str, str | None]:
+    def _state(
+        raw: str,
+        joined_plan_id: str | None,
+        plan_status: str | None,
+    ) -> tuple[str, str | None]:
         if raw == "QUEUED":
-            return ("planned" if plan_status else "draft"), None
+            return ("planned" if joined_plan_id is not None else "draft"), None
         if raw == "PLANNING":
             return "planning", None
         if raw == "RUNNING":
@@ -142,7 +150,20 @@ class ObjectiveReadStore:
             ) from error
 
     @staticmethod
-    def _encode_cursor(cursor: ObjectiveCursor) -> str:
+    def _cursor_signature(raw: bytes, secret: str) -> bytes:
+        return hmac.new(
+            secret.encode("ascii"),
+            b"hermesops-objective-cursor-v1\0" + raw,
+            hashlib.sha256,
+        ).digest()
+
+    @classmethod
+    def _encode_cursor(
+        cls,
+        cursor: ObjectiveCursor,
+        *,
+        secret: str,
+    ) -> str:
         raw = json.dumps(
             {
                 "v": 1,
@@ -154,26 +175,35 @@ class ObjectiveReadStore:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+        signed = raw + cls._cursor_signature(raw, secret)
+        return base64.urlsafe_b64encode(signed).rstrip(b"=").decode("ascii")
 
-    @staticmethod
+    @classmethod
     def _decode_cursor(
+        cls,
         value: str,
         *,
         project_id: str | None,
         state: str | None,
+        secret: str,
     ) -> ObjectiveCursor:
         if not value or len(value) > MAX_CURSOR_BYTES:
             raise ControllerError(400, "invalid_cursor", "Invalid pagination cursor")
         try:
             padding = "=" * (-len(value) % 4)
-            payload = json.loads(
-                base64.b64decode(
-                    value + padding,
-                    altchars=b"-_",
-                    validate=True,
-                ).decode("utf-8")
+            signed = base64.b64decode(
+                value + padding,
+                altchars=b"-_",
+                validate=True,
             )
+            if len(signed) <= hashlib.sha256().digest_size:
+                raise ValueError("cursor payload is too short")
+            raw = signed[:-hashlib.sha256().digest_size]
+            signature = signed[-hashlib.sha256().digest_size:]
+            expected = cls._cursor_signature(raw, secret)
+            if not hmac.compare_digest(signature, expected):
+                raise ValueError("cursor signature mismatch")
+            payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeError, json.JSONDecodeError) as error:
             raise ControllerError(
                 400,
@@ -224,6 +254,7 @@ class ObjectiveReadStore:
                 q.finished_at,
                 q.paused_at,
                 q.last_error,
+                p.plan_id AS joined_plan_id,
                 p.status AS plan_status,
                 COALESCE(a.attempt_count, 0) AS attempt_count,
                 a.latest_operation_id,
@@ -233,11 +264,19 @@ class ObjectiveReadStore:
                 ON p.plan_id = q.plan_id
             LEFT JOIN (
                 SELECT
-                    objective_id,
+                    attempts.objective_id,
                     COUNT(*) AS attempt_count,
-                    MAX(objective_attempt_id) AS latest_operation_id
-                FROM objective_attempts
-                GROUP BY objective_id
+                    (
+                        SELECT latest.objective_attempt_id
+                        FROM objective_attempts AS latest
+                        WHERE latest.objective_id = attempts.objective_id
+                        ORDER BY
+                            latest.attempt_number DESC,
+                            latest.objective_attempt_id DESC
+                        LIMIT 1
+                    ) AS latest_operation_id
+                FROM objective_attempts AS attempts
+                GROUP BY attempts.objective_id
             ) AS a ON a.objective_id = q.objective_id
             LEFT JOIN (
                 SELECT objective_id, COUNT(*) AS event_count
@@ -248,32 +287,55 @@ class ObjectiveReadStore:
 
     def _objective(self, row: sqlite3.Row) -> dict[str, Any]:
         identifier = str(row["objective_id"])
+        if not OBJECTIVE_ID_PATTERN.fullmatch(identifier):
+            raise ControllerError(
+                503,
+                "objective_projection_invalid",
+                "Objective projection unavailable",
+                "An objective contains an invalid identifier.",
+            )
+
         description = str(row["objective"])
         projects = self._projects(str(row["project_scope_json"]), identifier)
+        joined_plan_id = (
+            str(row["joined_plan_id"])
+            if row["joined_plan_id"] is not None
+            else None
+        )
+        plan_status = (
+            str(row["plan_status"])
+            if row["plan_status"] is not None
+            else None
+        )
         state, requested_transition = self._state(
             str(row["raw_status"]),
-            str(row["plan_status"]) if row["plan_status"] is not None else None,
+            joined_plan_id,
+            plan_status,
         )
-        revision = self._revision(
-            identifier,
-            row["raw_status"],
-            row["heartbeat_at"],
-            row["finished_at"],
-            row["paused_at"],
-            row["planning_attempt_count"],
-            row["attempt_count"],
-            row["event_count"],
-            row["plan_status"],
-        )
-        operation_ids: list[str] = []
+
         latest = row["latest_operation_id"]
-        if latest is not None:
-            operation_ids.append(str(latest))
-        return {
+        latest_operation_id = str(latest) if latest is not None else None
+        if (
+            latest_operation_id is not None
+            and not OPERATION_ID_PATTERN.fullmatch(latest_operation_id)
+        ):
+            raise ControllerError(
+                503,
+                "objective_projection_invalid",
+                "Objective projection unavailable",
+                "An objective references an invalid operation identifier.",
+                resource={"type": "objective", "id": identifier},
+            )
+
+        operation_ids = (
+            [latest_operation_id]
+            if latest_operation_id is not None
+            else []
+        )
+        payload: dict[str, Any] = {
             "id": identifier,
             "created_at": str(row["created_at"]),
             "updated_at": str(row["heartbeat_at"]),
-            "resource_revision": revision,
             "state": state,
             "title": self._title(description),
             "description": description,
@@ -298,9 +360,11 @@ class ObjectiveReadStore:
             "finished_at": str(row["finished_at"]) if row["finished_at"] else None,
             "paused_at": str(row["paused_at"]) if row["paused_at"] else None,
             "has_error": row["last_error"] is not None,
-            "latest_operation_id": str(latest) if latest is not None else None,
+            "latest_operation_id": latest_operation_id,
             "operation_ids": operation_ids,
         }
+        payload["resource_revision"] = self._revision(payload)
+        return payload
 
     def get_objective(self, objective_id: str) -> dict[str, Any]:
         if not OBJECTIVE_ID_PATTERN.fullmatch(objective_id):
@@ -328,13 +392,21 @@ class ObjectiveReadStore:
                         SELECT objective_attempt_id
                         FROM objective_attempts
                         WHERE objective_id = ?
-                        ORDER BY attempt_number
+                        ORDER BY attempt_number, objective_attempt_id
                         """,
                         (objective_id,),
                     )
                 ]
         except sqlite3.Error as error:
             raise self.database._database_failure(error) from error
+        if any(not OPERATION_ID_PATTERN.fullmatch(item) for item in operations):
+            raise ControllerError(
+                503,
+                "objective_projection_invalid",
+                "Objective projection unavailable",
+                "An objective references an invalid operation identifier.",
+                resource={"type": "objective", "id": objective_id},
+            )
         objective["operation_ids"] = operations
         objective["latest_operation_id"] = operations[-1] if operations else None
         return objective
@@ -346,6 +418,7 @@ class ObjectiveReadStore:
         cursor: str | None,
         project_id: str | None,
         state: str | None,
+        cursor_secret: str,
     ) -> tuple[list[dict[str, Any]], str | None]:
         if not 1 <= limit <= 200:
             raise ControllerError(
@@ -363,7 +436,12 @@ class ObjectiveReadStore:
                 "Invalid objective state",
             )
         decoded = (
-            self._decode_cursor(cursor, project_id=project_id, state=state)
+            self._decode_cursor(
+                cursor,
+                project_id=project_id,
+                state=state,
+                secret=cursor_secret,
+            )
             if cursor is not None
             else None
         )
@@ -372,16 +450,19 @@ class ObjectiveReadStore:
         parameters: list[Any] = []
         if project_id is not None:
             conditions.append(
-                "EXISTS (SELECT 1 FROM json_each(q.project_scope_json) "
-                "WHERE json_each.type = 'text' AND json_each.value = ?)"
+                "EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(q.project_scope_json) "
+                "THEN q.project_scope_json ELSE '[]' END"
+                ") AS scope WHERE scope.type = 'text' AND scope.value = ?)"
             )
             parameters.append(project_id)
         if state is not None:
             state_sql = {
-                "draft": "q.status = 'QUEUED' AND q.plan_id IS NULL",
-                "planned": "q.status = 'QUEUED' AND q.plan_id IS NOT NULL",
+                "draft": "q.status = 'QUEUED' AND p.plan_id IS NULL",
+                "planned": "q.status = 'QUEUED' AND p.plan_id IS NOT NULL",
                 "planning": "q.status = 'PLANNING'",
-                "running": "q.status IN ('RUNNING','PAUSE_REQUESTED','CANCEL_REQUESTED') AND COALESCE(p.status, '') <> 'BLOCKED'",
+                "running": "(q.status IN ('PAUSE_REQUESTED','CANCEL_REQUESTED') "
+                "OR (q.status = 'RUNNING' AND COALESCE(p.status, '') <> 'BLOCKED'))",
                 "paused": "q.status = 'PAUSED'",
                 "blocked": "q.status = 'RUNNING' AND p.status = 'BLOCKED'",
                 "succeeded": "q.status = 'COMPLETED'",
@@ -434,7 +515,8 @@ class ObjectiveReadStore:
                     objective_id=str(last["objective_id"]),
                     project_id=project_id,
                     state=state,
-                )
+                ),
+                secret=cursor_secret,
             )
         return objectives, next_cursor
 
@@ -480,26 +562,25 @@ class ObjectiveReadStore:
         state = self._operation_state(str(row["status"]))
         has_result = str(row["result_json"]) not in {"", "{}", "null"}
         has_error = row["failure_reason"] is not None
-        revision = self._revision(
-            operation_id,
-            row["status"],
-            row["heartbeat_at"],
-            row["finished_at"],
-            row["next_attempt_at"],
-            has_result,
-            has_error,
-        )
-        return {
+        objective_id = str(row["objective_id"])
+        if not OBJECTIVE_ID_PATTERN.fullmatch(objective_id):
+            raise ControllerError(
+                503,
+                "operation_projection_invalid",
+                "Operation projection unavailable",
+                "An objective attempt references an invalid objective identifier.",
+                resource={"type": "operation", "id": operation_id},
+            )
+        payload: dict[str, Any] = {
             "id": operation_id,
             "kind": "objective.planning_attempt",
             "state": state,
             "created_at": str(row["started_at"]),
             "updated_at": str(row["heartbeat_at"]),
             "finished_at": str(row["finished_at"]) if row["finished_at"] else None,
-            "resource_revision": revision,
             "target": {
                 "type": "objective",
-                "id": str(row["objective_id"]),
+                "id": objective_id,
                 "plan_id": str(row["plan_id"]) if row["plan_id"] else None,
             },
             "result": (
@@ -525,3 +606,5 @@ class ObjectiveReadStore:
             ),
             "legacy_projection": True,
         }
+        payload["resource_revision"] = self._revision(payload)
+        return payload

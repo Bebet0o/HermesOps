@@ -311,7 +311,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         request_id: str,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         service = self.controller.service
-        service.authenticate(self.headers.get("Cookie"))
+        session_token = service.authenticate(self.headers.get("Cookie"))
 
         if path == "/api/v1/system/health":
             payload = {
@@ -418,6 +418,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 cursor=raw_cursor[0] if raw_cursor else None,
                 project_id=project_id,
                 state=state,
+                cursor_secret=session_token,
             )
             return 200, {
                 "data": objectives,
@@ -451,6 +452,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 cursor=raw_cursor[0] if raw_cursor else None,
                 project_id=project_id,
                 state=None,
+                cursor_secret=session_token,
             )
             return 200, {
                 "data": objectives,
