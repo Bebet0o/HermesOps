@@ -40,10 +40,17 @@ static_validation() {
         tests/test-release-documentation.sh \
         tests/test-controller-contracts.sh \
         tests/test-controller-api.sh tests/test_controller_api.py \
+        tests/test-controller-service-contract.sh \
+        tests/test-controller-service-lifecycle.sh \
+        tests/test_controller_service.py \
         scripts/hermesops-controller-api.py \
+        scripts/hermesops-controller-session.py \
+        scripts/hermesops-controller-probe.py \
         controller_api/__init__.py controller_api/core.py \
-        controller_api/server.py \
+        controller_api/server.py controller_api/service_support.py \
+        systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
+        docs/milestones/2C_CONTROLLER_API_SERVICE.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -130,6 +137,7 @@ PY
     "${REPO}/tests/test-release-documentation.sh"
     "${REPO}/tests/test-controller-contracts.sh"
     "${REPO}/tests/test-controller-api.sh"
+    "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"
     mkdir -p \
@@ -202,10 +210,17 @@ PY
     worker_actual="$(docker exec hermesops-sandbox-engine docker image inspect --format '{{.Id}}' "${WORKER_LOCK[0]}")"
     [[ "$worker_actual" == "${WORKER_LOCK[1]}" ]]
 
-    for unit in hermesops-supervisor.service hermesops-orchestrator.service hermesops-notifier.service; do
+    for unit in hermesops-supervisor.service hermesops-orchestrator.service hermesops-notifier.service hermesops-controller-api.service; do
         systemctl --user is-enabled "$unit" >/dev/null
         systemctl --user is-active "$unit" >/dev/null
     done
+
+    "${REPO}/scripts/hermesops-controller-session.py" check
+    "${REPO}/scripts/hermesops-controller-probe.py" \
+        --base-url http://127.0.0.1:8765 \
+        --session-file "${ROOT}/secrets/controller-session" \
+        --wait-seconds 10
+    [[ "$(stat -c '%a' "${ROOT}/secrets/controller-session")" == "600" ]]
 
     [[ -f "${ROOT}/state/hermes-home/auth.json" ]]
     [[ "$(stat -c '%a' "${ROOT}/state/hermes-home/auth.json")" == "600" ]]

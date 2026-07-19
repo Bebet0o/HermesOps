@@ -25,6 +25,7 @@ if [[ -z "$TARGET_USER" ]]; then
     [[ "$EUID" == 0 ]] && TARGET_USER="${SUDO_USER:-}" || TARGET_USER="$(id -un)"
 fi
 [[ -n "$TARGET_USER" ]] || { echo "Préciser --user USER." >&2; exit 1; }
+
 TARGET_UID="$(id -u "$TARGET_USER")"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
@@ -42,10 +43,10 @@ user_run() {
     fi
 }
 
-for unit in hermesops-notifier.service hermesops-orchestrator.service hermesops-supervisor.service; do
+for unit in hermesops-controller-api.service hermesops-notifier.service hermesops-orchestrator.service hermesops-supervisor.service; do
     user_run systemctl --user disable --now "$unit" 2>/dev/null || true
 done
-for unit in hermesops-notifier.service hermesops-orchestrator.service hermesops-supervisor.service; do
+for unit in hermesops-controller-api.service hermesops-notifier.service hermesops-orchestrator.service hermesops-supervisor.service; do
     sudo_run rm -f "${TARGET_HOME}/.config/systemd/user/${unit}"
 done
 user_run systemctl --user daemon-reload 2>/dev/null || true

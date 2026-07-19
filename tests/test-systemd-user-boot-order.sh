@@ -8,9 +8,10 @@
     SUPERVISOR="${UNIT_DIR}/hermesops-supervisor.service"
     ORCHESTRATOR="${UNIT_DIR}/hermesops-orchestrator.service"
     NOTIFIER="${UNIT_DIR}/hermesops-notifier.service"
+    CONTROLLER="${UNIT_DIR}/hermesops-controller-api.service"
     INSTALLER="${REPO}/install.sh"
 
-    for unit in "$SUPERVISOR" "$ORCHESTRATOR" "$NOTIFIER"; do
+    for unit in "$SUPERVISOR" "$ORCHESTRATOR" "$NOTIFIER" "$CONTROLLER"; do
         [[ -f "$unit" ]]
 
         grep -Fxq 'WantedBy=default.target' "$unit"
@@ -37,10 +38,14 @@
         "$INSTALLER"
 
     grep -Fq \
+        'user_run systemctl --user restart hermesops-controller-api.service' \
+        "$INSTALLER"
+
+    grep -Fq \
         'Service utilisateur inactif après installation' \
         "$INSTALLER"
 
-    python3 - "$SUPERVISOR" "$ORCHESTRATOR" "$NOTIFIER" <<'PY'
+    python3 - "$SUPERVISOR" "$ORCHESTRATOR" "$NOTIFIER" "$CONTROLLER" <<'PY'
 from pathlib import Path
 import re
 import sys

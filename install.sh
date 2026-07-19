@@ -394,6 +394,9 @@ sudo_run chmod 0600 "${ROOT}/secrets/agent.env" "${ROOT}/secrets/webui.env"
 sudo_run chown "$TARGET_USER:$TARGET_GROUP" \
     "${ROOT}/secrets/agent.env" "${ROOT}/secrets/webui.env"
 
+user_run env HERMESOPS_ROOT="$ROOT" \
+    "${REPO}/scripts/hermesops-controller-session.py" ensure
+
 if [[ -n "$AUTH_FILE" ]]; then
     [[ -f "$AUTH_FILE" ]] || {
         echo "auth.json absent: $AUTH_FILE" >&2
@@ -511,6 +514,7 @@ if [[ "$SKIP_START" == 0 ]]; then
         hermesops-supervisor.service
         hermesops-orchestrator.service
         hermesops-notifier.service
+        hermesops-controller-api.service
     )
 
     user_run systemctl --user daemon-reload
@@ -519,6 +523,7 @@ if [[ "$SKIP_START" == 0 ]]; then
     user_run systemctl --user restart hermesops-supervisor.service
     user_run systemctl --user restart hermesops-orchestrator.service
     user_run systemctl --user restart hermesops-notifier.service
+    user_run systemctl --user restart hermesops-controller-api.service
 
     for unit in "${USER_UNITS[@]}"; do
         user_run systemctl --user is-active --quiet "$unit" || {
@@ -526,6 +531,11 @@ if [[ "$SKIP_START" == 0 ]]; then
             exit 1
         }
     done
+
+    user_run env HERMESOPS_ROOT="$ROOT" \
+        "${REPO}/scripts/hermesops-controller-probe.py" \
+        --base-url http://127.0.0.1:8765 \
+        --wait-seconds 30
 
     if [[ -f "${ROOT}/state/hermes-home/auth.json" ]]; then
         user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/validate.sh" --runtime
