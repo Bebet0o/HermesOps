@@ -66,18 +66,19 @@ LAN exposure.
 
 ## Hardening
 
-The unit uses:
+The portable user unit uses:
 
 - `NoNewPrivileges=true`;
-- private temporary and device namespaces;
-- read-only system mounts;
-- hidden home directories;
-- kernel/control-group protections;
 - namespace, realtime, and SUID restrictions;
+- personality locking;
 - write/execute memory denial;
 - address-family restriction to Unix and IP sockets;
 - `UMask=0077`;
 - bounded startup and shutdown timeouts.
+
+Capability-bounding and privileged mount-namespace directives are deliberately
+excluded because they are not portable across supported non-root user
+managers.
 
 ## Installer behavior
 
@@ -127,3 +128,23 @@ mutation methods, and omission of host paths from API responses.
 
 The lifecycle test now dumps complete systemd status and journal output before
 rollback whenever a future startup fails.
+
+
+## Final adversarial review
+
+The final pre-merge review added four operational protections:
+
+- probe targets must be literal loopback IP addresses; hostnames such as
+  `localhost` are rejected so the private cookie is never sent after name
+  resolution;
+- creation and rotation synchronize both the credential file and its parent
+  directory, preserving the atomic session across a sudden power loss;
+- the public installer records the previous Controller unit state and restores
+  that unit if a later installation step fails;
+- the conservative uninstaller removes the explicit `default.target.wants`
+  link even when the user systemd bus cannot be contacted.
+
+A persistence audit verifies the enabled unit, activation link, active service,
+authenticated probe, and `loginctl` linger setting. These are the prerequisites
+for automatic service availability after a host reboot. The test does not
+reboot the host.

@@ -47,7 +47,9 @@ for unit in hermesops-controller-api.service hermesops-notifier.service hermesop
     user_run systemctl --user disable --now "$unit" 2>/dev/null || true
 done
 for unit in hermesops-controller-api.service hermesops-notifier.service hermesops-orchestrator.service hermesops-supervisor.service; do
-    sudo_run rm -f "${TARGET_HOME}/.config/systemd/user/${unit}"
+    sudo_run rm -f \
+        "${TARGET_HOME}/.config/systemd/user/${unit}" \
+        "${TARGET_HOME}/.config/systemd/user/default.target.wants/${unit}"
 done
 user_run systemctl --user daemon-reload 2>/dev/null || true
 

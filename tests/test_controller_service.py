@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from controller_api.core import Settings
@@ -57,6 +59,23 @@ class ControllerServiceSupportTest(unittest.TestCase):
         after = read_session(self.session)
         self.assertNotEqual(before, after)
         self.assertEqual(oct(self.session.stat().st_mode & 0o777), "0o600")
+
+    def test_new_session_syncs_file_and_parent_directory(self) -> None:
+        with mock.patch(
+            "controller_api.service_support.os.fsync",
+            wraps=os.fsync,
+        ) as synchronized:
+            self.assertEqual(ensure_session(self.session), "created")
+        self.assertGreaterEqual(synchronized.call_count, 2)
+
+    def test_rotate_syncs_parent_directory(self) -> None:
+        ensure_session(self.session)
+        with mock.patch(
+            "controller_api.service_support.os.fsync",
+            wraps=os.fsync,
+        ) as synchronized:
+            self.assertEqual(rotate_session(self.session), "rotated")
+        self.assertGreaterEqual(synchronized.call_count, 3)
 
     def test_symlink_is_rejected(self) -> None:
         target = self.secrets / "real-session"
@@ -158,6 +177,46 @@ class ControllerProbeTest(unittest.TestCase):
                 self.session,
                 wait_seconds=0,
             )
+
+    def test_probe_rejects_localhost_hostname(self) -> None:
+        with self.assertRaises(ServiceSupportError):
+            probe_controller(
+                "http://localhost:8765",
+                self.session,
+                wait_seconds=0,
+            )
+
+    def test_live_rotation_invalidates_old_cookie_without_restart(self) -> None:
+        old_token = read_session(self.session)
+        self.assertEqual(rotate_session(self.session), "rotated")
+        new_token = read_session(self.session)
+        self.assertNotEqual(old_token, new_token)
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.port,
+            timeout=2,
+        )
+        try:
+            connection.request(
+                "GET",
+                "/api/v1/system/capabilities",
+                headers={
+                    "Cookie": f"hermesops_session={old_token}",
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 401)
+        finally:
+            connection.close()
+
+        result = probe_controller(
+            f"http://127.0.0.1:{self.port}",
+            self.session,
+            wait_seconds=2,
+        )
+        self.assertEqual(result.capabilities_status, 200)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ static_validation() {
         tests/test-controller-api.sh tests/test_controller_api.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
+        tests/test-controller-service-persistence.sh \
         tests/test_controller_service.py \
         scripts/hermesops-controller-api.py \
         scripts/hermesops-controller-session.py \
@@ -215,6 +216,7 @@ PY
         systemctl --user is-active "$unit" >/dev/null
     done
 
+    "${REPO}/tests/test-controller-service-persistence.sh"
     "${REPO}/scripts/hermesops-controller-session.py" check
     "${REPO}/scripts/hermesops-controller-probe.py" \
         --base-url http://127.0.0.1:8765 \

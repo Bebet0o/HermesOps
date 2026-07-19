@@ -18,6 +18,7 @@ for file in \
     scripts/hermesops-controller-probe.py \
     tests/test_controller_service.py \
     tests/test-controller-service-lifecycle.sh \
+    tests/test-controller-service-persistence.sh \
     "$UNIT"
 do
     [[ -f "$file" ]]
@@ -33,6 +34,7 @@ python3 tests/test_controller_service.py
 
 bash -n \
     tests/test-controller-service-lifecycle.sh \
+    tests/test-controller-service-persistence.sh \
     install.sh uninstall.sh validate.sh
 
 for marker in \
@@ -99,8 +101,11 @@ if grep -Fq 'rm -f "${ROOT}/secrets/controller-session"' "$UNINSTALLER"; then
     exit 1
 fi
 
+grep -Fq     '"${TARGET_HOME}/.config/systemd/user/default.target.wants/${unit}"'     "$UNINSTALLER"
+
 for marker in \
     'tests/test-controller-service-contract.sh' \
+    'tests/test-controller-service-persistence.sh' \
     'hermesops-controller-api.service' \
     'scripts/hermesops-controller-probe.py'
 do
@@ -131,6 +136,20 @@ stop = uninstaller.index("hermesops-controller-api.service")
 compose = uninstaller.index("hermes-agent-compose.sh")
 if not stop < compose:
     raise SystemExit("Controller must stop before containers are removed")
+
+for required in (
+    "CONTROLLER_UNIT_TOUCHED=1",
+    "restore_controller_unit",
+    "CONTROLLER_UNIT_WAS_ENABLED",
+    "CONTROLLER_UNIT_WAS_ACTIVE",
+):
+    if required not in installer:
+        raise SystemExit(
+            f"Controller installer rollback marker missing: {required}"
+        )
+
+if "default.target.wants/${unit}" not in uninstaller:
+    raise SystemExit("Uninstaller does not remove stale activation links")
 
 print("HermesOps Controller service installation contract: PASS")
 PY

@@ -110,6 +110,16 @@ def read_session(path: Path) -> str:
     return token
 
 
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_new_session(path: Path, token: str) -> None:
     _secure_parent(path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -121,11 +131,25 @@ def _write_new_session(path: Path, token: str) -> None:
     try:
         descriptor = os.open(path, flags, 0o600)
         created = True
+        os.fchmod(descriptor, 0o600)
+
         payload = (token + "\n").encode("ascii")
         written = 0
         while written < len(payload):
             written += os.write(descriptor, payload[written:])
+
         os.fsync(descriptor)
+
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise ServiceSupportError(
+                "New Controller session file failed validation."
+            )
     except Exception:
         if descriptor >= 0:
             os.close(descriptor)
@@ -133,6 +157,7 @@ def _write_new_session(path: Path, token: str) -> None:
         if created:
             try:
                 path.unlink()
+                _fsync_directory(path.parent)
             except OSError:
                 pass
         raise
@@ -140,7 +165,7 @@ def _write_new_session(path: Path, token: str) -> None:
         if descriptor >= 0:
             os.close(descriptor)
 
-    os.chmod(path, 0o600, follow_symlinks=False)
+    _fsync_directory(path.parent)
     read_session(path)
 
 
@@ -174,14 +199,7 @@ def rotate_session(path: Path) -> str:
     try:
         os.replace(temporary, path)
         os.chmod(path, 0o600, follow_symlinks=False)
-        directory_descriptor = os.open(
-            path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-        )
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
+        _fsync_directory(path.parent)
     finally:
         try:
             temporary.unlink()
@@ -204,18 +222,16 @@ def _validated_base_url(base_url: str) -> tuple[str, int]:
     host = parsed.hostname
     if host is None:
         raise ServiceSupportError("Controller probe host is missing.")
-    if host == "localhost":
-        pass
-    else:
-        try:
-            if not ipaddress.ip_address(host).is_loopback:
-                raise ServiceSupportError(
-                    "Controller probe host must be loopback."
-                )
-        except ValueError as error:
-            raise ServiceSupportError(
-                "Controller probe host must be localhost or a loopback IP."
-            ) from error
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ServiceSupportError(
+            "Controller probe host must be a literal loopback IP."
+        ) from error
+    if not address.is_loopback:
+        raise ServiceSupportError(
+            "Controller probe host must be a literal loopback IP."
+        )
     try:
         port = parsed.port or 80
     except ValueError as error:
