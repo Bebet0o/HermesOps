@@ -135,8 +135,56 @@ class ControllerProbeTest(unittest.TestCase):
                     registered_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE orchestration_plans (
+                    plan_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL
+                );
+                CREATE TABLE objective_queue (
+                    objective_id TEXT PRIMARY KEY,
+                    objective TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    not_before TEXT NOT NULL,
+                    project_scope_json TEXT NOT NULL,
+                    max_parallel_tasks INTEGER NOT NULL,
+                    planning_max_attempts INTEGER NOT NULL,
+                    planning_attempt_count INTEGER NOT NULL,
+                    plan_id TEXT,
+                    planner_execution_id TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    heartbeat_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    paused_at TEXT,
+                    last_error TEXT
+                );
+                CREATE TABLE objective_attempts (
+                    objective_attempt_id TEXT PRIMARY KEY,
+                    objective_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    executor_instance_id TEXT,
+                    planner_execution_id TEXT,
+                    plan_id TEXT,
+                    result_json TEXT NOT NULL,
+                    failure_reason TEXT,
+                    started_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    next_attempt_at TEXT
+                );
+                CREATE TABLE objective_events (
+                    objective_event_id TEXT PRIMARY KEY,
+                    objective_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    old_status TEXT,
+                    new_status TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 INSERT INTO schema_migrations VALUES (
-                    1, '2026-07-19T00:00:00.000Z'
+                    10, '2026-07-19T00:00:00.000Z'
                 );
                 """
             )
@@ -169,6 +217,33 @@ class ControllerProbeTest(unittest.TestCase):
         self.assertEqual(result.health_status, 200)
         self.assertEqual(result.ready_status, 200)
         self.assertEqual(result.capabilities_status, 200)
+
+    def test_probe_fixture_satisfies_objective_readiness_schema(self) -> None:
+        result = probe_controller(
+            f"http://127.0.0.1:{self.port}",
+            self.session,
+            wait_seconds=2,
+        )
+        self.assertEqual(result.ready_status, 200)
+
+        database = self.root / "state" / "controller" / "hermesops.db"
+        with sqlite3.connect(database) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        self.assertTrue(
+            {
+                "projects",
+                "schema_migrations",
+                "orchestration_plans",
+                "objective_queue",
+                "objective_attempts",
+                "objective_events",
+            }.issubset(tables)
+        )
 
     def test_probe_rejects_non_loopback(self) -> None:
         with self.assertRaises(ServiceSupportError):

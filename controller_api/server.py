@@ -16,6 +16,7 @@ LOGGER = logging.getLogger(SERVICE_NAME)
 MAX_REQUEST_TARGET_BYTES = 4096
 MAX_QUERY_FIELDS = 8
 ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
+ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 
 
 class ControllerHTTPServer(ThreadingHTTPServer):
@@ -384,6 +385,106 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 ),
             }, {}
 
+        if path == "/api/v1/objectives":
+            unknown = set(query) - ALLOWED_OBJECTIVE_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor, limit, project_id and state are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            if len(raw_limit) != 1:
+                raise ControllerError(400, "invalid_limit", "Invalid pagination limit")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                    "limit must be an integer.",
+                ) from error
+            raw_cursor = query.get("cursor", [])
+            raw_project = query.get("project_id", [])
+            raw_state = query.get("state", [])
+            if len(raw_cursor) > 1 or len(raw_project) > 1 or len(raw_state) > 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            project_id = raw_project[0] if raw_project else None
+            state = raw_state[0] if raw_state else None
+            objectives, next_cursor = service.objectives.list_objectives(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                project_id=project_id,
+                state=state,
+            )
+            return 200, {
+                "data": objectives,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        nested_prefix = "/api/v1/projects/"
+        nested_suffix = "/objectives"
+        if path.startswith(nested_prefix) and path.endswith(nested_suffix):
+            project_id = unquote(path[len(nested_prefix):-len(nested_suffix)])
+            if not project_id or "/" in project_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            unknown = set(query) - {"cursor", "limit"}
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor and limit are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            if len(raw_limit) != 1 or len(raw_cursor) > 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(400, "invalid_limit", "Invalid pagination limit") from error
+            objectives, next_cursor = service.objectives.list_objectives(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                project_id=project_id,
+                state=None,
+            )
+            return 200, {
+                "data": objectives,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        objective_prefix = "/api/v1/objectives/"
+        if path.startswith(objective_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            objective_id = unquote(path[len(objective_prefix):])
+            if not objective_id or "/" in objective_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            objective = service.objectives.get_objective(objective_id)
+            revision = int(objective["resource_revision"])
+            return 200, {
+                "data": objective,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
+        operation_prefix = "/api/v1/operations/"
+        if path.startswith(operation_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            operation_id = unquote(path[len(operation_prefix):])
+            if not operation_id or "/" in operation_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            operation = service.objectives.get_operation(operation_id)
+            revision = int(operation["resource_revision"])
+            return 200, {
+                "data": operation,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
         if query:
             raise ControllerError(
                 400,
@@ -494,7 +595,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             405,
             "method_not_allowed",
             "Method not allowed",
-            "Milestone 2B exposes read-only GET and HEAD routes only.",
+            "The Controller exposes read-only GET and HEAD routes only.",
         )
         self._send_json(
             405,

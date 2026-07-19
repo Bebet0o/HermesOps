@@ -122,7 +122,7 @@ class Settings:
                 400,
                 "non_loopback_bind_forbidden",
                 "Non-loopback binding is forbidden",
-                "Milestone 2B may listen only on a loopback address.",
+                "The Controller API may listen only on a loopback address.",
             )
         if not 0 <= self.port <= 65535:
             raise ControllerError(
@@ -150,7 +150,14 @@ class Settings:
 class ReadOnlyDatabase:
     """Small SQLite read adapter that cannot open a writable connection."""
 
-    REQUIRED_TABLES = {"projects", "schema_migrations"}
+    REQUIRED_TABLES = {
+        "projects",
+        "schema_migrations",
+        "objective_queue",
+        "objective_attempts",
+        "objective_events",
+        "orchestration_plans",
+    }
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -387,6 +394,8 @@ class ControllerService:
         settings.validate_bind()
         self.settings = settings
         self.database = ReadOnlyDatabase(settings)
+        from .objective_reads import ObjectiveReadStore
+        self.objectives = ObjectiveReadStore(settings)
 
     def version(self) -> str:
         try:
@@ -551,7 +560,10 @@ class ControllerService:
                 "read_only_controller_api": True,
                 "project_reads": True,
                 "project_writes": False,
-                "objective_reads": False,
+                "objective_reads": True,
+                "operation_reads": True,
+                "legacy_operation_projection": True,
+                "durable_controller_operations": False,
                 "objective_writes": False,
                 "websocket_events": False,
                 "hermesfile_builds": False,
