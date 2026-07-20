@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -607,6 +608,156 @@ class ReviewRecoveryReadTest(unittest.TestCase):
                 for table in before
             }
         self.assertEqual(before, after)
+
+
+    def test_public_transaction_reference_matches_execution_projection(self) -> None:
+        expected = "transaction-" + hashlib.sha256(
+            b"hermesops-transaction-reference-v1\0" + RUN_ID.encode("utf-8")
+        ).hexdigest()[:32]
+        status, _, review = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(review["data"]["run_id"], expected)
+        status, _, recovery = self.fixture.request(f"/api/v1/recoveries/{RECOVERY_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(recovery["data"]["run_id"], expected)
+
+    def test_review_summary_redacts_internal_run_reference(self) -> None:
+        self.fixture.update(
+            "UPDATE review_results SET summary=? WHERE review_id=?",
+            (f"Reviewed internal transaction {RUN_ID}", REVIEW_ID),
+        )
+        status, _, payload = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["summary"], "Review summary redacted.")
+        self.assertNotIn(RUN_ID, json.dumps(payload))
+
+    def test_sensitive_field_names_are_not_projected(self) -> None:
+        self.fixture.update(
+            "UPDATE review_results SET details_json=? WHERE review_id=?",
+            (json.dumps({"api_key": "redacted", "prompt_path": "/private", "safe_field": 1}), REVIEW_ID),
+        )
+        status, _, review = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(review["data"]["details"]["fields"], ["safe_field"])
+        self.fixture.update(
+            "UPDATE recovery_executions SET evidence_json=? WHERE recovery_id=?",
+            (json.dumps({"private_key": "redacted", "container_id": "private", "safe_field": 1}), RECOVERY_ID),
+        )
+        status, _, recovery = self.fixture.request(f"/api/v1/recoveries/{RECOVERY_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(recovery["data"]["evidence"]["fields"], ["safe_field"])
+
+    def test_nested_json_payload_remains_metadata_only(self) -> None:
+        payload: object = "private-leaf"
+        for _ in range(20):
+            payload = {"level": payload}
+        self.fixture.update(
+            "UPDATE review_results SET details_json=? WHERE review_id=?",
+            (json.dumps(payload), REVIEW_ID),
+        )
+        status, _, response = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(response["data"]["details"]["fields"], ["level"])
+        self.assertNotIn("private-leaf", json.dumps(response))
+
+    def test_oversized_json_fails_closed(self) -> None:
+        oversized = json.dumps({"safe_field": "x" * (70 * 1024)})
+        self.fixture.update(
+            "UPDATE review_results SET details_json=? WHERE review_id=?",
+            (oversized, REVIEW_ID),
+        )
+        status, _, problem = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "review_projection_invalid")
+        self.assertNotIn("x" * 100, json.dumps(problem))
+
+    def test_historical_reviewer_resources_are_not_reinterpreted(self) -> None:
+        self.fixture.update(
+            "UPDATE reviewer_executions SET cpu_limit=3, memory_mb=6144 WHERE review_id=?",
+            (REVIEW_ID,),
+        )
+        status, _, payload = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["reviewer"]["cpu_limit"], 3)
+        self.assertEqual(payload["data"]["reviewer"]["memory_mb"], 6144)
+
+    def test_current_reviewer_mutation_policy_drift_does_not_hide_history(self) -> None:
+        self.fixture.update(
+            "UPDATE roles SET may_push=1, may_commit=1 WHERE role_id='reviewer'",
+            (),
+        )
+        status, _, payload = self.fixture.request(f"/api/v1/reviews/{REVIEW_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["id"], REVIEW_ID)
+
+    def test_current_recovery_network_policy_drift_does_not_hide_history(self) -> None:
+        self.fixture.update(
+            "UPDATE roles SET network_enabled=1 WHERE role_id='recovery'",
+            (),
+        )
+        status, _, payload = self.fixture.request(f"/api/v1/recoveries/{RECOVERY_ID}")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["data"]["id"], RECOVERY_ID)
+
+    def test_recovery_decision_outcome_mismatch_fails_closed(self) -> None:
+        self.fixture.update(
+            "UPDATE recovery_executions SET decision='ROLLBACK_SAFE', outcome='RESUMED' WHERE recovery_id=?",
+            (RECOVERY_ID,),
+        )
+        status, _, payload = self.fixture.request(f"/api/v1/recoveries/{RECOVERY_ID}")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "recovery_projection_invalid")
+
+    def test_filtered_review_pagination_preserves_continuation(self) -> None:
+        created = "2026-07-19T12:00:00.000Z"
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.executemany(
+                "INSERT INTO review_results VALUES(?,?,?,?,?,?)",
+                [
+                    (
+                        f"review-{value:032x}", RUN_ID, "PASS", "Safe summary", "{}", created
+                    )
+                    for value in range(0x1000, 0x1000 + 1001)
+                ],
+            )
+            connection.commit()
+        status, _, first = self.fixture.request("/api/v1/reviews?state=rejected&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(first["data"], [])
+        cursor = first["meta"]["next_cursor"]
+        self.assertIsInstance(cursor, str)
+        status, _, second = self.fixture.request(
+            f"/api/v1/reviews?state=rejected&limit=1&cursor={cursor}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in second["data"]], [REVIEW_ID_2])
+
+    def test_filtered_recovery_pagination_preserves_continuation(self) -> None:
+        created = "2026-07-19T12:00:00.000Z"
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.executemany(
+                "INSERT INTO recovery_executions VALUES(" + ",".join("?" for _ in range(16)) + ")",
+                [
+                    (
+                        f"recovery-{value:032x}", RUN_ID, "recovery", "ops-recovery",
+                        "controller-owner", "v1", "RUNNING", "RESUME_SAFE",
+                        "ASSESSED", "a" * 64, "{}", "[]", None, created, created, created,
+                    )
+                    for value in range(0x2000, 0x2000 + 1001)
+                ],
+            )
+            connection.commit()
+        status, _, first = self.fixture.request("/api/v1/recoveries?state=blocked&limit=1")
+        self.assertEqual(status, 200)
+        self.assertEqual(first["data"], [])
+        cursor = first["meta"]["next_cursor"]
+        self.assertIsInstance(cursor, str)
+        status, _, second = self.fixture.request(
+            f"/api/v1/recoveries?state=blocked&limit=1&cursor={cursor}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in second["data"]], [RECOVERY_ID_2])
+
 
 
 if __name__ == "__main__":

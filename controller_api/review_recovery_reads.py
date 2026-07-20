@@ -88,6 +88,23 @@ _SECRET_MARKERS = (
     "secret",
     "token=",
 )
+_UNSAFE_FIELD_KEY_MARKERS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+    "credential",
+    "path",
+    "worktree",
+    "container",
+    "prompt",
+    "output",
+    "owner",
+)
 _PATH_MARKERS = (
     "/home/",
     "/opt/",
@@ -131,9 +148,12 @@ class ReviewRecoveryReadStore:
         return int(hashlib.sha256(canonical).hexdigest()[:13], 16)
 
     @staticmethod
-    def _opaque(prefix: str, value: str) -> str:
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
-        return f"{prefix}-{digest}"
+    def _transaction_reference(internal_key: str) -> str:
+        digest = hashlib.sha256(
+            b"hermesops-transaction-reference-v1\0"
+            + internal_key.encode("utf-8")
+        ).hexdigest()
+        return "transaction-" + digest[:32]
 
     @staticmethod
     def _projection_error(
@@ -338,7 +358,7 @@ class ReviewRecoveryReadStore:
             )
         try:
             payload = json.loads(value)
-        except (json.JSONDecodeError, UnicodeError) as error:
+        except (json.JSONDecodeError, UnicodeError, RecursionError) as error:
             raise cls._projection_error(
                 code=code,
                 title=title,
@@ -363,10 +383,15 @@ class ReviewRecoveryReadStore:
             for key in payload
             if isinstance(key, str)
             and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", key)
+            and not any(marker in key.lower() for marker in _UNSAFE_FIELD_KEY_MARKERS)
         )[:32]
 
     @staticmethod
-    def _safe_summary(value: Any) -> str:
+    def _safe_summary(
+        value: Any,
+        *,
+        forbidden_values: tuple[str, ...] = (),
+    ) -> str:
         if not isinstance(value, str):
             return "Review summary unavailable."
         encoded = value.encode("utf-8")
@@ -378,7 +403,13 @@ class ReviewRecoveryReadStore:
             return "Review summary unavailable."
         normalized = " ".join(value.split())
         lowered = normalized.lower()
-        if any(marker in lowered for marker in _SECRET_MARKERS + _PATH_MARKERS):
+        if (
+            any(marker in lowered for marker in _SECRET_MARKERS + _PATH_MARKERS)
+            or any(forbidden and forbidden in normalized for forbidden in forbidden_values)
+            or re.search(r"(?:^|\s)/(?:[^/\s]+/)+[^/\s]*", normalized)
+            or re.search(r"\b[A-Za-z]:[\\/]", normalized)
+            or re.search(r"\b(?:file|https?|ssh)://", lowered)
+        ):
             return "Review summary redacted."
         return normalized[:2000]
 
@@ -800,11 +831,13 @@ class ReviewRecoveryReadStore:
         payload: dict[str, Any] = {
             "id": review_id,
             "project_id": project_id,
-            "run_id": cls._opaque("transaction", internal_run),
+            "run_id": cls._transaction_reference(internal_run),
             "state": state,
             "verdict": verdict,
             "decision": decision,
-            "summary": cls._safe_summary(row["summary"]),
+            "summary": cls._safe_summary(
+                row["summary"], forbidden_values=(internal_run,)
+            ),
             "details": {
                 "fields": cls._safe_keys(details),
                 "redacted": True,
@@ -931,24 +964,30 @@ class ReviewRecoveryReadStore:
             raise self._database_failure(error) from error
 
         projected: list[dict[str, Any]] = []
+        last_scanned: dict[str, Any] | None = None
         for row in rows:
             item = self._review(row)
+            last_scanned = item
             if state is not None and item["state"] != state:
                 continue
             projected.append(item)
             if len(projected) > limit:
                 break
         next_cursor: str | None = None
+        cursor_item: dict[str, Any] | None = None
         if len(projected) > limit:
             projected = projected[:limit]
-            last = projected[-1]
+            cursor_item = projected[-1]
+        elif state is not None and len(rows) == 1001 and last_scanned is not None:
+            cursor_item = last_scanned
+        if cursor_item is not None:
             next_cursor = self._encode_cursor(
                 {
                     "kind": "review",
                     "project_id": project_id,
                     "state": state,
-                    "created_at": last["created_at"],
-                    "id": last["id"],
+                    "created_at": cursor_item["created_at"],
+                    "id": cursor_item["id"],
                 },
                 cursor_secret,
             )
@@ -1108,10 +1147,19 @@ class ReviewRecoveryReadStore:
         observed_status = str(row["observed_status"] or "")
         decision = str(row["decision"] or "")
         outcome = str(row["outcome"] or "")
+        expected_outcome = {
+            "RESUME_SAFE": "RESUMED",
+            "ROLLBACK_SAFE": "ROLLED_BACK",
+            "BLOCK_HUMAN": "BLOCKED",
+        }.get(decision)
         if (
             observed_status not in RECOVERY_OBSERVED_STATUSES
             or decision not in RECOVERY_DECISIONS
             or outcome not in RECOVERY_OUTCOMES
+            or (
+                expected_outcome is not None
+                and outcome not in {"ASSESSED", "FAILED", expected_outcome}
+            )
         ):
             raise cls._projection_error(
                 code="recovery_projection_invalid", title="Recovery projection unavailable",
@@ -1146,7 +1194,7 @@ class ReviewRecoveryReadStore:
         payload: dict[str, Any] = {
             "id": recovery_id,
             "project_id": project_id,
-            "run_id": cls._opaque("transaction", internal_run),
+            "run_id": cls._transaction_reference(internal_run),
             "state": cls._recovery_state(outcome),
             "observed_state": observed_status.lower(),
             "decision": decision,
@@ -1260,24 +1308,30 @@ class ReviewRecoveryReadStore:
         except sqlite3.Error as error:
             raise self._database_failure(error) from error
         projected: list[dict[str, Any]] = []
+        last_scanned: dict[str, Any] | None = None
         for row in rows:
             item = self._recovery(row)
+            last_scanned = item
             if state is not None and item["state"] != state:
                 continue
             projected.append(item)
             if len(projected) > limit:
                 break
         next_cursor: str | None = None
+        cursor_item: dict[str, Any] | None = None
         if len(projected) > limit:
             projected = projected[:limit]
-            last = projected[-1]
+            cursor_item = projected[-1]
+        elif state is not None and len(rows) == 1001 and last_scanned is not None:
+            cursor_item = last_scanned
+        if cursor_item is not None:
             next_cursor = self._encode_cursor(
                 {
                     "kind": "recovery",
                     "project_id": project_id,
                     "state": state,
-                    "created_at": last["created_at"],
-                    "id": last["id"],
+                    "created_at": cursor_item["created_at"],
+                    "id": cursor_item["id"],
                 },
                 cursor_secret,
             )
