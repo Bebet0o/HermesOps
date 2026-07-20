@@ -164,6 +164,10 @@ class ReadOnlyDatabase:
         "orchestration_tasks",
         "orchestration_attempts",
         "orchestration_dependencies",
+        "review_results",
+        "reviewer_executions",
+        "integration_executions",
+        "recovery_executions",
     }
 
     def __init__(self, settings: Settings) -> None:
@@ -403,8 +407,10 @@ class ControllerService:
         self.database = ReadOnlyDatabase(settings)
         from .objective_reads import ObjectiveReadStore
         from .execution_reads import ExecutionReadStore
+        from .review_recovery_reads import ReviewRecoveryReadStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
+        self.review_recovery = ReviewRecoveryReadStore(settings)
 
     def version(self) -> str:
         try:
@@ -578,6 +584,11 @@ class ControllerService:
                 "run_reads": True,
                 "worker_execution_reads": True,
                 "persisted_event_log_reads": True,
+                "review_reads": True,
+                "review_evidence_reads": True,
+                "integration_summary_reads": True,
+                "recovery_reads": True,
+                "raw_review_artifact_reads": False,
                 "raw_worker_log_reads": False,
                 "run_artifact_reads": False,
                 "durable_controller_operations": False,

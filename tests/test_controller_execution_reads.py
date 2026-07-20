@@ -149,6 +149,10 @@ CREATE TABLE objective_events(
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE review_results (review_id TEXT PRIMARY KEY);
+CREATE TABLE reviewer_executions (execution_id TEXT PRIMARY KEY);
+CREATE TABLE integration_executions (integration_id TEXT PRIMARY KEY);
+CREATE TABLE recovery_executions (recovery_id TEXT PRIMARY KEY);
 CREATE TABLE orchestration_tasks(
     orchestration_task_id TEXT PRIMARY KEY,
     plan_id TEXT NOT NULL,

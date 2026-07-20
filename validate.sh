@@ -44,6 +44,8 @@ static_validation() {
         tests/test_controller_objective_reads.py \
         tests/test-controller-execution-reads.sh \
         tests/test_controller_execution_reads.py \
+        tests/test-controller-review-recovery-reads.sh \
+        tests/test_controller_review_recovery_reads.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -51,12 +53,15 @@ static_validation() {
         scripts/hermesops-controller-api.py \
         scripts/hermesops-controller-objective-probe.py \
         scripts/hermesops-controller-execution-probe.py \
+        scripts/hermesops-controller-review-recovery-probe.py \
         scripts/hermesops-controller-session.py \
         scripts/hermesops-controller-probe.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
         controller_api/execution_reads.py controller_api/execution_probe.py \
+        controller_api/review_recovery_reads.py \
+        controller_api/review_recovery_probe.py \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
@@ -148,6 +153,7 @@ PY
     "${REPO}/tests/test-controller-api.sh"
     "${REPO}/tests/test-controller-objective-reads.sh"
     "${REPO}/tests/test-controller-execution-reads.sh"
+    "${REPO}/tests/test-controller-review-recovery-reads.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"
@@ -232,6 +238,10 @@ PY
         --session-file "${ROOT}/secrets/controller-session" \
         --wait-seconds 10
     "${REPO}/scripts/hermesops-controller-execution-probe.py" \
+        --base-url http://127.0.0.1:8765 \
+        --session-file "${ROOT}/secrets/controller-session" \
+        --wait-seconds 10
+    "${REPO}/scripts/hermesops-controller-review-recovery-probe.py" \
         --base-url http://127.0.0.1:8765 \
         --session-file "${ROOT}/secrets/controller-session" \
         --wait-seconds 10
