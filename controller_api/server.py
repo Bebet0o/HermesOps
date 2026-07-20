@@ -14,6 +14,7 @@ from .core import ControllerError, ControllerService, Settings
 
 LOGGER = logging.getLogger(SERVICE_NAME)
 MAX_REQUEST_TARGET_BYTES = 4096
+MAX_JSON_BODY_BYTES = 65_536
 MAX_QUERY_FIELDS = 8
 ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
@@ -706,7 +707,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             operation_id = unquote(path[len(operation_prefix):])
             if not operation_id or "/" in operation_id:
                 raise ControllerError(404, "route_not_found", "Route not found")
-            operation = service.objectives.get_operation(operation_id)
+            operation = service.get_operation(operation_id)
             revision = int(operation["resource_revision"])
             return 200, {
                 "data": operation,
@@ -746,6 +747,153 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             "Route not found",
             "The requested Controller API route does not exist.",
         )
+
+    def _validate_origin(self) -> None:
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return
+        host = self.headers.get("Host", "")
+        if origin not in {f"http://{host}", f"https://{host}"}:
+            raise ControllerError(403, "origin_forbidden", "Forbidden request origin")
+
+    def _read_json_body(self) -> dict[str, Any]:
+        transfer_encoding = self.headers.get("Transfer-Encoding")
+        if transfer_encoding:
+            raise ControllerError(
+                400,
+                "transfer_encoding_forbidden",
+                "Transfer-Encoding is not supported",
+            )
+        content_type = self.headers.get("Content-Type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        if media_type != "application/json":
+            raise ControllerError(
+                415,
+                "unsupported_media_type",
+                "Content-Type must be application/json",
+            )
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            raise ControllerError(411, "content_length_required", "Content-Length required")
+        try:
+            length = int(raw_length)
+        except ValueError as error:
+            raise ControllerError(400, "invalid_content_length", "Invalid Content-Length") from error
+        if length < 2 or length > MAX_JSON_BODY_BYTES:
+            raise ControllerError(413, "request_body_too_large", "Invalid request body size")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ControllerError(400, "incomplete_request_body", "Incomplete request body")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ControllerError(400, "invalid_json", "Invalid JSON request body") from error
+        if not isinstance(value, dict):
+            raise ControllerError(400, "invalid_json_object", "JSON body must be an object")
+        return value
+
+    def _protected_post(
+        self,
+        path: str,
+        query: dict[str, list[str]],
+        request_id: str,
+        body: dict[str, Any],
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        if query:
+            raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+        self._validate_origin()
+        service = self.controller.service
+        session_token = service.authenticate(self.headers.get("Cookie"))
+        idempotency_key = self.headers.get("Idempotency-Key")
+
+        if path == "/api/v1/auth/csrf":
+            status, payload = service.commands.issue_csrf(
+                session_token=session_token,
+                idempotency_key=service.commands.validate_idempotency_key(idempotency_key),
+                route=path,
+                body=body,
+                meta_factory=lambda: service.meta(request_id),
+            )
+            return status, payload, {}
+
+        service.commands.verify_csrf_token(
+            session_token,
+            self.headers.get("X-CSRF-Token"),
+        )
+        key = service.commands.validate_idempotency_key(idempotency_key)
+        if path == "/api/v1/objectives":
+            status, payload = service.commands.create_objective(
+                session_token=session_token,
+                idempotency_key=key,
+                route=path,
+                body=body,
+                meta_factory=lambda revision: service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            )
+            return status, payload, {}
+
+        prefix = "/api/v1/objectives/"
+        marker = "/commands/"
+        if path.startswith(prefix) and marker in path[len(prefix):]:
+            objective_part, command = path[len(prefix):].split(marker, 1)
+            objective_id = unquote(objective_part)
+            command = unquote(command)
+            if not objective_id or "/" in objective_id or not command or "/" in command:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            status, payload = service.commands.command_objective(
+                session_token=session_token,
+                idempotency_key=key,
+                route=path,
+                objective_id=objective_id,
+                command=command,
+                body=body,
+                meta_factory=lambda revision: service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            )
+            return status, payload, {}
+
+        raise ControllerError(404, "route_not_found", "Route not found")
+
+    def _handle_post(self) -> None:
+        request_id = self._request_id()
+        try:
+            self._validate_host()
+            self._validate_request_target()
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            is_objective_command = (
+                path.startswith("/api/v1/objectives/")
+                and "/commands/" in path[len("/api/v1/objectives/"):]
+            )
+            if path not in {"/api/v1/auth/csrf", "/api/v1/objectives"} and not is_objective_command:
+                self._method_not_allowed()
+                return
+            body = self._read_json_body()
+            status, payload, headers = self._protected_post(
+                parsed.path,
+                self._parse_query(parsed.query),
+                request_id,
+                body,
+            )
+            self._send_json(
+                status,
+                payload,
+                request_id,
+                extra_headers=headers,
+            )
+        except ControllerError as error:
+            self._problem(error, request_id, close_connection=True)
+        except Exception:
+            LOGGER.exception("Unhandled Controller API mutation failure")
+            self._problem(
+                ControllerError(500, "internal_error", "Internal server error"),
+                request_id,
+                close_connection=True,
+            )
 
     def _handle_get(self, *, head_only: bool = False) -> None:
         request_id = self._request_id()
@@ -823,7 +971,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             405,
             "method_not_allowed",
             "Method not allowed",
-            "The Controller exposes read-only GET and HEAD routes only.",
+            "The requested HTTP method is not supported on this Controller route.",
         )
         self._send_json(
             405,
@@ -834,7 +982,9 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             close_connection=True,
         )
 
-    do_POST = _method_not_allowed
+    def do_POST(self) -> None:
+        self._handle_post()
+
     do_PUT = _method_not_allowed
     do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed

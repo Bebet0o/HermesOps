@@ -408,9 +408,11 @@ class ControllerService:
         from .objective_reads import ObjectiveReadStore
         from .execution_reads import ExecutionReadStore
         from .review_recovery_reads import ReviewRecoveryReadStore
+        from .objective_commands import ObjectiveCommandStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
+        self.commands = ObjectiveCommandStore(settings)
 
     def version(self) -> str:
         try:
@@ -562,6 +564,9 @@ class ControllerService:
         database_ready, database_reason = self.database.readiness()
         if not database_ready:
             reasons.append(database_reason)
+        command_ready, command_reason = self.commands.readiness()
+        if not command_ready:
+            reasons.append(command_reason)
         try:
             self.session_token()
         except ControllerError as error:
@@ -574,7 +579,7 @@ class ControllerService:
             "event_schema_versions": [1],
             "hermesfile_versions": ["v0alpha1"],
             "features": {
-                "read_only_controller_api": True,
+                "read_only_controller_api": False,
                 "project_reads": True,
                 "project_writes": False,
                 "objective_reads": True,
@@ -591,13 +596,23 @@ class ControllerService:
                 "raw_review_artifact_reads": False,
                 "raw_worker_log_reads": False,
                 "run_artifact_reads": False,
-                "durable_controller_operations": False,
-                "objective_writes": False,
+                "durable_controller_operations": True,
+                "objective_writes": True,
+                "objective_write_commands": ["create", "pause", "resume", "cancel"],
+                "csrf_challenges": True,
+                "idempotent_mutations": True,
                 "websocket_events": False,
                 "hermesfile_builds": False,
                 "console": False,
             },
         }
+
+
+    def get_operation(self, operation_id: str) -> dict[str, Any]:
+        controller_operation = self.commands.get_operation(operation_id)
+        if controller_operation is not None:
+            return controller_operation
+        return self.objectives.get_operation(operation_id)
 
     def system_status(self) -> dict[str, Any]:
         database_ready, _ = self.database.readiness()

@@ -12,6 +12,7 @@ python3 -m compileall -q \
     controller_api \
     scripts/hermesops-controller-api.py \
     scripts/hermesops-controller-objective-probe.py \
+    scripts/hermesops-controller-objective-command-probe.py \
     tests/test_controller_api.py
 
 python3 tests/test_controller_api.py
@@ -26,18 +27,21 @@ import sys
 from pathlib import Path
 
 contract = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-implemented = {
-    "/system/health": "get",
-    "/system/status": "get",
-    "/system/capabilities": "get",
-    "/projects": "get",
-    "/projects/{project_id}": "get",
-    "/objectives": "get",
-    "/objectives/{objective_id}": "get",
-    "/projects/{project_id}/objectives": "get",
-    "/operations/{operation_id}": "get",
-}
-for path, method in implemented.items():
+implemented = (
+    ("/system/health", "get"),
+    ("/system/status", "get"),
+    ("/system/capabilities", "get"),
+    ("/projects", "get"),
+    ("/projects/{project_id}", "get"),
+    ("/objectives", "get"),
+    ("/objectives", "post"),
+    ("/objectives/{objective_id}", "get"),
+    ("/objectives/{objective_id}/commands/{command}", "post"),
+    ("/projects/{project_id}/objectives", "get"),
+    ("/operations/{operation_id}", "get"),
+    ("/auth/csrf", "post"),
+)
+for path, method in implemented:
     if path not in contract["paths"]:
         raise SystemExit(f"Missing OpenAPI path: {path}")
     if method not in contract["paths"][path]:
@@ -92,5 +96,5 @@ for marker in required_server:
 print("Controller API adversarial hardening contract: PASS")
 PY
 
-echo "Controller API read-only skeleton: PASS"
+echo "Controller API bounded mutation foundation: PASS"
 echo "HERMESOPS_CONTROLLER_API_SKELETON_PASS"
