@@ -44,6 +44,7 @@ def main() -> None:
         f"csrf={result.csrf_status} "
         f"create={result.create_status} "
         f"pause={result.pause_status} "
+        f"resume={result.resume_status} "
         f"cancel={result.cancel_status} "
         f"operation={result.operation_status} "
         f"objective={result.objective_status}"

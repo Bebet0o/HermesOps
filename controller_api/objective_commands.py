@@ -24,6 +24,17 @@ CSRF_TOKEN_PATTERN = re.compile(
     r"^csrf1\.([0-9]{10})\.([A-Za-z0-9_-]{32})\.([A-Za-z0-9_-]{43})$"
 )
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+KNOWN_OBJECTIVE_STATUSES = {
+    "QUEUED",
+    "PLANNING",
+    "RUNNING",
+    "PAUSE_REQUESTED",
+    "PAUSED",
+    "CANCEL_REQUESTED",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+}
 MAX_JSON_BODY_BYTES = 65_536
 CSRF_LIFETIME_SECONDS = 600
 
@@ -133,14 +144,24 @@ class ObjectiveCommandStore:
         ).hexdigest()
 
     @staticmethod
-    def _request_hash(method: str, route: str, body: dict[str, Any]) -> str:
-        digest = hashlib.sha256()
-        digest.update(method.encode("ascii"))
-        digest.update(b"\0")
-        digest.update(route.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(canonical_json(body).encode("utf-8"))
-        return digest.hexdigest()
+    def _request_hash(
+        session_token: str,
+        method: str,
+        route: str,
+        body: dict[str, Any],
+    ) -> str:
+        material = (
+            method.encode("ascii")
+            + b"\0"
+            + route.encode("utf-8")
+            + b"\0"
+            + canonical_json(body).encode("utf-8")
+        )
+        return hmac.new(
+            session_token.encode("ascii"),
+            b"hermesops-request-v1\0" + material,
+            hashlib.sha256,
+        ).hexdigest()
 
     @staticmethod
     def validate_idempotency_key(value: str | None) -> str:
@@ -381,7 +402,9 @@ class ObjectiveCommandStore:
     ) -> tuple[dict[str, Any] | None, str, str, str]:
         session_fp = self._session_fingerprint(session_token)
         key_hash = self._key_hash(session_token, idempotency_key)
-        request_hash = self._request_hash(method, route, body)
+        request_hash = self._request_hash(
+            session_token, method, route, body
+        )
         row = connection.execute(
             """
             SELECT method, route, request_hash, response_status, response_json
@@ -546,8 +569,6 @@ class ObjectiveCommandStore:
         meta_factory: Callable[[], dict[str, Any]],
     ) -> tuple[int, dict[str, Any]]:
         self.validate_idempotency_key(idempotency_key)
-        if body:
-            raise ControllerError(400, "invalid_request_body", "Expected an empty JSON object")
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -562,6 +583,12 @@ class ObjectiveCommandStore:
                 if replay is not None:
                     connection.commit()
                     return 200, replay
+                if body:
+                    raise ControllerError(
+                        400,
+                        "invalid_request_body",
+                        "Expected an empty JSON object",
+                    )
                 token, expires_at = self.issue_csrf_token(session_token)
                 payload = {
                     "data": {"token": token, "expires_at": expires_at},
@@ -591,10 +618,6 @@ class ObjectiveCommandStore:
         meta_factory: Callable[[int | None], dict[str, Any]],
     ) -> tuple[int, dict[str, Any]]:
         self.validate_idempotency_key(idempotency_key)
-        data = self._validate_create_body(body)
-        objective_id = "objective-" + uuid.uuid4().hex
-        operation_id = "operation-" + uuid.uuid4().hex
-        now = utc_now()
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -609,6 +632,10 @@ class ObjectiveCommandStore:
                 if replay is not None:
                     connection.commit()
                     return 202, replay
+                data = self._validate_create_body(body)
+                objective_id = "objective-" + uuid.uuid4().hex
+                operation_id = "operation-" + uuid.uuid4().hex
+                now = utc_now()
                 placeholders = ",".join("?" for _ in data["project_ids"])
                 rows = list(
                     connection.execute(
@@ -701,18 +728,6 @@ class ObjectiveCommandStore:
         meta_factory: Callable[[int | None], dict[str, Any]],
     ) -> tuple[int, dict[str, Any]]:
         self.validate_idempotency_key(idempotency_key)
-        if not OBJECTIVE_ID_PATTERN.fullmatch(objective_id):
-            raise ControllerError(400, "invalid_objective_id", "Invalid objective identifier")
-        if command not in {"pause", "resume", "cancel"}:
-            raise ControllerError(
-                409,
-                "objective_command_unavailable",
-                "Objective command unavailable",
-                "Milestone 2G implements pause, resume and cancel only.",
-            )
-        reason = self._validate_command_body(body)
-        operation_id = "operation-" + uuid.uuid4().hex
-        now = utc_now()
         with closing(self.connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -727,6 +742,22 @@ class ObjectiveCommandStore:
                 if replay is not None:
                     connection.commit()
                     return 202, replay
+                if not OBJECTIVE_ID_PATTERN.fullmatch(objective_id):
+                    raise ControllerError(
+                        400,
+                        "invalid_objective_id",
+                        "Invalid objective identifier",
+                    )
+                if command not in {"pause", "resume", "cancel"}:
+                    raise ControllerError(
+                        409,
+                        "objective_command_unavailable",
+                        "Objective command unavailable",
+                        "Milestone 2G implements pause, resume and cancel only.",
+                    )
+                reason = self._validate_command_body(body)
+                operation_id = "operation-" + uuid.uuid4().hex
+                now = utc_now()
                 row = connection.execute(
                     "SELECT * FROM objective_queue WHERE objective_id=?",
                     (objective_id,),
@@ -739,7 +770,19 @@ class ObjectiveCommandStore:
                         resource={"type": "objective", "id": objective_id},
                     )
                 old = str(row["status"])
+                if old not in KNOWN_OBJECTIVE_STATUSES:
+                    raise ControllerError(
+                        503,
+                        "objective_state_invalid",
+                        "Objective state unavailable",
+                    )
                 if command == "pause":
+                    if old == "CANCEL_REQUESTED":
+                        raise ControllerError(
+                            409,
+                            "objective_cancel_pending",
+                            "Objective cancellation is pending",
+                        )
                     if old in TERMINAL_STATUSES:
                         raise ControllerError(409, "objective_terminal", "Objective is terminal")
                     if old == "PAUSED":
@@ -773,11 +816,11 @@ class ObjectiveCommandStore:
                     new = "QUEUED"
                     connection.execute(
                         """
-                        UPDATE objective_queue SET status='QUEUED', not_before=?,
+                        UPDATE objective_queue SET status='QUEUED',
                             heartbeat_at=?, paused_at=NULL, finished_at=NULL,
                             last_error=NULL WHERE objective_id=?
                         """,
-                        (now, now, objective_id),
+                        (now, objective_id),
                     )
                     self._add_event(
                         connection,

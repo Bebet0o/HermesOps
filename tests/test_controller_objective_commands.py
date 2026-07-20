@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import socket
 import sqlite3
 import sys
 import threading
@@ -45,6 +48,32 @@ class ObjectiveCommandTest(unittest.TestCase):
             body=json.dumps(body, separators=(",", ":")).encode(),
         )
 
+    def raw_post(
+        self,
+        path: str,
+        raw_body: bytes,
+        headers: list[tuple[str, str]],
+    ) -> tuple[int, dict[str, object]]:
+        lines = [
+            f"POST {path} HTTP/1.1",
+            f"Host: 127.0.0.1:{self.fixture.port}",
+            "Connection: close",
+        ]
+        lines.extend(f"{name}: {value}" for name, value in headers)
+        request = ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + raw_body
+        with socket.create_connection(("127.0.0.1", self.fixture.port), timeout=5) as stream:
+            stream.sendall(request)
+            stream.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while True:
+                chunk = stream.recv(65536)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        head, _, body = bytes(response).partition(b"\r\n\r\n")
+        status = int(head.split(b"\r\n", 1)[0].split()[1])
+        return status, json.loads(body.decode("utf-8"))
+
     def csrf(self, key: str = "csrf-key-0001") -> str:
         status, _, payload = self.post(
             "/api/v1/auth/csrf",
@@ -87,6 +116,7 @@ class ObjectiveCommandTest(unittest.TestCase):
         self.assertEqual(result.csrf_status, 200)
         self.assertEqual(result.create_status, 202)
         self.assertEqual(result.pause_status, 202)
+        self.assertEqual(result.resume_status, 202)
         self.assertEqual(result.cancel_status, 202)
         with closing(sqlite3.connect(self.fixture.database)) as connection:
             row = connection.execute(
@@ -128,9 +158,8 @@ class ObjectiveCommandTest(unittest.TestCase):
             {"unexpected": True},
             key="same-key-0001",
         )
-        self.assertEqual(status, 400)
-        # Body validation occurs before idempotency reservation for this route.
-        self.assertEqual(payload["code"], "invalid_request_body")
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["code"], "idempotency_conflict")
 
     def test_create_requires_csrf(self) -> None:
         status, _, payload = self.post(
@@ -376,6 +405,190 @@ class ObjectiveCommandTest(unittest.TestCase):
             )
         self.assertNotIn("private-command-key-01", values)
         self.assertNotIn("private operator explanation", values)
+
+    def test_duplicate_security_headers_are_rejected(self) -> None:
+        base = [
+            ("Cookie", f"hermesops_session={TOKEN}"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+            ("Idempotency-Key", "duplicate-header-01"),
+        ]
+        cases = (
+            base + [("Content-Length", "2")],
+            base + [("Idempotency-Key", "duplicate-header-02")],
+            base + [("Cookie", f"hermesops_session={'b' * 64}")],
+            base + [("Content-Type", "application/json")],
+            base + [("Origin", f"http://127.0.0.1:{self.fixture.port}"), ("Origin", "https://evil.invalid")],
+        )
+        for headers in cases:
+            with self.subTest(headers=headers[-1][0]):
+                status, payload = self.raw_post(
+                    "/api/v1/auth/csrf",
+                    b"{}",
+                    list(headers),
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["code"], "ambiguous_header")
+
+    def test_duplicate_json_members_are_rejected(self) -> None:
+        token = self.csrf("csrf-duplicate-json")
+        raw = (
+            b'{"project_ids":["alpha"],"title":"first",'
+            b'"title":"second","description":"body"}'
+        )
+        status, payload = self.raw_post(
+            "/api/v1/objectives",
+            raw,
+            [
+                ("Cookie", f"hermesops_session={TOKEN}"),
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(raw))),
+                ("Idempotency-Key", "duplicate-json-01"),
+                ("X-CSRF-Token", token),
+            ],
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["code"], "invalid_json")
+
+    def test_non_standard_and_pathological_json_fail_cleanly(self) -> None:
+        token = self.csrf("csrf-pathological-json")
+        cases = [
+            b'{"project_ids":["alpha"],"title":"x","description":"x","priority":NaN}',
+            b'{"project_ids":["alpha"],"title":"\\ud800","description":"x"}',
+            (b'{"unknown":' + b'[' * 1100 + b'0' + b']' * 1100 + b'}'),
+        ]
+        for index, raw in enumerate(cases):
+            with self.subTest(index=index):
+                status, payload = self.raw_post(
+                    "/api/v1/objectives",
+                    raw,
+                    [
+                        ("Cookie", f"hermesops_session={TOKEN}"),
+                        ("Content-Type", "application/json"),
+                        ("Content-Length", str(len(raw))),
+                        ("Idempotency-Key", f"pathological-{index:02d}"),
+                        ("X-CSRF-Token", token),
+                    ],
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["code"], "invalid_json")
+
+    def test_reused_key_conflicts_before_semantic_validation(self) -> None:
+        token = self.csrf("csrf-validation-order")
+        body = self.create_body()
+        first = self.post(
+            "/api/v1/objectives",
+            body,
+            key="validation-order-01",
+            csrf=token,
+        )
+        self.assertEqual(first[0], 202)
+        changed = dict(body)
+        changed["secret"] = "must not bypass conflict detection"
+        status, _, payload = self.post(
+            "/api/v1/objectives",
+            changed,
+            key="validation-order-01",
+            csrf=token,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["code"], "idempotency_conflict")
+
+    def test_resume_preserves_original_not_before(self) -> None:
+        token, _, payload = self.create(key="create-future-resume")
+        objective_id = payload["data"]["target"]["id"]
+        self.post(
+            f"/api/v1/objectives/{objective_id}/commands/pause",
+            {},
+            key="pause-future-resume",
+            csrf=token,
+        )
+        self.post(
+            f"/api/v1/objectives/{objective_id}/commands/resume",
+            {},
+            key="resume-future-resume",
+            csrf=token,
+        )
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            state, not_before = connection.execute(
+                "SELECT status, not_before FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            ).fetchone()
+        self.assertEqual(state, "QUEUED")
+        self.assertEqual(not_before, "2099-01-01T00:00:00.000Z")
+
+    def test_pause_cannot_override_pending_cancellation(self) -> None:
+        token, _, payload = self.create(key="create-cancel-pending")
+        objective_id = payload["data"]["target"]["id"]
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='CANCEL_REQUESTED' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        status, _, problem = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/pause",
+            {},
+            key="pause-cancel-pending",
+            csrf=token,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(problem["code"], "objective_cancel_pending")
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            state = connection.execute(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            ).fetchone()[0]
+        self.assertEqual(state, "CANCEL_REQUESTED")
+
+    def test_unknown_persisted_state_fails_closed(self) -> None:
+        token, _, payload = self.create(key="create-invalid-state")
+        objective_id = payload["data"]["target"]["id"]
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='CORRUPT' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        status, _, problem = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/cancel",
+            {},
+            key="cancel-invalid-state",
+            csrf=token,
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(problem["code"], "objective_state_invalid")
+
+    def test_request_hash_is_keyed_not_plaintext_verifier(self) -> None:
+        token = self.csrf("csrf-keyed-request-hash")
+        body = self.create_body()
+        status, _, _ = self.post(
+            "/api/v1/objectives",
+            body,
+            key="keyed-request-hash-01",
+            csrf=token,
+        )
+        self.assertEqual(status, 202)
+        canonical = json.dumps(
+            body,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        material = b"POST\0/api/v1/objectives\0" + canonical
+        plain = hashlib.sha256(material).hexdigest()
+        expected = hmac.new(
+            TOKEN.encode("ascii"),
+            b"hermesops-request-v1\0" + material,
+            hashlib.sha256,
+        ).hexdigest()
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            stored = connection.execute(
+                "SELECT request_hash FROM controller_idempotency "
+                "WHERE route='/api/v1/objectives'"
+            ).fetchone()[0]
+        self.assertEqual(stored, expected)
+        self.assertNotEqual(stored, plain)
 
     def test_concurrent_identical_retry_creates_one_objective(self) -> None:
         token = self.csrf("csrf-concurrent")

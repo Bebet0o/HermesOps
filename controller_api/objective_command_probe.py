@@ -22,6 +22,7 @@ class ObjectiveCommandProbeResult:
     csrf_status: int
     create_status: int
     pause_status: int
+    resume_status: int
     cancel_status: int
     operation_status: int
     objective_status: int
@@ -165,6 +166,37 @@ def probe_objective_commands(
     if pause_status != 202:
         raise ServiceSupportError("Objective pause probe did not return HTTP 202.")
 
+    resume_status, _ = _post(
+        host,
+        port,
+        f"/api/v1/objectives/{objective_id}/commands/resume",
+        token=token,
+        csrf_token=csrf_token,
+        idempotency_key=f"probe-resume-{nonce}",
+        body={"reason": "installed-service schedule preservation probe"},
+        timeout=wait_seconds,
+    )
+    if resume_status != 202:
+        raise ServiceSupportError("Objective resume probe did not return HTTP 202.")
+
+    resumed_status, resumed_payload = _request(
+        host,
+        port,
+        f"/api/v1/objectives/{objective_id}",
+        token=token,
+        timeout=wait_seconds,
+    )
+    resumed = resumed_payload.get("data")
+    if (
+        resumed_status != 200
+        or not isinstance(resumed, dict)
+        or resumed.get("raw_state") != "QUEUED"
+        or resumed.get("not_before") != "2099-01-01T00:00:00.000Z"
+    ):
+        raise ServiceSupportError(
+            "Objective resume probe did not preserve its future schedule."
+        )
+
     cancel_status, _ = _post(
         host,
         port,
@@ -203,6 +235,7 @@ def probe_objective_commands(
         csrf_status=csrf_status,
         create_status=create_status,
         pause_status=pause_status,
+        resume_status=resume_status,
         cancel_status=cancel_status,
         operation_status=operation_status,
         objective_status=objective_status,

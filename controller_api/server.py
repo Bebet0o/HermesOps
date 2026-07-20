@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import signal
 import socket
 import threading
@@ -15,6 +16,8 @@ from .core import ControllerError, ControllerService, Settings
 LOGGER = logging.getLogger(SERVICE_NAME)
 MAX_REQUEST_TARGET_BYTES = 4096
 MAX_JSON_BODY_BYTES = 65_536
+MAX_JSON_DEPTH = 32
+MAX_JSON_NODES = 4096
 MAX_QUERY_FIELDS = 8
 ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
@@ -184,8 +187,32 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             close_connection=close_connection,
         )
 
+    def _single_header(
+        self,
+        name: str,
+        *,
+        required: bool = False,
+    ) -> str | None:
+        values = self.headers.get_all(name, failobj=[])
+        if len(values) > 1:
+            raise ControllerError(
+                400,
+                "ambiguous_header",
+                "Ambiguous request header",
+                f"The {name} header must appear at most once.",
+            )
+        value = values[0] if values else None
+        if required and (value is None or not value.strip()):
+            raise ControllerError(
+                400,
+                "header_required",
+                "Required request header missing",
+                f"The {name} header is required.",
+            )
+        return value
+
     def _validate_host(self) -> None:
-        host = self.headers.get("Host")
+        host = self._single_header("Host")
         if not host:
             raise ControllerError(
                 400,
@@ -221,7 +248,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     def _reject_request_body(self) -> None:
         transfer_encoding = self.headers.get("Transfer-Encoding")
-        content_length = self.headers.get("Content-Length")
+        content_length = self._single_header("Content-Length")
 
         if transfer_encoding:
             raise ControllerError(
@@ -315,7 +342,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         request_id: str,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         service = self.controller.service
-        session_token = service.authenticate(self.headers.get("Cookie"))
+        session_token = service.authenticate(self._single_header("Cookie"))
 
         if path == "/api/v1/system/health":
             payload = {
@@ -749,10 +776,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _validate_origin(self) -> None:
-        origin = self.headers.get("Origin")
+        origin = self._single_header("Origin")
         if origin is None:
             return
-        host = self.headers.get("Host", "")
+        host = self._single_header("Host") or ""
         if origin not in {f"http://{host}", f"https://{host}"}:
             raise ControllerError(403, "origin_forbidden", "Forbidden request origin")
 
@@ -764,7 +791,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "transfer_encoding_forbidden",
                 "Transfer-Encoding is not supported",
             )
-        content_type = self.headers.get("Content-Type", "")
+        content_type = self._single_header("Content-Type") or ""
         media_type = content_type.split(";", 1)[0].strip().lower()
         if media_type != "application/json":
             raise ControllerError(
@@ -772,21 +799,58 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "unsupported_media_type",
                 "Content-Type must be application/json",
             )
-        raw_length = self.headers.get("Content-Length")
+        raw_length = self._single_header("Content-Length")
         if raw_length is None:
             raise ControllerError(411, "content_length_required", "Content-Length required")
-        try:
-            length = int(raw_length)
-        except ValueError as error:
-            raise ControllerError(400, "invalid_content_length", "Invalid Content-Length") from error
+        normalized_length = raw_length.strip()
+        if not re.fullmatch(r"[0-9]+", normalized_length):
+            raise ControllerError(
+                400,
+                "invalid_content_length",
+                "Invalid Content-Length",
+            )
+        length = int(normalized_length)
         if length < 2 or length > MAX_JSON_BODY_BYTES:
             raise ControllerError(413, "request_body_too_large", "Invalid request body size")
         raw = self.rfile.read(length)
         if len(raw) != length:
             raise ControllerError(400, "incomplete_request_body", "Incomplete request body")
+        def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON object member")
+                result[key] = item
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON number: {value}")
+
         try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            value = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=strict_object,
+                parse_constant=reject_constant,
+            )
+            stack: list[tuple[Any, int]] = [(value, 0)]
+            nodes = 0
+            while stack:
+                current, depth = stack.pop()
+                nodes += 1
+                if depth > MAX_JSON_DEPTH or nodes > MAX_JSON_NODES:
+                    raise ValueError("JSON structure exceeds safety bounds")
+                if isinstance(current, dict):
+                    stack.extend((item, depth + 1) for item in current.values())
+                elif isinstance(current, list):
+                    stack.extend((item, depth + 1) for item in current)
+            json.dumps(value, ensure_ascii=False).encode("utf-8")
+        except (
+            UnicodeDecodeError,
+            UnicodeEncodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            ValueError,
+        ) as error:
             raise ControllerError(400, "invalid_json", "Invalid JSON request body") from error
         if not isinstance(value, dict):
             raise ControllerError(400, "invalid_json_object", "JSON body must be an object")
@@ -803,8 +867,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
         self._validate_origin()
         service = self.controller.service
-        session_token = service.authenticate(self.headers.get("Cookie"))
-        idempotency_key = self.headers.get("Idempotency-Key")
+        session_token = service.authenticate(self._single_header("Cookie"))
+        idempotency_key = self._single_header("Idempotency-Key")
 
         if path == "/api/v1/auth/csrf":
             status, payload = service.commands.issue_csrf(
@@ -818,7 +882,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
         service.commands.verify_csrf_token(
             session_token,
-            self.headers.get("X-CSRF-Token"),
+            self._single_header("X-CSRF-Token"),
         )
         key = service.commands.validate_idempotency_key(idempotency_key)
         if path == "/api/v1/objectives":

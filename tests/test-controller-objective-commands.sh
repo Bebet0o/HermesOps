@@ -29,7 +29,13 @@ for required in (
     if required not in text:
         raise SystemExit(f"Missing objective command contract marker: {required}")
 probe = (root / "controller_api/objective_command_probe.py").read_text(encoding="utf-8")
-for required in ("2099-01-01T00:00:00Z", "commands/pause", "commands/cancel"):
+for required in (
+    "2099-01-01T00:00:00Z",
+    "commands/pause",
+    "commands/resume",
+    "commands/cancel",
+    "did not preserve its future schedule",
+):
     if required not in probe:
         raise SystemExit(f"Missing safe live-probe marker: {required}")
 print("Controller secure objective command contract: PASS")
