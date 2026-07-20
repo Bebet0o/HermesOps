@@ -46,6 +46,8 @@ static_validation() {
         tests/test_controller_execution_reads.py \
         tests/test-controller-review-recovery-reads.sh \
         tests/test_controller_review_recovery_reads.py \
+        tests/test-controller-objective-commands.sh \
+        tests/test_controller_objective_commands.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -54,6 +56,7 @@ static_validation() {
         scripts/hermesops-controller-objective-probe.py \
         scripts/hermesops-controller-execution-probe.py \
         scripts/hermesops-controller-review-recovery-probe.py \
+        scripts/hermesops-controller-objective-command-probe.py \
         scripts/hermesops-controller-session.py \
         scripts/hermesops-controller-probe.py \
         controller_api/__init__.py controller_api/core.py \
@@ -62,9 +65,13 @@ static_validation() {
         controller_api/execution_reads.py controller_api/execution_probe.py \
         controller_api/review_recovery_reads.py \
         controller_api/review_recovery_probe.py \
+        controller_api/objective_commands.py \
+        controller_api/objective_command_probe.py \
+        migrations/012_controller_command_foundation.sql \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
+        docs/milestones/2G_SECURE_OBJECTIVE_COMMANDS.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -154,6 +161,7 @@ PY
     "${REPO}/tests/test-controller-objective-reads.sh"
     "${REPO}/tests/test-controller-execution-reads.sh"
     "${REPO}/tests/test-controller-review-recovery-reads.sh"
+    "${REPO}/tests/test-controller-objective-commands.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"
@@ -242,6 +250,10 @@ PY
         --session-file "${ROOT}/secrets/controller-session" \
         --wait-seconds 10
     "${REPO}/scripts/hermesops-controller-review-recovery-probe.py" \
+        --base-url http://127.0.0.1:8765 \
+        --session-file "${ROOT}/secrets/controller-session" \
+        --wait-seconds 10
+    "${REPO}/scripts/hermesops-controller-objective-command-probe.py" \
         --base-url http://127.0.0.1:8765 \
         --session-file "${ROOT}/secrets/controller-session" \
         --wait-seconds 10

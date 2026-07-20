@@ -63,6 +63,27 @@ default_branch = "main"
                     version INTEGER PRIMARY KEY,
                     applied_at TEXT NOT NULL
                 );
+                CREATE TABLE controller_operations (
+                    operation_id TEXT PRIMARY KEY, command_kind TEXT NOT NULL,
+                    state TEXT NOT NULL, target_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL, result_json TEXT NOT NULL,
+                    error_code TEXT, created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, finished_at TEXT
+                );
+                CREATE TABLE controller_idempotency (
+                    session_fingerprint TEXT NOT NULL, key_hash TEXT NOT NULL,
+                    method TEXT NOT NULL, route TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    response_status INTEGER, response_json TEXT, operation_id TEXT,
+                    created_at TEXT NOT NULL, completed_at TEXT,
+                    PRIMARY KEY(session_fingerprint, key_hash)
+                );
+                CREATE TABLE controller_command_audit (
+                    audit_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+                    session_fingerprint TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
+                    request_hash TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL
+                );
                 CREATE TABLE projects (
                     project_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
@@ -82,7 +103,7 @@ default_branch = "main"
                 CREATE TABLE objective_queue (
                     objective_id TEXT PRIMARY KEY,
                     objective TEXT NOT NULL,
-                    source TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('AI','DECLARATIVE','TEST')),
                     status TEXT NOT NULL,
                     priority INTEGER NOT NULL,
                     not_before TEXT NOT NULL,
@@ -363,8 +384,8 @@ class ControllerAPITest(unittest.TestCase):
         self.assertTrue(features["objective_reads"])
         self.assertTrue(features["operation_reads"])
         self.assertTrue(features["legacy_operation_projection"])
-        self.assertFalse(features["durable_controller_operations"])
-        self.assertFalse(features["objective_writes"])
+        self.assertTrue(features["durable_controller_operations"])
+        self.assertTrue(features["objective_writes"])
 
     def test_protected_endpoint_requires_cookie(self) -> None:
         status, headers, payload = self.fixture.request(
@@ -449,7 +470,7 @@ class ControllerAPITest(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         features = payload["data"]["features"]
-        self.assertTrue(features["read_only_controller_api"])
+        self.assertFalse(features["read_only_controller_api"])
         self.assertFalse(features["project_writes"])
         self.assertFalse(features["websocket_events"])
         self.assertFalse(features["hermesfile_builds"])
