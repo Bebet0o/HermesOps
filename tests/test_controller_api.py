@@ -171,6 +171,18 @@ default_branch = "main"
                     started_at TEXT,
                     finished_at TEXT
                 );
+                CREATE TABLE review_results (
+                    review_id TEXT PRIMARY KEY
+                );
+                CREATE TABLE reviewer_executions (
+                    execution_id TEXT PRIMARY KEY
+                );
+                CREATE TABLE integration_executions (
+                    integration_id TEXT PRIMARY KEY
+                );
+                CREATE TABLE recovery_executions (
+                    recovery_id TEXT PRIMARY KEY
+                );
                 CREATE TABLE orchestration_tasks (
                     orchestration_task_id TEXT PRIMARY KEY,
                     plan_id TEXT NOT NULL,

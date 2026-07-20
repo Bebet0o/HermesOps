@@ -18,6 +18,7 @@ MAX_QUERY_FIELDS = 8
 ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 ALLOWED_EXECUTION_LIST_QUERY_FIELDS = {"cursor", "limit"}
+ALLOWED_REVIEW_RECOVERY_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 ALLOWED_LOG_QUERY_FIELDS = {"after_sequence", "limit"}
 
 
@@ -460,6 +461,99 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "data": objectives,
                 "meta": service.meta(request_id, next_cursor=next_cursor),
             }, {}
+
+        if path in {"/api/v1/reviews", "/api/v1/recoveries"}:
+            unknown = set(query) - ALLOWED_REVIEW_RECOVERY_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor, limit, project_id and state are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            raw_project = query.get("project_id", [])
+            raw_state = query.get("state", [])
+            if (
+                len(raw_limit) != 1
+                or len(raw_cursor) > 1
+                or len(raw_project) > 1
+                or len(raw_state) > 1
+            ):
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                    "limit must be an integer.",
+                ) from error
+            project_id = raw_project[0] if raw_project else None
+            state = raw_state[0] if raw_state else None
+            if path == "/api/v1/reviews":
+                items, next_cursor = service.review_recovery.list_reviews(
+                    limit=limit,
+                    cursor=raw_cursor[0] if raw_cursor else None,
+                    project_id=project_id,
+                    state=state,
+                    cursor_secret=session_token,
+                )
+            else:
+                items, next_cursor = service.review_recovery.list_recoveries(
+                    limit=limit,
+                    cursor=raw_cursor[0] if raw_cursor else None,
+                    project_id=project_id,
+                    state=state,
+                    cursor_secret=session_token,
+                )
+            return 200, {
+                "data": items,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        review_prefix = "/api/v1/reviews/"
+        review_evidence_suffix = "/evidence"
+        if path.startswith(review_prefix) and path.endswith(review_evidence_suffix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            review_id = unquote(path[len(review_prefix):-len(review_evidence_suffix)])
+            if not review_id or "/" in review_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            evidence = service.review_recovery.get_review_evidence(review_id)
+            return 200, {
+                "data": evidence,
+                "meta": service.meta(request_id),
+            }, {}
+
+        if path.startswith(review_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            review_id = unquote(path[len(review_prefix):])
+            if not review_id or "/" in review_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            review = service.review_recovery.get_review(review_id)
+            revision = int(review["resource_revision"])
+            return 200, {
+                "data": review,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
+        recovery_prefix = "/api/v1/recoveries/"
+        if path.startswith(recovery_prefix):
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            recovery_id = unquote(path[len(recovery_prefix):])
+            if not recovery_id or "/" in recovery_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            recovery = service.review_recovery.get_recovery(recovery_id)
+            revision = int(recovery["resource_revision"])
+            return 200, {
+                "data": recovery,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
 
         objective_prefix = "/api/v1/objectives/"
         objective_tasks_suffix = "/tasks"
