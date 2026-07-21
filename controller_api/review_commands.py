@@ -9,6 +9,7 @@ from contextlib import closing
 from typing import Any, Callable
 
 from .core import ControllerError, Settings
+from .event_journal import EventJournal
 from .objective_commands import ObjectiveCommandStore, canonical_json, utc_now
 
 REVIEW_ID_PATTERN = re.compile(r"^review-[a-f0-9]{32}$")
@@ -41,6 +42,7 @@ class ReviewCommandStore:
             "controller_review_idempotency",
             "controller_review_command_audit",
             "controller_review_actions",
+            "controller_event_journal",
         }
         try:
             with closing(self.connect()) as connection:
@@ -393,6 +395,29 @@ class ReviewCommandStore:
                         now,
                     ),
                 )
+                EventJournal.emit(
+                    connection,
+                    event_type=(
+                        "review.debt_acknowledged"
+                        if command == "acknowledge-debt"
+                        else "review.human_review_requested"
+                    ),
+                    actor_type="operator",
+                    actor_id="operator:local-controller-session",
+                    aggregate_type="review",
+                    aggregate_id=review_id,
+                    correlation_id=EventJournal.correlation_for_causation(operation_id),
+                    causation_id=operation_id,
+                    project_id=str(run_row["project_id"]),
+                    objective_id=None,
+                    data={
+                        "command": command,
+                        "status": "recorded",
+                        "reason_present": reason_present,
+                    },
+                    occurred_at=now,
+                )
+
                 operation = self._operation_payload(
                     operation_id=operation_id,
                     review_id=review_id,
