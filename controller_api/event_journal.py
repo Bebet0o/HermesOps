@@ -12,6 +12,10 @@ from typing import Any, Iterable
 from .core import ControllerError
 
 EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+_TIMESTAMP_PATTERN = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
+)
 EVENT_ID_PATTERN = re.compile(r"^evt_[0-9a-f]{32}$")
 CORRELATION_ID_PATTERN = re.compile(r"^corr_[0-9a-f]{32}$")
 ACTOR_TYPES = {"operator", "system", "agent", "worker"}
@@ -36,22 +40,52 @@ MAX_EVENT_DEPTH = 8
 MAX_EVENT_NODES = 512
 MAX_REPLAY_LIMIT = 500
 
-_FORBIDDEN_KEY = re.compile(
-    r"(?:^|_)(?:"
-    r"token|secret|password|passwd|cookie|csrf|private_key|api_key|"
-    r"auth_json|authorization|session_token|idempotency_key|environment"
-    r")(?:$|_)",
-    re.IGNORECASE,
-)
+_SENSITIVE_KEY_TOKENS = {
+    "auth",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "csrf",
+    "env",
+    "environment",
+    "idempotency",
+    "passwd",
+    "password",
+    "secret",
+    "session",
+    "token",
+}
+_SENSITIVE_KEY_PAIRS = {
+    ("api", "key"),
+    ("auth", "json"),
+    ("private", "key"),
+}
 _FORBIDDEN_VALUE = re.compile(
     r"(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|"
-    r"\bBearer\s+[A-Za-z0-9._~+\-/]+=*|"
-    r"\bsk-[A-Za-z0-9_-]{16,}|"
+    r"\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\-/=]{8,}|"
+    r"\b(?:sk|rk|pk)-(?:live|test)-?[A-Za-z0-9_-]{12,}|"
     r"\bghp_[A-Za-z0-9]{20,}|"
     r"\bgithub_pat_[A-Za-z0-9_]{20,}|"
-    r"\bxox[baprs]-[A-Za-z0-9-]{16,})",
+    r"\bglpat-[A-Za-z0-9_-]{16,}|"
+    r"\bxox[baprs]-[A-Za-z0-9-]{16,}|"
+    r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|"
+    r"\bAIza[0-9A-Za-z_-]{35}\b|"
+    r"\b[0-9]{6,12}:[A-Za-z0-9_-]{30,}\b|"
+    r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b|"
+    r"[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@)",
     re.IGNORECASE,
 )
+
+
+def _key_is_sensitive(key: str) -> bool:
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", separated).strip("_").lower()
+    parts = tuple(part for part in normalized.split("_") if part)
+    if any(part in _SENSITIVE_KEY_TOKENS for part in parts):
+        return True
+    return any(pair in zip(parts, parts[1:]) for pair in _SENSITIVE_KEY_PAIRS)
+
 
 
 def canonical_json(value: Any) -> str:
@@ -113,11 +147,7 @@ class EventJournal:
 
     @staticmethod
     def _validate_timestamp(value: str) -> str:
-        if (
-            not isinstance(value, str)
-            or not 20 <= len(value) <= 40
-            or not value.endswith("Z")
-        ):
+        if not isinstance(value, str) or not _TIMESTAMP_PATTERN.fullmatch(value):
             raise ControllerError(
                 503,
                 "event_journal_input_invalid",
@@ -190,7 +220,7 @@ class EventJournal:
                         not isinstance(key, str)
                         or not key
                         or len(key) > 128
-                        or _FORBIDDEN_KEY.search(key)
+                        or _key_is_sensitive(key)
                         or any(ord(character) < 32 for character in key)
                     ):
                         raise ControllerError(

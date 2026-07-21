@@ -52,6 +52,8 @@ static_validation() {
         tests/test_controller_review_commands.py \
   tests/test-controller-event-journal.sh \
   tests/test_controller_event_journal.py \
+  tests/test-controller-event-journal-adversarial.sh \
+  tests/test_controller_event_journal_adversarial.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -79,6 +81,7 @@ static_validation() {
         migrations/013_controller_review_commands.sql \
   migrations/014_controller_review_command_hardening.sql \
   migrations/015_controller_event_journal.sql \
+  migrations/016_controller_event_journal_hardening.sql \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
@@ -177,6 +180,7 @@ PY
     "${REPO}/tests/test-controller-objective-commands.sh"
     "${REPO}/tests/test-controller-review-commands.sh"
   "${REPO}/tests/test-controller-event-journal.sh"
+  "${REPO}/tests/test-controller-event-journal-adversarial.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"

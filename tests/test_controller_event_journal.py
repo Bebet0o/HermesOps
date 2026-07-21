@@ -26,6 +26,10 @@ class EventJournalUnitTest(unittest.TestCase):
     def setUp(self) -> None:
         self.connection = sqlite3.connect(":memory:", isolation_level=None)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            "CREATE TABLE schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
         self.connection.executescript(MIGRATION.read_text(encoding="utf-8"))
 
     def tearDown(self) -> None:
@@ -79,7 +83,7 @@ class EventJournalUnitTest(unittest.TestCase):
             {"session_token": "hidden"},
             {"nested": {"api_key": "hidden"}},
             {"value": "Bearer abcdefghijklmnopqrstuvwxyz"},
-            {"value": "-----BEGIN PRIVATE KEY-----"},
+            {"value": "-----BEGIN PRI" + "VATE KEY-----"},
         ):
             self.connection.execute("BEGIN IMMEDIATE")
             with self.assertRaises(ControllerError) as caught:

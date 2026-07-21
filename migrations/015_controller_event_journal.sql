@@ -93,4 +93,7 @@ CREATE INDEX idx_controller_event_journal_aggregate_revision
 CREATE INDEX idx_controller_event_journal_correlation
     ON controller_event_journal(correlation_id, sequence);
 
+INSERT INTO schema_migrations(version, applied_at)
+VALUES (15, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
 PRAGMA user_version = 15;

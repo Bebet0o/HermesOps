@@ -27,3 +27,14 @@ Implementation candidate. Validation and adversarial review are required before 
 ## Compatibility
 
 The existing `events` and `objective_events` tables remain unchanged. Unknown well-formed event types are preserved. HTTP query APIs remain authoritative.
+
+## Adversarial hardening
+
+The post-implementation review adds migration 016 and verifies:
+
+- SQLite `INSERT OR REPLACE` cannot bypass journal immutability;
+- secret-key normalization covers camelCase, kebab-case and dotted keys;
+- common credential value formats are rejected before persistence;
+- persisted timestamps use canonical RFC 3339 UTC form;
+- concurrent writers preserve global sequence and aggregate revision order;
+- `review.human_review_requested` is part of the public v1 event catalog.
