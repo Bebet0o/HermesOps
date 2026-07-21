@@ -526,3 +526,16 @@ session cookie and the exact configured Console origin. Credentials and replay
 cursors are forbidden in the URL. `Last-Event-Sequence` may start an immediate
 all-topic subscription; otherwise the first client text frame must be the
 normative `subscribe` object. Session rotation closes existing streams.
+
+### Reviewer assignment lifecycle
+
+```text
+review.assignment_created
+review.assignment_claimed
+review.assignment_completed
+review.assignment_failed
+```
+
+These events contain bounded identifiers, status, assignment number, role and
+failure code metadata only. They never contain prompts, logs, paths, raw error
+messages or credentials.

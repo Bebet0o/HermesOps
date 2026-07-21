@@ -85,3 +85,10 @@ left a race with the permanent orphan cleaner. Recovery now preserves any
 sandbox whose `hermes-task-id` belongs to a SQLite task in `RUNNING` under an
 active run. The normal sandbox ID remains the primary reference after it is
 persisted.
+
+## Reviewer assignment boundary
+
+Reviewer transport retries are distinct durable assignments. At most one
+assignment may be active for a run. The assignment captures the selected role
+and profile before launch and cannot be reassigned or rewritten after it reaches
+a terminal state.

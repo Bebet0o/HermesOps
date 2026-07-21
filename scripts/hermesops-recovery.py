@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
+import hermesops_review_assignment as ASSIGNMENTS
 
 
 ROOT = Path(
@@ -958,6 +959,11 @@ def cleanup_run_resources(run_id: str) -> list[dict[str, Any]]:
               AND finished_at IS NULL
             """,
             (now, run_id),
+        )
+        ASSIGNMENTS.recover_active_assignments(
+            connection,
+            run_id=run_id,
+            actor_id=f"recovery:{run_id}",
         )
         connection.commit()
 
