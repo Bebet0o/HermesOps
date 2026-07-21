@@ -60,6 +60,8 @@ static_validation() {
   tests/test_controller_websocket_transport_adversarial.py \
   tests/test-controller-browser-auth.sh \
   tests/test_controller_browser_auth.py \
+  tests/test-controller-browser-auth-adversarial.sh \
+  tests/test_controller_browser_auth_adversarial.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -199,6 +201,7 @@ PY
   "${REPO}/tests/test-controller-websocket-transport.sh"
   "${REPO}/tests/test-controller-websocket-adversarial.sh"
   "${REPO}/tests/test-controller-browser-auth.sh"
+  "${REPO}/tests/test-controller-browser-auth-adversarial.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"

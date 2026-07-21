@@ -974,7 +974,11 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self._validate_browser_origin()
             if body:
                 raise ControllerError(400, "invalid_logout", "Invalid logout request")
-            authenticated = service.authenticate_context(self._single_header("Cookie"))
+            bootstrap_secret = service.session_token()
+            authenticated = service.browser_auth.logout_context(
+                self._single_header("Cookie"),
+                bootstrap_secret,
+            )
             service.commands.verify_csrf_token(
                 authenticated.secret,
                 self._single_header("X-CSRF-Token"),
@@ -982,7 +986,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             payload = service.browser_auth.logout(
                 session=authenticated,
                 idempotency_key=service.browser_auth.validate_idempotency_key(idempotency_key),
-                bootstrap_secret=service.session_token(),
+                bootstrap_secret=bootstrap_secret,
                 request_id=request_id,
             )
             return 200, {

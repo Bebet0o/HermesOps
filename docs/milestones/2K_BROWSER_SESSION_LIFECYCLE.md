@@ -79,3 +79,17 @@ invalidate bootstrap connections as before.
 - bearer tokens in URLs;
 - direct Console access to SQLite, Docker or Hermes Agent;
 - removal of the local probe credential.
+
+## Adversarial hardening
+
+The final 2K review adds migration 018 and enforces the following properties:
+
+- password derivation occurs outside SQLite write transactions;
+- at most two scrypt derivations execute concurrently per Controller process;
+- malformed durable credentials fail readiness and login with service-unavailable semantics;
+- logout replay remains idempotent after the browser session has been revoked;
+- repeated blocked attempts do not indefinitely extend the lockout window or amplify audit rows;
+- browser session identity and expiry fields are immutable after insertion;
+- authentication idempotency rows are immutable;
+- authentication timestamps are canonical RFC 3339 UTC values;
+- a failed initial-password write removes the partial secret file.

@@ -8,6 +8,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import threading
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ PASSWORD_MAX_BYTES = 1024
 SESSION_TTL_SECONDS = 12 * 60 * 60
 LOGIN_WINDOW_SECONDS = 60
 LOGIN_MAX_FAILURES = 5
+LOGIN_MAX_CONCURRENT_DERIVATIONS = 2
+LOGIN_DERIVATION_WAIT_SECONDS = 0.25
 SCRYPT_N = 1 << 15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -82,6 +85,26 @@ def _validate_scrypt_parameters(n: int, r: int, p: int) -> None:
     if not 1 <= r <= 16 or not 1 <= p <= 4:
         raise ValueError("invalid scrypt work factors")
 
+
+
+def _parse_utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or len(value) != 24 or not value.endswith("Z"):
+        raise ValueError("invalid canonical timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("invalid canonical timestamp")
+    if (
+        parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        != value
+    ):
+        raise ValueError("invalid canonical timestamp")
+    return parsed
+
+
+def _validate_stored_scrypt_parameters(n: int, r: int, p: int) -> None:
+    _validate_scrypt_parameters(n, r, p)
+    if 128 * n * r > SCRYPT_MAXMEM:
+        raise ValueError("stored scrypt parameters exceed memory bound")
 
 def derive_password(
     password: str,
@@ -149,6 +172,108 @@ class BrowserAuthStore:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._derivation_slots = threading.BoundedSemaphore(
+            LOGIN_MAX_CONCURRENT_DERIVATIONS
+        )
+
+    @staticmethod
+    def _credential_signature(row: sqlite3.Row | None) -> tuple[object, ...] | None:
+        if row is None:
+            return None
+        return tuple(
+            row[name]
+            for name in (
+                "actor_id", "username", "password_algorithm", "password_salt",
+                "password_digest", "scrypt_n", "scrypt_r", "scrypt_p",
+                "created_at", "updated_at",
+            )
+        )
+
+    @staticmethod
+    def _validate_credential_row(
+        row: sqlite3.Row,
+        *,
+        expected_username: str | None = None,
+    ) -> None:
+        try:
+            actor_id = str(row["actor_id"])
+            username = str(row["username"])
+            algorithm = str(row["password_algorithm"])
+            salt = _b64decode(str(row["password_salt"]))
+            digest = _b64decode(str(row["password_digest"]))
+            n = int(row["scrypt_n"])
+            r = int(row["scrypt_r"])
+            p = int(row["scrypt_p"])
+            created_at = _parse_utc_timestamp(row["created_at"])
+            updated_at = _parse_utc_timestamp(row["updated_at"])
+            _validate_stored_scrypt_parameters(n, r, p)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ControllerError(
+                503,
+                "browser_auth_operator_invalid",
+                "Browser authentication is unavailable",
+            ) from error
+        if (
+            actor_id != "operator"
+            or not USERNAME_PATTERN.fullmatch(username)
+            or (expected_username is not None and username != expected_username)
+            or algorithm != "scrypt"
+            or len(salt) != 16
+            or len(digest) != SCRYPT_DKLEN
+            or updated_at < created_at
+        ):
+            raise ControllerError(
+                503,
+                "browser_auth_operator_invalid",
+                "Browser authentication is unavailable",
+            )
+
+    @staticmethod
+    def _session_from_row(
+        row: sqlite3.Row,
+        token: str,
+        *,
+        require_current: bool,
+    ) -> AuthenticatedSession:
+        try:
+            session_id = str(row["session_id"])
+            actor_id = str(row["actor_id"])
+            created_at = _parse_utc_timestamp(row["created_at"])
+            expires_at = _parse_utc_timestamp(row["expires_at"])
+            revoked_at_value = row["revoked_at"]
+            revoked_at = (
+                None
+                if revoked_at_value is None
+                else _parse_utc_timestamp(revoked_at_value)
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ControllerError(
+                503,
+                "browser_auth_session_invalid",
+                "Browser authentication is unavailable",
+            ) from error
+        if (
+            not SESSION_ID_PATTERN.fullmatch(session_id)
+            or actor_id != "operator"
+            or expires_at <= created_at
+            or (revoked_at is not None and revoked_at < created_at)
+        ):
+            raise ControllerError(
+                503,
+                "browser_auth_session_invalid",
+                "Browser authentication is unavailable",
+            )
+        if require_current and (
+            revoked_at is not None or expires_at <= datetime.now(timezone.utc)
+        ):
+            raise ControllerError(401, "authentication_required", "Authentication required")
+        return AuthenticatedSession(
+            secret=token,
+            actor_id=actor_id,
+            expires_at=str(row["expires_at"]),
+            session_id=session_id,
+            kind="browser",
+        )
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -174,13 +299,19 @@ class BrowserAuthStore:
                 }
                 if not REQUIRED_TABLES.issubset(tables):
                     return False, "browser_auth_schema_unavailable"
-                count = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM controller_operator_credentials"
-                    ).fetchone()[0]
-                )
-                if count != 1:
+                rows = connection.execute(
+                    """
+                    SELECT actor_id, username, password_algorithm, password_salt,
+                           password_digest, scrypt_n, scrypt_r, scrypt_p,
+                           created_at, updated_at
+                    FROM controller_operator_credentials
+                    """
+                ).fetchall()
+                if len(rows) != 1:
                     return False, "browser_auth_operator_unavailable"
+                self._validate_credential_row(rows[0])
+        except ControllerError:
+            return False, "browser_auth_operator_invalid"
         except sqlite3.Error:
             return False, "browser_auth_database_unavailable"
         return True, "ready"
@@ -221,29 +352,25 @@ class BrowserAuthStore:
     ) -> str:
         username = _validate_username(username)
         _validate_password(password)
-        _validate_scrypt_parameters(scrypt_n, scrypt_r, scrypt_p)
+        _validate_stored_scrypt_parameters(scrypt_n, scrypt_r, scrypt_p)
         salt = secrets.token_bytes(16)
-        digest = derive_password(
-            password,
-            salt,
-            n=scrypt_n,
-            r=scrypt_r,
-            p=scrypt_p,
-        )
+        digest = derive_password(password, salt, n=scrypt_n, r=scrypt_r, p=scrypt_p)
         now = utc_now()
         try:
             with closing(self.connect()) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
-                    "SELECT actor_id, username FROM controller_operator_credentials"
+                    """
+                    SELECT actor_id, username, password_algorithm, password_salt,
+                           password_digest, scrypt_n, scrypt_r, scrypt_p,
+                           created_at, updated_at
+                    FROM controller_operator_credentials
+                    """
                 ).fetchall()
                 if existing:
                     if len(existing) != 1:
-                        raise ControllerError(
-                            503,
-                            "browser_auth_operator_invalid",
-                            "Browser authentication is unavailable",
-                        )
+                        raise ControllerError(503, "browser_auth_operator_invalid", "Browser authentication is unavailable")
+                    self._validate_credential_row(existing[0], expected_username=username)
                     connection.rollback()
                     return "valid"
                 connection.execute(
@@ -254,25 +381,13 @@ class BrowserAuthStore:
                         created_at, updated_at
                     ) VALUES (?, ?, 'scrypt', ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        actor_id,
-                        username,
-                        _b64encode(salt),
-                        _b64encode(digest),
-                        scrypt_n,
-                        scrypt_r,
-                        scrypt_p,
-                        now,
-                        now,
-                    ),
+                    (actor_id, username, _b64encode(salt), _b64encode(digest), scrypt_n, scrypt_r, scrypt_p, now, now),
                 )
                 connection.commit()
+        except ControllerError:
+            raise
         except sqlite3.Error as error:
-            raise ControllerError(
-                503,
-                "browser_auth_unavailable",
-                "Browser authentication is unavailable",
-            ) from error
+            raise ControllerError(503, "browser_auth_unavailable", "Browser authentication is unavailable") from error
         return "created"
 
     def set_password(
@@ -380,47 +495,50 @@ class BrowserAuthStore:
                 kind="bootstrap",
             )
         if not BROWSER_SESSION_TOKEN_PATTERN.fullmatch(supplied):
-            raise ControllerError(
-                401,
-                "authentication_required",
-                "Authentication required",
-            )
+            raise ControllerError(401, "authentication_required", "Authentication required")
         token_hash = hashlib.sha256(supplied.encode("ascii")).hexdigest()
-        now = utc_now()
         try:
             with closing(self.connect()) as connection:
                 row = connection.execute(
                     """
-                    SELECT session_id, actor_id, expires_at
+                    SELECT session_id, actor_id, created_at, expires_at, revoked_at
                     FROM controller_browser_sessions
                     WHERE token_hash=?
-                      AND revoked_at IS NULL
-                      AND julianday(expires_at) > julianday(?)
                     """,
-                    (token_hash, now),
+                    (token_hash,),
                 ).fetchone()
         except sqlite3.Error as error:
-            raise ControllerError(
-                503,
-                "browser_auth_unavailable",
-                "Browser authentication is unavailable",
-            ) from error
+            raise ControllerError(503, "browser_auth_unavailable", "Browser authentication is unavailable") from error
         if row is None:
             raise ControllerError(401, "authentication_required", "Authentication required")
-        session_id = str(row["session_id"])
-        if not SESSION_ID_PATTERN.fullmatch(session_id):
-            raise ControllerError(
-                503,
-                "browser_auth_corrupt",
-                "Browser authentication is unavailable",
-            )
-        return AuthenticatedSession(
-            secret=supplied,
-            actor_id=str(row["actor_id"]),
-            expires_at=str(row["expires_at"]),
-            session_id=session_id,
-            kind="browser",
-        )
+        return self._session_from_row(row, supplied, require_current=True)
+
+    def logout_context(
+        self,
+        cookie_header: str | None,
+        bootstrap_secret: str,
+    ) -> AuthenticatedSession:
+        supplied = self._cookie_value(cookie_header)
+        if hmac.compare_digest(supplied, bootstrap_secret):
+            raise ControllerError(403, "browser_session_required", "Browser session required")
+        if not BROWSER_SESSION_TOKEN_PATTERN.fullmatch(supplied):
+            raise ControllerError(401, "authentication_required", "Authentication required")
+        token_hash = hashlib.sha256(supplied.encode("ascii")).hexdigest()
+        try:
+            with closing(self.connect()) as connection:
+                row = connection.execute(
+                    """
+                    SELECT session_id, actor_id, created_at, expires_at, revoked_at
+                    FROM controller_browser_sessions
+                    WHERE token_hash=?
+                    """,
+                    (token_hash,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise ControllerError(503, "browser_auth_unavailable", "Browser authentication is unavailable") from error
+        if row is None:
+            raise ControllerError(401, "authentication_required", "Authentication required")
+        return self._session_from_row(row, supplied, require_current=False)
 
     def session_is_current(self, supplied: str, bootstrap_secret: str) -> bool:
         if hmac.compare_digest(supplied, bootstrap_secret):
@@ -489,24 +607,24 @@ class BrowserAuthStore:
         )
 
     @staticmethod
+    @staticmethod
     def _credential_matches(row: sqlite3.Row | None, password: str) -> bool:
         if row is None:
             salt = hashlib.sha256(b"hermesops-browser-auth-dummy").digest()[:16]
             expected = hashlib.sha256(b"hermesops-browser-auth-dummy-digest").digest()
             actual = derive_password(password, salt)
             return hmac.compare_digest(actual, expected)
-        try:
-            if str(row["password_algorithm"]) != "scrypt":
-                return False
-            salt = _b64decode(str(row["password_salt"]))
-            expected = _b64decode(str(row["password_digest"]))
-            n = int(row["scrypt_n"])
-            r = int(row["scrypt_r"])
-            p = int(row["scrypt_p"])
-            actual = derive_password(password, salt, n=n, r=r, p=p)
-        except (KeyError, TypeError, ValueError, ControllerError):
-            return False
-        return len(expected) == SCRYPT_DKLEN and hmac.compare_digest(actual, expected)
+        BrowserAuthStore._validate_credential_row(row)
+        salt = _b64decode(str(row["password_salt"]))
+        expected = _b64decode(str(row["password_digest"]))
+        actual = derive_password(
+            password,
+            salt,
+            n=int(row["scrypt_n"]),
+            r=int(row["scrypt_r"]),
+            p=int(row["scrypt_p"]),
+        )
+        return hmac.compare_digest(actual, expected)
 
     def login(
         self,
@@ -528,162 +646,139 @@ class BrowserAuthStore:
         username_fp = _fingerprint(bootstrap_secret, "login-username", username)
         source_fp = _fingerprint(bootstrap_secret, "login-source-audit", source)
         user_agent_fp = _fingerprint(bootstrap_secret, "login-agent", user_agent or "-")
-        now = utc_now()
+
+        def replay_result(connection: sqlite3.Connection) -> LoginResult | None:
+            replay = connection.execute(
+                "SELECT request_hash, response_status, session_id FROM controller_auth_idempotency WHERE namespace=? AND key_hash=?",
+                (namespace, key_hash),
+            ).fetchone()
+            if replay is None:
+                return None
+            if not hmac.compare_digest(str(replay["request_hash"]), request_hash):
+                raise ControllerError(409, "idempotency_key_conflict", "Idempotency-Key conflict")
+            if int(replay["response_status"]) != 200 or replay["session_id"] is None:
+                raise ControllerError(401, "authentication_required", "Authentication required")
+            row = connection.execute(
+                "SELECT session_id, actor_id, created_at, expires_at, revoked_at FROM controller_browser_sessions WHERE session_id=?",
+                (str(replay["session_id"]),),
+            ).fetchone()
+            if row is None:
+                raise ControllerError(503, "browser_auth_session_invalid", "Browser authentication is unavailable")
+            session = self._session_from_row(row, self._session_token(bootstrap_secret, namespace, key_hash, request_hash), require_current=True)
+            lifetime = int((_parse_utc_timestamp(row["expires_at"]) - _parse_utc_timestamp(row["created_at"])).total_seconds())
+            if not 1 <= lifetime <= SESSION_TTL_SECONDS:
+                raise ControllerError(503, "browser_auth_session_invalid", "Browser authentication is unavailable")
+            return LoginResult(payload=self.session_payload(session), token=session.secret, max_age=lifetime)
+
+        def failure_count(connection: sqlite3.Connection, threshold: str) -> int:
+            return int(connection.execute(
+                """
+                SELECT COUNT(*) FROM controller_auth_audit
+                WHERE action='login' AND outcome='failure'
+                  AND source_fingerprint=?
+                  AND julianday(created_at) >= julianday(?)
+                """,
+                (source_fp, threshold),
+            ).fetchone()[0])
+
         try:
             with closing(self.connect()) as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                replay = connection.execute(
-                    """
-                    SELECT request_hash, response_status, session_id
-                    FROM controller_auth_idempotency
-                    WHERE namespace=? AND key_hash=?
-                    """,
-                    (namespace, key_hash),
-                ).fetchone()
+                replay = replay_result(connection)
                 if replay is not None:
-                    if not hmac.compare_digest(str(replay["request_hash"]), request_hash):
-                        raise ControllerError(
-                            409,
-                            "idempotency_key_conflict",
-                            "Idempotency-Key conflict",
-                        )
-                    status = int(replay["response_status"])
-                    if status != 200 or replay["session_id"] is None:
-                        raise ControllerError(401, "authentication_required", "Authentication required")
-                    session_id = str(replay["session_id"])
-                    row = connection.execute(
-                        """
-                        SELECT actor_id, created_at, expires_at, revoked_at
-                        FROM controller_browser_sessions
-                        WHERE session_id=?
-                        """,
-                        (session_id,),
-                    ).fetchone()
-                    if (
-                        row is None
-                        or row["revoked_at"] is not None
-                        or datetime.fromisoformat(str(row["expires_at"]).replace("Z", "+00:00"))
-                        <= datetime.now(timezone.utc)
-                    ):
-                        raise ControllerError(
-                            409,
-                            "idempotency_replay_unavailable",
-                            "Idempotent login replay is unavailable",
-                        )
-                    token = self._session_token(
-                        bootstrap_secret, namespace, key_hash, request_hash
-                    )
+                    return replay
+                threshold = (datetime.now(timezone.utc) - timedelta(seconds=LOGIN_WINDOW_SECONDS)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                if failure_count(connection, threshold) >= LOGIN_MAX_FAILURES:
+                    connection.execute("BEGIN IMMEDIATE")
+                    failures = failure_count(connection, threshold)
+                    if failures >= LOGIN_MAX_FAILURES:
+                        recent_block = int(connection.execute(
+                            """
+                            SELECT COUNT(*) FROM controller_auth_audit
+                            WHERE action='login' AND outcome='rate_limited'
+                              AND source_fingerprint=?
+                              AND julianday(created_at) >= julianday(?)
+                            """,
+                            (source_fp, threshold),
+                        ).fetchone()[0])
+                        if recent_block == 0:
+                            now = utc_now()
+                            self._audit(connection, action="login", outcome="rate_limited", actor_id=None, session_fingerprint=None, username_fingerprint=username_fp, source_fingerprint=source_fp, request_id=request_id, created_at=now)
+                            connection.commit()
+                        else:
+                            connection.rollback()
+                        raise ControllerError(403, "authentication_temporarily_blocked", "Authentication temporarily blocked")
                     connection.rollback()
-                    created_at = str(row["created_at"])
-                    expires_at = str(row["expires_at"])
-                    try:
-                        persisted_lifetime = int(
-                            (
-                                datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-                                - datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                            ).total_seconds()
-                        )
-                    except ValueError as error:
-                        raise ControllerError(
-                            503,
-                            "browser_auth_session_invalid",
-                            "Browser authentication is unavailable",
-                        ) from error
-                    if not 1 <= persisted_lifetime <= SESSION_TTL_SECONDS:
-                        raise ControllerError(
-                            503,
-                            "browser_auth_session_invalid",
-                            "Browser authentication is unavailable",
-                        )
-                    max_age = persisted_lifetime
-                    return LoginResult(
-                        payload=self.session_payload(
-                            AuthenticatedSession(
-                                secret=token,
-                                actor_id=str(row["actor_id"]),
-                                expires_at=expires_at,
-                                session_id=session_id,
-                                kind="browser",
-                            )
-                        ),
-                        token=token,
-                        max_age=max_age,
-                    )
+                credential = connection.execute(
+                    """
+                    SELECT actor_id, username, password_algorithm, password_salt,
+                           password_digest, scrypt_n, scrypt_r, scrypt_p,
+                           created_at, updated_at
+                    FROM controller_operator_credentials WHERE username=?
+                    """,
+                    (username,),
+                ).fetchone()
+                signature = self._credential_signature(credential)
+                if not self._derivation_slots.acquire(timeout=LOGIN_DERIVATION_WAIT_SECONDS):
+                    raise ControllerError(503, "browser_auth_capacity_exhausted", "Browser authentication is temporarily unavailable")
+                try:
+                    valid = self._credential_matches(credential, password)
+                finally:
+                    self._derivation_slots.release()
 
-                threshold = (
-                    datetime.now(timezone.utc) - timedelta(seconds=LOGIN_WINDOW_SECONDS)
-                ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-                failures = int(
-                    connection.execute(
+                connection.execute("BEGIN IMMEDIATE")
+                replay = replay_result(connection)
+                if replay is not None:
+                    connection.rollback()
+                    return replay
+                now = utc_now()
+                threshold = (datetime.now(timezone.utc) - timedelta(seconds=LOGIN_WINDOW_SECONDS)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                failures = failure_count(connection, threshold)
+                if failures >= LOGIN_MAX_FAILURES:
+                    recent_block = int(connection.execute(
                         """
-                        SELECT COUNT(*)
-                        FROM controller_auth_audit
-                        WHERE action='login'
-                          AND outcome IN ('failure', 'rate_limited')
+                        SELECT COUNT(*) FROM controller_auth_audit
+                        WHERE action='login' AND outcome='rate_limited'
                           AND source_fingerprint=?
                           AND julianday(created_at) >= julianday(?)
                         """,
                         (source_fp, threshold),
-                    ).fetchone()[0]
-                )
-                if failures >= LOGIN_MAX_FAILURES:
-                    self._audit(
-                        connection,
-                        action="login",
-                        outcome="rate_limited",
-                        actor_id=None,
-                        session_fingerprint=None,
-                        username_fingerprint=username_fp,
-                        source_fingerprint=source_fp,
-                        request_id=request_id,
-                        created_at=now,
-                    )
-                    connection.commit()
-                    raise ControllerError(
-                        403,
-                        "authentication_temporarily_blocked",
-                        "Authentication temporarily blocked",
-                    )
-
-                credential = connection.execute(
+                    ).fetchone()[0])
+                    if recent_block == 0:
+                        self._audit(connection, action="login", outcome="rate_limited", actor_id=None, session_fingerprint=None, username_fingerprint=username_fp, source_fingerprint=source_fp, request_id=request_id, created_at=now)
+                        connection.commit()
+                    else:
+                        connection.rollback()
+                    raise ControllerError(403, "authentication_temporarily_blocked", "Authentication temporarily blocked")
+                current_credential = connection.execute(
                     """
                     SELECT actor_id, username, password_algorithm, password_salt,
-                           password_digest, scrypt_n, scrypt_r, scrypt_p
-                    FROM controller_operator_credentials
-                    WHERE username=?
+                           password_digest, scrypt_n, scrypt_r, scrypt_p,
+                           created_at, updated_at
+                    FROM controller_operator_credentials WHERE username=?
                     """,
                     (username,),
                 ).fetchone()
-                valid = self._credential_matches(credential, password)
+                if self._credential_signature(current_credential) != signature:
+                    connection.rollback()
+                    raise ControllerError(503, "browser_auth_credential_changed", "Browser authentication is temporarily unavailable")
                 if not valid:
                     connection.execute(
                         """
                         INSERT INTO controller_auth_idempotency (
                             namespace, key_hash, method, route, request_hash,
                             response_status, session_id, created_at, completed_at
-                        ) VALUES (?, ?, 'POST', '/api/v1/auth/login', ?,
-                                  401, NULL, ?, ?)
+                        ) VALUES (?, ?, 'POST', '/api/v1/auth/login', ?, 401, NULL, ?, ?)
                         """,
                         (namespace, key_hash, request_hash, now, now),
                     )
-                    self._audit(
-                        connection,
-                        action="login",
-                        outcome="failure",
-                        actor_id=None,
-                        session_fingerprint=None,
-                        username_fingerprint=username_fp,
-                        source_fingerprint=source_fp,
-                        request_id=request_id,
-                        created_at=now,
-                    )
+                    self._audit(connection, action="login", outcome="failure", actor_id=None, session_fingerprint=None, username_fingerprint=username_fp, source_fingerprint=source_fp, request_id=request_id, created_at=now)
                     connection.commit()
                     raise ControllerError(401, "authentication_required", "Authentication required")
-
-                actor_id = str(credential["actor_id"])
-                token = self._session_token(
-                    bootstrap_secret, namespace, key_hash, request_hash
-                )
+                if current_credential is None:
+                    connection.rollback()
+                    raise ControllerError(503, "browser_auth_operator_invalid", "Browser authentication is unavailable")
+                actor_id = str(current_credential["actor_id"])
+                token = self._session_token(bootstrap_secret, namespace, key_hash, request_hash)
                 token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
                 session_id = "ses_" + token_hash[:32]
                 expires_at = utc_after(SESSION_TTL_SECONDS)
@@ -694,55 +789,24 @@ class BrowserAuthStore:
                         revoked_at, source_fingerprint, user_agent_fingerprint
                     ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
                     """,
-                    (
-                        session_id,
-                        token_hash,
-                        actor_id,
-                        now,
-                        expires_at,
-                        source_fp,
-                        user_agent_fp,
-                    ),
+                    (session_id, token_hash, actor_id, now, expires_at, source_fp, user_agent_fp),
                 )
                 connection.execute(
                     """
                     INSERT INTO controller_auth_idempotency (
                         namespace, key_hash, method, route, request_hash,
                         response_status, session_id, created_at, completed_at
-                    ) VALUES (?, ?, 'POST', '/api/v1/auth/login', ?,
-                              200, ?, ?, ?)
+                    ) VALUES (?, ?, 'POST', '/api/v1/auth/login', ?, 200, ?, ?, ?)
                     """,
                     (namespace, key_hash, request_hash, session_id, now, now),
                 )
-                self._audit(
-                    connection,
-                    action="login",
-                    outcome="success",
-                    actor_id=actor_id,
-                    session_fingerprint=token_hash[:32],
-                    username_fingerprint=username_fp,
-                    source_fingerprint=source_fp,
-                    request_id=request_id,
-                    created_at=now,
-                )
+                self._audit(connection, action="login", outcome="success", actor_id=actor_id, session_fingerprint=token_hash[:32], username_fingerprint=username_fp, source_fingerprint=source_fp, request_id=request_id, created_at=now)
                 connection.commit()
         except ControllerError:
             raise
         except sqlite3.Error as error:
-            raise ControllerError(
-                503,
-                "browser_auth_unavailable",
-                "Browser authentication is unavailable",
-            ) from error
-        return LoginResult(
-            payload={
-                "authenticated": True,
-                "actor_id": actor_id,
-                "expires_at": expires_at,
-            },
-            token=token,
-            max_age=SESSION_TTL_SECONDS,
-        )
+            raise ControllerError(503, "browser_auth_unavailable", "Browser authentication is unavailable") from error
+        return LoginResult(payload={"authenticated": True, "actor_id": actor_id, "expires_at": expires_at}, token=token, max_age=SESSION_TTL_SECONDS)
 
     def logout(
         self,

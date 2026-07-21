@@ -54,25 +54,51 @@ def _write_password(path: Path, password: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = -1
+    created = False
     try:
+        descriptor = os.open(path, flags, 0o600)
+        created = True
         os.fchmod(descriptor, 0o600)
         payload = (password + "\n").encode("utf-8")
         offset = 0
         while offset < len(payload):
-            offset += os.write(descriptor, payload[offset:])
+            written = os.write(descriptor, payload[offset:])
+            if written <= 0:
+                raise OSError("initial password write made no progress")
+            offset += written
         os.fsync(descriptor)
-    finally:
         os.close(descriptor)
-    directory = os.open(
-        path.parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
-    secure_secret_file(path)
+        descriptor = -1
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        secure_secret_file(path)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if created:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        try:
+            directory = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
+        raise
 
 
 def parser() -> argparse.ArgumentParser:
