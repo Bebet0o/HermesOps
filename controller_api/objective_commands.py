@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .core import ControllerError, PROJECT_ID_PATTERN, Settings
+from .event_journal import EventJournal
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~:-]{8,200}$")
 OBJECTIVE_ID_PATTERN = re.compile(r"^objective-[a-f0-9]{32}$")
@@ -115,6 +116,7 @@ class ObjectiveCommandStore:
             "controller_operations",
             "controller_idempotency",
             "controller_command_audit",
+            "controller_event_journal",
         }
         try:
             with closing(self.connect()) as connection:
@@ -328,6 +330,29 @@ class ObjectiveCommandStore:
         return reason.strip() if isinstance(reason, str) else None
 
     @staticmethod
+    def _single_project_id(project_scope_json: str) -> str | None:
+        try:
+            project_ids = json.loads(project_scope_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ControllerError(
+                503,
+                "objective_projection_invalid",
+                "Objective projection unavailable",
+            ) from error
+        if (
+            not isinstance(project_ids, list)
+            or not project_ids
+            or any(not isinstance(value, str) for value in project_ids)
+            or len(set(project_ids)) != len(project_ids)
+        ):
+            raise ControllerError(
+                503,
+                "objective_projection_invalid",
+                "Objective projection unavailable",
+            )
+        return project_ids[0] if len(project_ids) == 1 else None
+
+    @staticmethod
     def _add_event(
         connection: sqlite3.Connection,
         *,
@@ -335,7 +360,10 @@ class ObjectiveCommandStore:
         event_type: str,
         old_status: str | None,
         new_status: str | None,
-        payload: dict[str, Any] | None = None,
+        operation_id: str,
+        project_id: str | None,
+        payload: dict[str, Any],
+        occurred_at: str,
     ) -> None:
         connection.execute(
             """
@@ -350,9 +378,40 @@ class ObjectiveCommandStore:
                 event_type,
                 old_status,
                 new_status,
-                canonical_json(payload or {}),
-                utc_now(),
+                canonical_json(payload),
+                occurred_at,
             ),
+        )
+        if old_status is None:
+            journal_type = "objective.created"
+            journal_data = {
+                "state": str(new_status).lower(),
+                "source": payload.get("source"),
+                "priority": payload.get("priority"),
+                "not_before": payload.get("not_before"),
+                "project_ids": payload.get("projects", []),
+            }
+        else:
+            journal_type = "objective.state_changed"
+            journal_data = {
+                "previous_state": old_status.lower(),
+                "state": str(new_status).lower(),
+                "reason_code": event_type.lower(),
+                "reason_present": bool(payload.get("reason_present")),
+            }
+        EventJournal.emit(
+            connection,
+            event_type=journal_type,
+            actor_type="operator",
+            actor_id="operator:local-controller-session",
+            aggregate_type="objective",
+            aggregate_id=objective_id,
+            correlation_id=EventJournal.correlation_for_causation(operation_id),
+            causation_id=operation_id,
+            project_id=project_id,
+            objective_id=objective_id,
+            data=journal_data,
+            occurred_at=occurred_at,
         )
 
     @staticmethod
@@ -676,6 +735,9 @@ class ObjectiveCommandStore:
                     event_type="OBJECTIVE_SUBMITTED",
                     old_status=None,
                     new_status="QUEUED",
+                    operation_id=operation_id,
+                    project_id=(data["project_ids"][0] if len(data["project_ids"]) == 1 else None),
+                    occurred_at=now,
                     payload={
                         "source": "AI",
                         "priority": data["priority"],
@@ -808,6 +870,9 @@ class ObjectiveCommandStore:
                             ),
                             old_status=old,
                             new_status=new,
+                            operation_id=operation_id,
+                            project_id=(self._single_project_id(str(row["project_scope_json"]))),
+                            occurred_at=now,
                             payload={"reason_present": reason is not None},
                         )
                 elif command == "resume":
@@ -828,6 +893,9 @@ class ObjectiveCommandStore:
                         event_type="OBJECTIVE_RESUMED",
                         old_status=old,
                         new_status=new,
+                        operation_id=operation_id,
+                        project_id=(self._single_project_id(str(row["project_scope_json"]))),
+                        occurred_at=now,
                         payload={"reason_present": reason is not None},
                     )
                 else:
@@ -855,6 +923,9 @@ class ObjectiveCommandStore:
                         ),
                         old_status=old,
                         new_status=new,
+                        operation_id=operation_id,
+                        project_id=(self._single_project_id(str(row["project_scope_json"]))),
+                        occurred_at=now,
                         payload={"reason_present": reason is not None},
                     )
                 operation = self._record_operation(

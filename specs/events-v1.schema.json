@@ -73,6 +73,7 @@
         "review.verdict_recorded",
         "review.evidence_available",
         "review.debt_acknowledged",
+        "review.human_review_requested",
         "recovery.opened",
         "recovery.evidence_updated",
         "recovery.decision_proposed",

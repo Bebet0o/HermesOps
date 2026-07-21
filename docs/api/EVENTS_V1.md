@@ -301,6 +301,7 @@ review.state_changed
 review.verdict_recorded
 review.evidence_available
 review.debt_acknowledged
+review.human_review_requested
 ```
 
 ### Recovery

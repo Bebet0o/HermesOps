@@ -50,6 +50,10 @@ static_validation() {
         tests/test_controller_objective_commands.py \
         tests/test-controller-review-commands.sh \
         tests/test_controller_review_commands.py \
+  tests/test-controller-event-journal.sh \
+  tests/test_controller_event_journal.py \
+  tests/test-controller-event-journal-adversarial.sh \
+  tests/test_controller_event_journal_adversarial.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -72,13 +76,18 @@ static_validation() {
         controller_api/objective_command_probe.py \
         controller_api/review_commands.py \
         controller_api/review_command_probe.py \
+  controller_api/event_journal.py \
         migrations/012_controller_command_foundation.sql \
         migrations/013_controller_review_commands.sql \
+  migrations/014_controller_review_command_hardening.sql \
+  migrations/015_controller_event_journal.sql \
+  migrations/016_controller_event_journal_hardening.sql \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
         docs/milestones/2G_SECURE_OBJECTIVE_COMMANDS.md \
         docs/milestones/2H_HUMAN_REVIEW_COMMANDS.md \
+  docs/milestones/2I_CONTROLLER_EVENT_JOURNAL.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -170,6 +179,8 @@ PY
     "${REPO}/tests/test-controller-review-recovery-reads.sh"
     "${REPO}/tests/test-controller-objective-commands.sh"
     "${REPO}/tests/test-controller-review-commands.sh"
+  "${REPO}/tests/test-controller-event-journal.sh"
+  "${REPO}/tests/test-controller-event-journal-adversarial.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"
