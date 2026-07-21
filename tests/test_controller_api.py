@@ -225,7 +225,7 @@ default_branch = "main"
                     action_id TEXT PRIMARY KEY, review_id TEXT NOT NULL,
                     run_id TEXT NOT NULL, command TEXT NOT NULL,
                     reason_present INTEGER NOT NULL, status TEXT NOT NULL,
-                    created_at TEXT NOT NULL, UNIQUE(review_id, command)
+                    created_at TEXT NOT NULL, UNIQUE(review_id)
                 );
                 CREATE TABLE reviewer_executions (
                     execution_id TEXT PRIMARY KEY

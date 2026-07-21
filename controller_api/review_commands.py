@@ -96,9 +96,10 @@ class ReviewCommandStore:
                 )
             if row["response_json"] is None:
                 raise ControllerError(
-                    409,
-                    "command_in_progress",
-                    "Command already in progress",
+                    503,
+                    "idempotency_reservation_invalid",
+                    "Idempotency reservation is incomplete",
+                    "The persisted reservation cannot represent an active transaction.",
                 )
             try:
                 replay = json.loads(str(row["response_json"]))
@@ -237,10 +238,9 @@ class ReviewCommandStore:
 
                 row = connection.execute(
                     """
-                    SELECT rr.review_id, rr.run_id, rr.verdict, r.project_id
-                    FROM review_results AS rr
-                    JOIN runs AS r ON r.run_id=rr.run_id
-                    WHERE rr.review_id=?
+                    SELECT review_id, run_id, verdict
+                    FROM review_results
+                    WHERE review_id=?
                     """,
                     (review_id,),
                 ).fetchone()
@@ -250,6 +250,16 @@ class ReviewCommandStore:
                         "review_not_found",
                         "Review not found",
                         resource={"type": "review", "id": review_id},
+                    )
+                run_row = connection.execute(
+                    "SELECT project_id FROM runs WHERE run_id=?",
+                    (str(row["run_id"]),),
+                ).fetchone()
+                if run_row is None or not isinstance(run_row["project_id"], str):
+                    raise ControllerError(
+                        503,
+                        "review_projection_invalid",
+                        "Review projection unavailable",
                     )
                 verdict = str(row["verdict"])
                 if verdict not in KNOWN_REVIEW_VERDICTS:
@@ -273,18 +283,25 @@ class ReviewCommandStore:
                     )
                 existing = connection.execute(
                     """
-                    SELECT action_id FROM controller_review_actions
-                    WHERE review_id=? AND command=?
+                    SELECT action_id, command
+                    FROM controller_review_actions
+                    WHERE review_id=?
                     """,
-                    (review_id, command),
+                    (review_id,),
                 ).fetchone()
                 if existing is not None:
+                    if str(existing["command"]) == command:
+                        raise ControllerError(
+                            409,
+                            "review_action_already_recorded",
+                            "Review action already recorded",
+                        )
                     raise ControllerError(
                         409,
-                        "review_action_already_recorded",
-                        "Review action already recorded",
+                        "review_action_conflict",
+                        "Review action conflicts with an existing human decision",
+                        "Only one bounded human action may be recorded per review.",
                     )
-
                 now = utc_now()
                 action_id = "review-action-" + uuid.uuid4().hex
                 operation_id = "operation-" + uuid.uuid4().hex
@@ -359,7 +376,7 @@ class ReviewCommandStore:
                     ) VALUES (?, ?, NULL, ?, 'INFO', ?, ?)
                     """,
                     (
-                        str(row["project_id"]),
+                        str(run_row["project_id"]),
                         str(row["run_id"]),
                         (
                             "REVIEW_DEBT_ACKNOWLEDGED"
