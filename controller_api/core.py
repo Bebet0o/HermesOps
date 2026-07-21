@@ -477,6 +477,8 @@ class ControllerService:
         self.review_recovery = ReviewRecoveryReadStore(settings)
         self.commands = ObjectiveCommandStore(settings)
         self.review_commands = ReviewCommandStore(settings)
+        from .browser_auth import BrowserAuthStore
+        self.browser_auth = BrowserAuthStore(settings)
 
     def version(self) -> str:
         try:
@@ -573,34 +575,24 @@ class ControllerService:
             )
         return token
 
+    def authenticate_context(self, cookie_header: str | None) -> Any:
+        return self.browser_auth.authenticate_cookie(
+            cookie_header,
+            self.session_token(),
+        )
+
     def authenticate(self, cookie_header: str | None) -> str:
-        expected = self.session_token()
-        if not cookie_header or len(cookie_header) > 4096:
-            raise ControllerError(
-                401,
-                "authentication_required",
-                "Authentication required",
-                "A valid HermesOps Controller session cookie is required.",
-            )
+        return self.authenticate_context(cookie_header).secret
 
-        supplied: list[str] = []
-        for segment in cookie_header.split(";"):
-            name, separator, value = segment.strip().partition("=")
-            if separator and name == SESSION_COOKIE:
-                supplied.append(value)
-
-        if (
-            len(supplied) != 1
-            or not SESSION_VALUE_PATTERN.fullmatch(supplied[0])
-            or not hmac.compare_digest(supplied[0], expected)
-        ):
-            raise ControllerError(
-                401,
-                "authentication_required",
-                "Authentication required",
-                "A valid unambiguous HermesOps Controller session cookie is required.",
-            )
-        return expected
+    def session_is_current(self, session_secret: str) -> bool:
+        try:
+            bootstrap_secret = self.session_token()
+        except ControllerError:
+            return False
+        return self.browser_auth.session_is_current(
+            session_secret,
+            bootstrap_secret,
+        )
 
     @staticmethod
     def request_id(candidate: str | None = None) -> str:
@@ -673,6 +665,8 @@ class ControllerService:
                 "csrf_challenges": True,
                 "idempotent_mutations": True,
                 "websocket_events": True,
+                "browser_session_lifecycle": self.browser_auth.readiness()[0],
+                "operator_login": self.browser_auth.readiness()[0],
                 "hermesfile_builds": False,
                 "console": False,
             },

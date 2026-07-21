@@ -379,11 +379,7 @@ class WebSocketSession:
             pass
 
     def _session_is_current(self) -> bool:
-        try:
-            current = self.service.session_token()
-        except ControllerError:
-            return False
-        return hmac.compare_digest(current, self.authenticated_session)
+        return self.service.session_is_current(self.authenticated_session)
 
     @staticmethod
     def _frame_from_queue(pump: _FramePump, timeout: float) -> ClientFrame | None:

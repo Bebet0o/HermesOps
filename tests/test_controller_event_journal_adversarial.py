@@ -353,8 +353,10 @@ class EventJournalAdversarialTest(unittest.TestCase):
             )
             self.assertIn("Migration 015: applied", first.stdout)
             self.assertIn("Migration 016: applied", first.stdout)
+            self.assertIn("Migration 017: applied", first.stdout)
             self.assertIn("Migration 015: already applied", second.stdout)
             self.assertIn("Migration 016: already applied", second.stdout)
+            self.assertIn("Migration 017: already applied", second.stdout)
             database = root / "state" / "controller" / "hermesops.db"
             verify = sqlite3.connect(database)
             try:
@@ -364,8 +366,11 @@ class EventJournalAdversarialTest(unittest.TestCase):
                         "SELECT version FROM schema_migrations ORDER BY version"
                     )
                 ]
-                self.assertEqual(all_versions, list(range(1, 17)))
-                self.assertEqual(verify.execute("PRAGMA user_version").fetchone()[0], 16)
+                self.assertEqual(all_versions, list(range(1, 18)))
+                self.assertEqual(
+                    verify.execute("PRAGMA user_version").fetchone()[0],
+                    17,
+                )
             finally:
                 verify.close()
 

@@ -58,6 +58,8 @@ static_validation() {
   tests/test_controller_websocket_transport.py \
   tests/test-controller-websocket-adversarial.sh \
   tests/test_controller_websocket_transport_adversarial.py \
+  tests/test-controller-browser-auth.sh \
+  tests/test_controller_browser_auth.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -71,6 +73,8 @@ static_validation() {
         scripts/hermesops-controller-session.py \
         scripts/hermesops-controller-probe.py \
         scripts/hermesops-controller-websocket-probe.py \
+        scripts/hermesops-controller-operator.py \
+        scripts/hermesops-controller-browser-auth-probe.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -84,11 +88,14 @@ static_validation() {
   controller_api/event_journal.py \
   controller_api/websocket_transport.py \
   controller_api/websocket_probe.py \
+  controller_api/browser_auth.py \
+  controller_api/browser_auth_probe.py \
         migrations/012_controller_command_foundation.sql \
         migrations/013_controller_review_commands.sql \
   migrations/014_controller_review_command_hardening.sql \
   migrations/015_controller_event_journal.sql \
   migrations/016_controller_event_journal_hardening.sql \
+  migrations/017_browser_session_lifecycle.sql \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
@@ -191,6 +198,7 @@ PY
   "${REPO}/tests/test-controller-event-journal-adversarial.sh"
   "${REPO}/tests/test-controller-websocket-transport.sh"
   "${REPO}/tests/test-controller-websocket-adversarial.sh"
+  "${REPO}/tests/test-controller-browser-auth.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"

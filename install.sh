@@ -530,6 +530,8 @@ PY
 
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-db.py" migrate
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-db.py" integrity
+    user_run env HERMESOPS_ROOT="$ROOT" \
+    "${REPO}/scripts/hermesops-controller-operator.py" ensure
     user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/scripts/hermesops-roles.py" sync
 
     if [[ -f "${ROOT}/state/hermes-home/auth.json" ]]; then
