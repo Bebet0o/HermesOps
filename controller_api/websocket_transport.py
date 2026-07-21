@@ -23,7 +23,10 @@ WEBSOCKET_PATH = "/api/v1/events"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_CLIENT_FRAME_BYTES = 65_536
 MAX_REPLAY_BATCH = 100
+MAX_REPLAY_WINDOW = 500
 MAX_INBOUND_FRAMES = 16
+MAX_SUBSCRIBE_DEPTH = 8
+MAX_SUBSCRIBE_NODES = 128
 POLL_SECONDS = 0.25
 HEARTBEAT_SECONDS = 15.0
 SUBSCRIBE_TIMEOUT_SECONDS = 5.0
@@ -71,6 +74,8 @@ def header_has_token(value: str | None, token: str) -> bool:
 
 
 def websocket_accept_value(key: str) -> str:
+    if not isinstance(key, str) or not key.isascii() or len(key) != 24:
+        raise ControllerError(400, "invalid_websocket_key", "Invalid WebSocket key")
     try:
         decoded = base64.b64decode(key, validate=True)
     except (binascii.Error, ValueError) as error:
@@ -79,7 +84,10 @@ def websocket_accept_value(key: str) -> str:
             "invalid_websocket_key",
             "Invalid WebSocket key",
         ) from error
-    if len(decoded) != 16:
+    if (
+        len(decoded) != 16
+        or base64.b64encode(decoded).decode("ascii") != key
+    ):
         raise ControllerError(400, "invalid_websocket_key", "Invalid WebSocket key")
     digest = hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
     return base64.b64encode(digest).decode("ascii")
@@ -157,8 +165,20 @@ def read_client_frame(
     for index in range(payload_length):
         payload[index] ^= mask[index % 4]
 
-    if opcode == 0x8 and payload_length == 1:
-        raise WebSocketProtocolError(1002, "invalid close payload")
+    if opcode == 0x8:
+        if payload_length == 1:
+            raise WebSocketProtocolError(1002, "invalid close payload")
+        if payload_length >= 2:
+            close_code = struct.unpack("!H", payload[:2])[0]
+            if not (
+                close_code in {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011}
+                or 3000 <= close_code <= 4999
+            ):
+                raise WebSocketProtocolError(1002, "invalid close code")
+            try:
+                payload[2:].decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise WebSocketProtocolError(1007, "invalid close reason") from error
     return ClientFrame(opcode=opcode, payload=bytes(payload))
 
 
@@ -210,8 +230,19 @@ def _strict_json_object(raw: bytes) -> dict[str, Any]:
             object_pairs_hook=object_pairs,
             parse_constant=reject_constant,
         )
-    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
         raise WebSocketProtocolError(1007, "invalid JSON text") from error
+    nodes = 0
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if depth > MAX_SUBSCRIBE_DEPTH or nodes > MAX_SUBSCRIBE_NODES:
+            raise WebSocketProtocolError(1008, "subscription structure exceeds limits")
+        if isinstance(current, dict):
+            stack.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, list):
+            stack.extend((item, depth + 1) for item in current)
     if not isinstance(value, dict):
         raise WebSocketProtocolError(1008, "subscription must be an object")
     return value
@@ -395,6 +426,7 @@ class WebSocketSession:
         unavailable = (
             after_sequence > latest
             or (oldest is not None and after_sequence < oldest - 1)
+            or latest - after_sequence > MAX_REPLAY_WINDOW
         )
         return oldest, latest, unavailable
 
@@ -408,38 +440,34 @@ class WebSocketSession:
             }
         )
 
-    def _drain_events(
+    def _drain_event_batch(
         self,
         *,
         cursor: int,
         aggregate_types: frozenset[str],
     ) -> int:
-        while True:
-            with closing(self.service.database.connect()) as connection:
-                events = EventJournal.read_after(
-                    connection,
-                    after_sequence=cursor,
-                    limit=MAX_REPLAY_BATCH,
+        with closing(self.service.database.connect()) as connection:
+            events = EventJournal.read_after(
+                connection,
+                after_sequence=cursor,
+                limit=MAX_REPLAY_BATCH,
+            )
+        for event in events:
+            sequence = int(event["sequence"])
+            if sequence <= cursor:
+                raise ControllerError(
+                    503,
+                    "event_stream_order_invalid",
+                    "Event stream ordering is invalid",
                 )
-            if not events:
-                return cursor
-            for event in events:
-                sequence = int(event["sequence"])
-                if sequence <= cursor:
-                    raise ControllerError(
-                        503,
-                        "event_stream_order_invalid",
-                        "Event stream ordering is invalid",
-                    )
-                cursor = sequence
-                aggregate = event.get("aggregate")
-                aggregate_type = (
-                    aggregate.get("type") if isinstance(aggregate, dict) else None
-                )
-                if aggregate_type in aggregate_types:
-                    self.send_json(event)
-            if len(events) < MAX_REPLAY_BATCH:
-                return cursor
+            cursor = sequence
+            aggregate = event.get("aggregate")
+            aggregate_type = (
+                aggregate.get("type") if isinstance(aggregate, dict) else None
+            )
+            if aggregate_type in aggregate_types:
+                self.send_json(event)
+        return cursor
 
     def run(self) -> None:
         self.connection.settimeout(None)
@@ -476,7 +504,13 @@ class WebSocketSession:
                     self.send_close(1008, "session invalidated")
                     return
 
-                cursor = self._drain_events(
+                oldest, latest, unavailable = self._replay_bounds(cursor)
+                if unavailable:
+                    self._send_replay_unavailable(oldest, latest)
+                    self.send_close(1000, "snapshot refresh required")
+                    return
+
+                cursor = self._drain_event_batch(
                     cursor=cursor,
                     aggregate_types=aggregate_types,
                 )
@@ -502,7 +536,13 @@ class WebSocketSession:
                 if frame is None:
                     return
                 if frame.opcode == 0x8:
-                    self.send_close(1000)
+                    if self._close_sent:
+                        return
+                    self._close_sent = True
+                    try:
+                        self._send_bytes(encode_server_frame(0x8, frame.payload))
+                    except (OSError, TimeoutError, ConnectionError):
+                        pass
                     return
                 if frame.opcode == 0x9:
                     self.send_pong(frame.payload)

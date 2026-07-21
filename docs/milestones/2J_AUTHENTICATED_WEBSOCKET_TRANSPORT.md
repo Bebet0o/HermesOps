@@ -67,3 +67,13 @@ the client must refresh authoritative HTTP snapshots before reconnecting.
 
 The WebSocket transport is not an authoritative state store. HTTP snapshots and
 Controller command responses remain authoritative.
+
+## Adversarial hardening
+
+The final review reserves normal HTTP request capacity while WebSocket sessions
+are open, redacts all query values from HTTP access logs, requires HTTP/1.1 for
+RFC 6455 upgrades, and validates close codes and UTF-8 close reasons. Replay is
+limited to 500 global journal events; clients outside that window receive
+`replay_unavailable` and must refresh authoritative HTTP snapshots. Replay work
+is yielded between batches so session rotation, heartbeats, pings, and close
+frames remain responsive under sustained event load.

@@ -50,6 +50,7 @@ class ControllerHTTPServer(ThreadingHTTPServer):
         self._websocket_slots = threading.BoundedSemaphore(
             service.settings.max_websocket_connections
         )
+        self._request_slot_state = threading.local()
         super().__init__(server_address, ControllerRequestHandler)
 
     def acquire_websocket_slot(self) -> bool:
@@ -57,6 +58,12 @@ class ControllerHTTPServer(ThreadingHTTPServer):
 
     def release_websocket_slot(self) -> None:
         self._websocket_slots.release()
+
+    def release_request_slot_for_websocket(self) -> None:
+        if getattr(self._request_slot_state, "released", False):
+            raise RuntimeError("request slot already released")
+        self._request_slots.release()
+        self._request_slot_state.released = True
 
     def get_request(self) -> tuple[socket.socket, Any]:
         request, client_address = super().get_request()
@@ -93,10 +100,13 @@ class ControllerHTTPServer(ThreadingHTTPServer):
         request: socket.socket,
         client_address: Any,
     ) -> None:
+        self._request_slot_state.released = False
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._request_slots.release()
+            if not self._request_slot_state.released:
+                self._request_slots.release()
+            self._request_slot_state.__dict__.clear()
 
 
 class ControllerRequestHandler(BaseHTTPRequestHandler):
@@ -110,12 +120,23 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _safe_log(value: str) -> str:
-        return "".join(
+        sanitized = "".join(
             character
             if character.isprintable() and character not in "\r\n"
             else "?"
             for character in value
         )
+        request_line = re.match(
+            r'^(\"[A-Z]+ [^ ?\"]+)\?[^ \"]* (HTTP/[0-9.]+\".*)$',
+            sanitized,
+        )
+        if request_line is not None:
+            return (
+                request_line.group(1)
+                + "?[query-redacted] "
+                + request_line.group(2)
+            )
+        return sanitized
 
     def log_message(self, format_string: str, *args: object) -> None:
         LOGGER.info(
@@ -1020,6 +1041,12 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self._validate_host()
             self._validate_request_target()
             self._reject_request_body()
+            if self.request_version != "HTTP/1.1":
+                raise ControllerError(
+                    400,
+                    "invalid_websocket_http_version",
+                    "WebSocket upgrade requires HTTP/1.1",
+                )
             parsed = urlsplit(self.path)
             if parsed.path != WEBSOCKET_PATH:
                 raise ControllerError(404, "route_not_found", "Route not found")
@@ -1085,6 +1112,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     "WebSocket capacity exhausted",
                 )
             slot_acquired = True
+            self.controller.release_request_slot_for_websocket()
             self.close_connection = True
             self.send_response(101, "Switching Protocols")
             self.send_header("Upgrade", "websocket")

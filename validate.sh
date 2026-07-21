@@ -56,6 +56,8 @@ static_validation() {
   tests/test_controller_event_journal_adversarial.py \
   tests/test-controller-websocket-transport.sh \
   tests/test_controller_websocket_transport.py \
+  tests/test-controller-websocket-adversarial.sh \
+  tests/test_controller_websocket_transport_adversarial.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -188,6 +190,7 @@ PY
   "${REPO}/tests/test-controller-event-journal.sh"
   "${REPO}/tests/test-controller-event-journal-adversarial.sh"
   "${REPO}/tests/test-controller-websocket-transport.sh"
+  "${REPO}/tests/test-controller-websocket-adversarial.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"
