@@ -12,6 +12,13 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import SERVICE_NAME
 from .core import ControllerError, ControllerService, Settings
+from .websocket_transport import (
+    WEBSOCKET_PATH,
+    WebSocketSession,
+    header_has_token,
+    parse_last_event_sequence,
+    websocket_accept_value,
+)
 
 LOGGER = logging.getLogger(SERVICE_NAME)
 MAX_REQUEST_TARGET_BYTES = 4096
@@ -40,7 +47,23 @@ class ControllerHTTPServer(ThreadingHTTPServer):
         self._request_slots = threading.BoundedSemaphore(
             service.settings.max_concurrent_requests
         )
+        self._websocket_slots = threading.BoundedSemaphore(
+            service.settings.max_websocket_connections
+        )
+        self._request_slot_state = threading.local()
         super().__init__(server_address, ControllerRequestHandler)
+
+    def acquire_websocket_slot(self) -> bool:
+        return self._websocket_slots.acquire(blocking=False)
+
+    def release_websocket_slot(self) -> None:
+        self._websocket_slots.release()
+
+    def release_request_slot_for_websocket(self) -> None:
+        if getattr(self._request_slot_state, "released", False):
+            raise RuntimeError("request slot already released")
+        self._request_slots.release()
+        self._request_slot_state.released = True
 
     def get_request(self) -> tuple[socket.socket, Any]:
         request, client_address = super().get_request()
@@ -77,10 +100,13 @@ class ControllerHTTPServer(ThreadingHTTPServer):
         request: socket.socket,
         client_address: Any,
     ) -> None:
+        self._request_slot_state.released = False
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self._request_slots.release()
+            if not self._request_slot_state.released:
+                self._request_slots.release()
+            self._request_slot_state.__dict__.clear()
 
 
 class ControllerRequestHandler(BaseHTTPRequestHandler):
@@ -94,12 +120,23 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _safe_log(value: str) -> str:
-        return "".join(
+        sanitized = "".join(
             character
             if character.isprintable() and character not in "\r\n"
             else "?"
             for character in value
         )
+        request_line = re.match(
+            r'^(\"[A-Z]+ [^ ?\"]+)\?[^ \"]* (HTTP/[0-9.]+\".*)$',
+            sanitized,
+        )
+        if request_line is not None:
+            return (
+                request_line.group(1)
+                + "?[query-redacted] "
+                + request_line.group(2)
+            )
+        return sanitized
 
     def log_message(self, format_string: str, *args: object) -> None:
         LOGGER.info(
@@ -177,6 +214,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         *,
         head_only: bool = False,
         close_connection: bool = False,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._send_json(
             error.status,
@@ -185,6 +223,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             content_type="application/problem+json",
             head_only=head_only,
             close_connection=close_connection,
+            extra_headers=extra_headers,
         )
 
     def _single_header(
@@ -995,6 +1034,127 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 close_connection=True,
             )
 
+    def _handle_websocket(self) -> None:
+        request_id = self._request_id()
+        slot_acquired = False
+        try:
+            self._validate_host()
+            self._validate_request_target()
+            self._reject_request_body()
+            if self.request_version != "HTTP/1.1":
+                raise ControllerError(
+                    400,
+                    "invalid_websocket_http_version",
+                    "WebSocket upgrade requires HTTP/1.1",
+                )
+            parsed = urlsplit(self.path)
+            if parsed.path != WEBSOCKET_PATH:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            if parsed.query or parsed.fragment:
+                raise ControllerError(
+                    400,
+                    "websocket_query_forbidden",
+                    "WebSocket query parameters are forbidden",
+                    "Credentials and replay cursors must not be sent in the WebSocket URL.",
+                )
+            if not header_has_token(self._single_header("Upgrade"), "websocket"):
+                raise ControllerError(
+                    426,
+                    "websocket_upgrade_required",
+                    "WebSocket upgrade required",
+                )
+            if not header_has_token(self._single_header("Connection"), "upgrade"):
+                raise ControllerError(
+                    400,
+                    "invalid_websocket_connection",
+                    "Invalid WebSocket Connection header",
+                )
+            version = self._single_header("Sec-WebSocket-Version", required=True)
+            if version is None or version.strip() != "13":
+                raise ControllerError(
+                    426,
+                    "websocket_version_unsupported",
+                    "Unsupported WebSocket version",
+                )
+            if self._single_header("Sec-WebSocket-Extensions") is not None:
+                raise ControllerError(
+                    400,
+                    "websocket_extensions_unsupported",
+                    "WebSocket extensions are unsupported",
+                )
+            if self._single_header("Sec-WebSocket-Protocol") is not None:
+                raise ControllerError(
+                    400,
+                    "websocket_subprotocol_unsupported",
+                    "WebSocket subprotocols are unsupported",
+                )
+            origin = self._single_header("Origin", required=True)
+            if origin != self.controller.service.settings.console_origin:
+                raise ControllerError(
+                    403,
+                    "websocket_origin_forbidden",
+                    "Forbidden WebSocket origin",
+                )
+            authenticated_session = self.controller.service.authenticate(
+                self._single_header("Cookie")
+            )
+            key = self._single_header("Sec-WebSocket-Key", required=True)
+            if key is None:
+                raise ControllerError(400, "invalid_websocket_key", "Invalid WebSocket key")
+            accept = websocket_accept_value(key.strip())
+            initial_after_sequence = parse_last_event_sequence(
+                self._single_header("Last-Event-Sequence")
+            )
+            if not self.controller.acquire_websocket_slot():
+                raise ControllerError(
+                    503,
+                    "websocket_capacity_exhausted",
+                    "WebSocket capacity exhausted",
+                )
+            slot_acquired = True
+            self.controller.release_request_slot_for_websocket()
+            self.close_connection = True
+            self.send_response(101, "Switching Protocols")
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            self.send_header("Sec-WebSocket-Accept", accept)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Request-ID", request_id)
+            for name, value in self._security_headers().items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.flush()
+            WebSocketSession(
+                connection=self.connection,
+                stream=self.rfile,
+                service=self.controller.service,
+                authenticated_session=authenticated_session,
+                initial_after_sequence=initial_after_sequence,
+            ).run()
+        except ControllerError as error:
+            extra_headers = (
+                {"Sec-WebSocket-Version": "13"}
+                if error.status == 426
+                else None
+            )
+            self._problem(
+                error,
+                request_id,
+                close_connection=True,
+                extra_headers=extra_headers,
+            )
+        except Exception:
+            LOGGER.exception("Unhandled Controller WebSocket handshake failure")
+            self._problem(
+                ControllerError(500, "internal_error", "Internal server error"),
+                request_id,
+                close_connection=True,
+            )
+        finally:
+            if slot_acquired:
+                self.controller.release_websocket_slot()
+
     def _handle_get(self, *, head_only: bool = False) -> None:
         request_id = self._request_id()
         try:
@@ -1060,6 +1220,9 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
 
     def do_GET(self) -> None:
+        if self.path.split("?", 1)[0] == WEBSOCKET_PATH:
+            self._handle_websocket()
+            return
         self._handle_get()
 
     def do_HEAD(self) -> None:

@@ -638,7 +638,7 @@ class ControllerAPITest(unittest.TestCase):
         features = payload["data"]["features"]
         self.assertFalse(features["read_only_controller_api"])
         self.assertFalse(features["project_writes"])
-        self.assertFalse(features["websocket_events"])
+        self.assertTrue(features["websocket_events"])
         self.assertFalse(features["hermesfile_builds"])
 
 
