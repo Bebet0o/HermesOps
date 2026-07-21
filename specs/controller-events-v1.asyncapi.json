@@ -2,7 +2,7 @@
   "asyncapi": "3.0.0",
   "info": {
     "title": "HermesOps Controller Events",
-    "version": "1.0.0-design-rc1",
+    "version": "1.0.0-rc1",
     "description": "Authenticated replayable WebSocket contract for HermesOps Console.",
     "license": {
       "name": "Apache-2.0"
@@ -15,7 +15,7 @@
       "protocol": "ws",
       "variables": {
         "port": {
-          "default": "8080"
+          "default": "8765"
         }
       },
       "security": [
@@ -93,9 +93,25 @@
               "type": "array",
               "uniqueItems": true,
               "items": {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "all",
+                  "system",
+                  "projects",
+                  "objectives",
+                  "tasks",
+                  "runs",
+                  "reviews",
+                  "recoveries",
+                  "sandboxes",
+                  "backups",
+                  "notifications",
+                  "confirmations",
+                  "audit"
+                ]
               },
-              "maxItems": 64
+              "maxItems": 64,
+              "description": "Empty means all topics. The value 'all' must be used alone."
             }
           }
         }
@@ -130,6 +146,29 @@
                 "latest_sequence": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "topics": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "system",
+                      "projects",
+                      "objectives",
+                      "tasks",
+                      "runs",
+                      "reviews",
+                      "recoveries",
+                      "sandboxes",
+                      "backups",
+                      "notifications",
+                      "confirmations",
+                      "audit"
+                    ]
+                  },
+                  "uniqueItems": true,
+                  "maxItems": 64
                 }
               }
             },

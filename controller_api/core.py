@@ -13,6 +13,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import API_VERSION, SERVICE_NAME
 
@@ -52,6 +53,8 @@ class Settings:
     port: int = 8765
     socket_timeout_seconds: float = 10.0
     max_concurrent_requests: int = 32
+    console_origin: str = "http://127.0.0.1:8787"
+    max_websocket_connections: int = 8
 
     @classmethod
     def from_root(
@@ -64,6 +67,8 @@ class Settings:
         session_file: Path | None = None,
         socket_timeout_seconds: float = 10.0,
         max_concurrent_requests: int = 32,
+        console_origin: str = "http://127.0.0.1:8787",
+        max_websocket_connections: int | None = None,
     ) -> "Settings":
         resolved_root = root.resolve(strict=False)
         return cls(
@@ -83,6 +88,12 @@ class Settings:
             port=port,
             socket_timeout_seconds=socket_timeout_seconds,
             max_concurrent_requests=max_concurrent_requests,
+            console_origin=console_origin,
+            max_websocket_connections=(
+                min(8, max_concurrent_requests)
+                if max_websocket_connections is None
+                else max_websocket_connections
+            ),
         )
 
     @classmethod
@@ -99,12 +110,29 @@ class Settings:
         session_file = os.environ.get(
             "HERMESOPS_CONTROLLER_SESSION_FILE"
         )
+        console_origin = os.environ.get(
+            "HERMESOPS_CONTROLLER_CONSOLE_ORIGIN",
+            "http://127.0.0.1:8787",
+        )
+        raw_websocket_limit = os.environ.get(
+            "HERMESOPS_CONTROLLER_MAX_WEBSOCKETS"
+        )
+        try:
+            websocket_limit = (
+                int(raw_websocket_limit)
+                if raw_websocket_limit is not None
+                else None
+            )
+        except ValueError:
+            websocket_limit = 0
         return cls.from_root(
             root,
             host=host,
             port=port,
             database=Path(database) if database else None,
             session_file=Path(session_file) if session_file else None,
+            console_origin=console_origin,
+            max_websocket_connections=websocket_limit,
         )
 
     def validate_bind(self) -> None:
@@ -144,6 +172,40 @@ class Settings:
                 "invalid_concurrency_limit",
                 "Invalid concurrency limit",
                 "Maximum concurrent requests must be between 1 and 256.",
+            )
+        if (
+            not 1 <= self.max_websocket_connections <= 64
+            or self.max_websocket_connections > self.max_concurrent_requests
+        ):
+            raise ControllerError(
+                400,
+                "invalid_websocket_limit",
+                "Invalid WebSocket connection limit",
+                "WebSocket connections must be between 1 and 64 and no greater than the request limit.",
+            )
+        parsed_origin = urlsplit(self.console_origin)
+        try:
+            parsed_origin.port
+            origin_port_valid = True
+        except ValueError:
+            origin_port_valid = False
+        if (
+            not origin_port_valid
+            or parsed_origin.scheme not in {"http", "https"}
+            or parsed_origin.hostname is None
+            or parsed_origin.username is not None
+            or parsed_origin.password is not None
+            or parsed_origin.path
+            or parsed_origin.query
+            or parsed_origin.fragment
+            or self.console_origin
+            != f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+        ):
+            raise ControllerError(
+                400,
+                "invalid_console_origin",
+                "Invalid Console origin",
+                "Console origin must be one canonical HTTP or HTTPS origin without credentials or a path.",
             )
 
 
@@ -610,7 +672,7 @@ class ControllerService:
                 "review_write_if_match": False,
                 "csrf_challenges": True,
                 "idempotent_mutations": True,
-                "websocket_events": False,
+                "websocket_events": True,
                 "hermesfile_builds": False,
                 "console": False,
             },

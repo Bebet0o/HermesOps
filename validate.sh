@@ -54,6 +54,8 @@ static_validation() {
   tests/test_controller_event_journal.py \
   tests/test-controller-event-journal-adversarial.sh \
   tests/test_controller_event_journal_adversarial.py \
+  tests/test-controller-websocket-transport.sh \
+  tests/test_controller_websocket_transport.py \
         tests/test-controller-service-contract.sh \
         tests/test-controller-service-lifecycle.sh \
         tests/test-controller-service-persistence.sh \
@@ -66,6 +68,7 @@ static_validation() {
         scripts/hermesops-controller-review-command-probe.py \
         scripts/hermesops-controller-session.py \
         scripts/hermesops-controller-probe.py \
+        scripts/hermesops-controller-websocket-probe.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -77,6 +80,8 @@ static_validation() {
         controller_api/review_commands.py \
         controller_api/review_command_probe.py \
   controller_api/event_journal.py \
+  controller_api/websocket_transport.py \
+  controller_api/websocket_probe.py \
         migrations/012_controller_command_foundation.sql \
         migrations/013_controller_review_commands.sql \
   migrations/014_controller_review_command_hardening.sql \
@@ -88,6 +93,7 @@ static_validation() {
         docs/milestones/2G_SECURE_OBJECTIVE_COMMANDS.md \
         docs/milestones/2H_HUMAN_REVIEW_COMMANDS.md \
   docs/milestones/2I_CONTROLLER_EVENT_JOURNAL.md \
+  docs/milestones/2J_AUTHENTICATED_WEBSOCKET_TRANSPORT.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -181,6 +187,7 @@ PY
     "${REPO}/tests/test-controller-review-commands.sh"
   "${REPO}/tests/test-controller-event-journal.sh"
   "${REPO}/tests/test-controller-event-journal-adversarial.sh"
+  "${REPO}/tests/test-controller-websocket-transport.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
     TMP="$(mktemp -d)"

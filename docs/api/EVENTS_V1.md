@@ -186,7 +186,7 @@ The server sends a protocol heartbeat at least every 30 seconds:
 ```json
 {
   "type": "heartbeat",
-  "server_time": "2026-07-18T19:15:00Z",
+  "occurred_at": "2026-07-18T19:15:00Z",
   "latest_sequence": 1902
 }
 ```
@@ -517,3 +517,12 @@ Use snapshot refresh and restart from the new snapshot sequence.
 - malformed client protocol messages close the connection with an auditable
   reason;
 - the browser cannot request arbitrary database event tables.
+
+## Implemented local transport
+
+HermesOps 2J implements this contract at `ws://127.0.0.1:8765/api/v1/events`
+using only the Python standard library. The handshake requires the Controller
+session cookie and the exact configured Console origin. Credentials and replay
+cursors are forbidden in the URL. `Last-Event-Sequence` may start an immediate
+all-topic subscription; otherwise the first client text frame must be the
+normative `subscribe` object. Session rotation closes existing streams.

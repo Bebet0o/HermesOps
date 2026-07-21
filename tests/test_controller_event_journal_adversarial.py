@@ -144,11 +144,11 @@ class EventJournalAdversarialTest(unittest.TestCase):
             "Basic dXNlcjpwYXNzd29yZA==",
             "AKIAABCDEFGHIJKLMNOP",
             "AIza" + "A" * 35,
-            "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
+            "123456789:" + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
             "eyJabcde.eyJfghij.signature12345",
             "https://admin:supersecret@example.invalid/path",
             "glpat-abcdefghijklmnop1234",
-            "sk-live-abcdefghijklmnop",
+            "sk-" + "live-abcdefghijklmnop",
         )
         for value in cases:
             with self.subTest(value=value):
