@@ -45,7 +45,7 @@ then
     exit 1
 fi
 
-for table in runs project_locks tasks review_results reviewer_executions
+for table in runs project_locks tasks review_results reviewer_executions reviewer_assignments
 do
     [[ "$(
         sqlite3 "$DB" \
@@ -157,10 +157,17 @@ BAD_EXECUTIONS="$(
          WHERE workspace_mode <> 'read_only'
             OR network_enabled <> 0
             OR (finished_at IS NOT NULL
+                AND failure_reason IS NULL
                 AND (
                     mount_verified <> 1
                     OR isolation_verified <> 1
                     OR repository_unchanged <> 1
+                ))
+            OR (failure_reason IS NOT NULL
+                AND (
+                    review_id IS NOT NULL
+                    OR decision IS NOT NULL
+                    OR verdict IS NOT NULL
                 ));"
 )"
 

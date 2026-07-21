@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NoReturn
+import hermesops_review_assignment as ASSIGNMENTS
 
 
 ROOT = Path(
@@ -1586,27 +1587,48 @@ def launch_reviewer_with_transport_retry(
     failures: list[dict[str, Any]] = []
     attempts = config["review_transport_attempts"]
 
-    arguments = [
-        str(REVIEWER),
-        "launch",
-        "--run",
-        run_id,
-        "--role",
-        "reviewer",
-        "--instruction-file",
-        str(review_path),
-        "--marker",
-        marker,
-        "--timeout",
-        str(config["review_timeout_seconds"]),
-    ]
-
     for review_attempt in range(1, attempts + 1):
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assignment_number = ASSIGNMENTS.next_assignment_number(
+                connection,
+                run_id=run_id,
+            )
+            assignment = ASSIGNMENTS.create_assignment(
+                connection,
+                run_id=run_id,
+                orchestration_attempt_id=attempt_id,
+                assignment_number=assignment_number,
+                role_id="reviewer",
+                assigned_by=f"orchestrator:{attempt_id}",
+            )
+            connection.commit()
+
+        assignment_id = str(assignment["assignment_id"])
+        arguments = [
+            str(REVIEWER),
+            "launch",
+            "--run",
+            run_id,
+            "--role",
+            "reviewer",
+            "--assignment",
+            assignment_id,
+            "--instruction-file",
+            str(review_path),
+            "--marker",
+            marker,
+            "--timeout",
+            str(config["review_timeout_seconds"]),
+        ]
+
         try:
             reviewer = run_json(
                 arguments,
                 timeout=config["review_timeout_seconds"] + 120,
             )
+            if reviewer.get("assignment_id") != assignment_id:
+                fail("Reviewer returned a mismatched assignment identifier")
             evidence = latest_reviewer_evidence(run_id)
             cleanup_actions = cleanup_reviewer_resources(
                 evidence,
@@ -1614,10 +1636,22 @@ def launch_reviewer_with_transport_retry(
             )
             return reviewer, failures, cleanup_actions
         except CommandExecutionError as error:
+            with connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                ASSIGNMENTS.fail_active_assignment(
+                    connection,
+                    assignment_id=assignment_id,
+                    actor_id=f"orchestrator:{attempt_id}",
+                    failure_code="REVIEW_TRANSPORT_FAILED",
+                )
+                connection.commit()
+
             evidence = latest_reviewer_evidence(run_id)
             transient = is_transient_review_transport_failure(error, evidence)
             failure = {
                 "review_attempt": review_attempt,
+                "assignment_id": assignment_id,
+                "assignment_number": assignment_number,
                 "transient": transient,
                 "command_returncode": error.returncode,
                 "command_stderr": error.stderr.strip(),
@@ -1656,6 +1690,17 @@ def launch_reviewer_with_transport_retry(
             time.sleep(
                 config["review_retry_backoff_seconds"] * review_attempt
             )
+        except Exception:
+            with connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                ASSIGNMENTS.fail_active_assignment(
+                    connection,
+                    assignment_id=assignment_id,
+                    actor_id=f"orchestrator:{attempt_id}",
+                    failure_code="REVIEW_LAUNCH_FAILED",
+                )
+                connection.commit()
+            raise
 
     fail("Reviewer transport retry loop exited unexpectedly")
 

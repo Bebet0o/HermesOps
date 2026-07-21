@@ -42,3 +42,11 @@ column. The live Controller schema is checked before task reservation.
 The inherited controlled-worker foundation test is schema-version agnostic.
 This allows later migrations to coexist with the already validated 3B worker
 without weakening any worker isolation or execution checks.
+
+## Durable reviewer assignments
+
+Before every controlled reviewer transport attempt, the orchestrator creates a
+`reviewer_assignments` row. The reviewer claims it atomically with its task and
+execution reservation. A successful verdict completes it; a bounded execution
+or transport failure marks it failed; Recovery closes abandoned active rows.
+Historical executions created before migration 019 are not backfilled.

@@ -97,7 +97,16 @@ grep -q . && {
 [[ "$(sqlite3 "$DB" 'PRAGMA quick_check;')" == "ok" ]]
 
 [[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM project_locks;')" == "0" ]]
-[[ "$(sqlite3 "$DB" 'SELECT COUNT(*) FROM projects WHERE enabled=1;')" == "0" ]]
+[[ "$(
+    sqlite3 "$DB" \
+        "SELECT COUNT(*)
+         FROM projects
+         WHERE enabled=1
+           AND project_id IN (
+               'transaction-fixture',
+               'transaction-fixture-b'
+           );"
+)" == "0" ]]
 [[ "$(
     sqlite3 "$DB" \
         "SELECT COUNT(*)

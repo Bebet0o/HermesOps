@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import yaml
+import hermesops_review_assignment as ASSIGNMENTS
 
 
 ROOT = Path(
@@ -546,6 +547,7 @@ def reserve_review(
     task_id: str,
     execution_id: str,
     review_id: str,
+    assignment_id: str,
     instruction: str,
     marker: str,
     runtime_profile: str,
@@ -606,6 +608,7 @@ def reserve_review(
                     {
                         "expected_marker": marker,
                         "review_id": review_id,
+                        "assignment_id": assignment_id,
                         "runtime_profile": runtime_profile,
                     },
                     sort_keys=True,
@@ -669,6 +672,16 @@ def reserve_review(
             ),
         )
 
+        ASSIGNMENTS.claim_assignment(
+            connection,
+            assignment_id=assignment_id,
+            run_id=current["run_id"],
+            role_id=str(role["role_id"]),
+            source_profile=str(role["profile_name"]),
+            review_execution_id=execution_id,
+            task_id=task_id,
+        )
+
         connection.execute(
             """
             INSERT INTO events (
@@ -691,6 +704,7 @@ def reserve_review(
                     {
                         "execution_id": execution_id,
                         "review_id": review_id,
+                        "assignment_id": assignment_id,
                         "role_id": role["role_id"],
                         "runtime_profile": runtime_profile,
                     },
@@ -1265,6 +1279,7 @@ def finish_review(
     task_id: str,
     execution_id: str,
     review_id: str,
+    assignment_id: str,
     success: bool,
     exit_code: int | None,
     sandbox_id: str | None,
@@ -1286,6 +1301,7 @@ def finish_review(
                 "checks": review["checks"],
                 "execution_id": execution_id,
                 "task_id": task_id,
+                "assignment_id": assignment_id,
                 "sandbox_audit": audit,
                 "repository_unchanged": repository_unchanged,
             }
@@ -1360,6 +1376,17 @@ def finish_review(
             ),
         )
 
+        ASSIGNMENTS.finish_assignment(
+            connection,
+            assignment_id=assignment_id,
+            run_id=str(run["run_id"]),
+            review_execution_id=execution_id,
+            task_id=task_id,
+            success=success,
+            review_id=review_id if success else None,
+            failure_code="REVIEW_EXECUTION_FAILED",
+        )
+
         connection.execute(
             """
             INSERT INTO events (
@@ -1383,6 +1410,7 @@ def finish_review(
                     {
                         "execution_id": execution_id,
                         "review_id": review_id,
+                        "assignment_id": assignment_id,
                         "decision": (
                             review["decision"] if review else None
                         ),
@@ -1423,6 +1451,8 @@ def command_launch(arguments: argparse.Namespace) -> None:
 
     if not marker or "\n" in marker:
         fail("Marker must be one non-empty line")
+
+    assignment_id = ASSIGNMENTS.validate_assignment_id(arguments.assignment)
 
     image_id = WORKER.load_worker_image()
 
@@ -1475,6 +1505,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
         task_id=task_id,
         execution_id=execution_id,
         review_id=review_id,
+        assignment_id=assignment_id,
         instruction=instruction,
         marker=marker,
         runtime_profile=runtime_profile,
@@ -1651,6 +1682,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
             "task_id": task_id,
             "execution_id": execution_id,
             "review_id": review_id,
+            "assignment_id": assignment_id,
             "run_id": run["run_id"],
             "role_id": role["role_id"],
             "source_profile": role["profile_name"],
@@ -1724,6 +1756,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
             task_id=task_id,
             execution_id=execution_id,
             review_id=review_id,
+            assignment_id=assignment_id,
             success=success,
             exit_code=exit_code,
             sandbox_id=sandbox_id,
@@ -1775,6 +1808,7 @@ def main() -> None:
     launch = subparsers.add_parser("launch")
     launch.add_argument("--run", required=True)
     launch.add_argument("--role", required=True)
+    launch.add_argument("--assignment", required=True)
     launch.add_argument("--instruction-file", required=True)
     launch.add_argument("--marker", required=True)
     launch.add_argument("--timeout", type=int, default=900)
@@ -1788,6 +1822,9 @@ def main() -> None:
 
     try:
         arguments.function(arguments)
+    except ASSIGNMENTS.ReviewerAssignmentError as error:
+        print(f"Reviewer assignment error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
     except ReviewerError as error:
         print(f"Reviewer error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
