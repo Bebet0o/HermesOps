@@ -39,6 +39,7 @@ bash -n \
 
 for marker in \
     'ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-session.py check' \
+    'ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-operator.py ensure' \
     'ExecStart=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-api.py serve --host 127.0.0.1 --port 8765 --log-level INFO' \
     'ExecStartPost=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-probe.py --base-url http://127.0.0.1:8765 --wait-seconds 20' \
     'Restart=on-failure' \
@@ -85,6 +86,7 @@ fi
 
 for marker in \
     '"${REPO}/scripts/hermesops-controller-session.py" ensure' \
+    '"${REPO}/scripts/hermesops-controller-operator.py" ensure' \
     'hermesops-controller-api.service' \
     'user_run systemctl --user restart hermesops-controller-api.service' \
     '"${REPO}/scripts/hermesops-controller-probe.py"'

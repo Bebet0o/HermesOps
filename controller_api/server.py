@@ -160,6 +160,38 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             "X-Frame-Options": "DENY",
         }
 
+    def _cors_headers(self) -> dict[str, str]:
+        values = self.headers.get_all("Origin", failobj=[])
+        if (
+            len(values) == 1
+            and values[0] == self.controller.service.settings.console_origin
+        ):
+            return {
+                "Access-Control-Allow-Origin": values[0],
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Origin",
+            }
+        return {}
+
+    def _validate_browser_origin(self) -> None:
+        origin = self._single_header("Origin", required=True)
+        if origin != self.controller.service.settings.console_origin:
+            raise ControllerError(403, "origin_forbidden", "Forbidden request origin")
+
+    @staticmethod
+    def _session_cookie(token: str, max_age: int) -> str:
+        return (
+            f"hermesops_session={token}; Path=/; Max-Age={max_age}; "
+            "HttpOnly; Secure; SameSite=Strict"
+        )
+
+    @staticmethod
+    def _clear_session_cookie() -> str:
+        return (
+            "hermesops_session=; Path=/; Max-Age=0; "
+            "HttpOnly; Secure; SameSite=Strict"
+        )
+
     def _send_json(
         self,
         status: int,
@@ -188,6 +220,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Request-ID", request_id)
         for name, value in self._security_headers().items():
+            self.send_header(name, value)
+        for name, value in self._cors_headers().items():
             self.send_header(name, value)
         if close_connection:
             self.send_header("Connection", "close")
@@ -381,7 +415,16 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         request_id: str,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         service = self.controller.service
-        session_token = service.authenticate(self._single_header("Cookie"))
+        authenticated = service.authenticate_context(self._single_header("Cookie"))
+        session_token = authenticated.secret
+
+        if path == "/api/v1/auth/session":
+            if query:
+                raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+            return 200, {
+                "data": service.browser_auth.session_payload(authenticated),
+                "meta": service.meta(request_id),
+            }, {}
 
         if path == "/api/v1/system/health":
             payload = {
@@ -818,6 +861,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         origin = self._single_header("Origin")
         if origin is None:
             return
+        if origin == self.controller.service.settings.console_origin:
+            return
         host = self._single_header("Host") or ""
         if origin not in {f"http://{host}", f"https://{host}"}:
             raise ControllerError(403, "origin_forbidden", "Forbidden request origin")
@@ -904,10 +949,53 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         if query:
             raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
-        self._validate_origin()
         service = self.controller.service
-        session_token = service.authenticate(self._single_header("Cookie"))
         idempotency_key = self._single_header("Idempotency-Key")
+
+        if path == "/api/v1/auth/login":
+            self._validate_browser_origin()
+            if set(body) != {"username", "password"}:
+                raise ControllerError(400, "invalid_login", "Invalid login request")
+            result = service.browser_auth.login(
+                username=body.get("username"),
+                password=body.get("password"),
+                idempotency_key=service.browser_auth.validate_idempotency_key(idempotency_key),
+                bootstrap_secret=service.session_token(),
+                source=str(self.client_address[0]),
+                user_agent=self._single_header("User-Agent") or "",
+                request_id=request_id,
+            )
+            return 200, {
+                "data": result.payload,
+                "meta": service.meta(request_id),
+            }, {"Set-Cookie": self._session_cookie(result.token, result.max_age)}
+
+        if path == "/api/v1/auth/logout":
+            self._validate_browser_origin()
+            if body:
+                raise ControllerError(400, "invalid_logout", "Invalid logout request")
+            bootstrap_secret = service.session_token()
+            authenticated = service.browser_auth.logout_context(
+                self._single_header("Cookie"),
+                bootstrap_secret,
+            )
+            service.commands.verify_csrf_token(
+                authenticated.secret,
+                self._single_header("X-CSRF-Token"),
+            )
+            payload = service.browser_auth.logout(
+                session=authenticated,
+                idempotency_key=service.browser_auth.validate_idempotency_key(idempotency_key),
+                bootstrap_secret=bootstrap_secret,
+                request_id=request_id,
+            )
+            return 200, {
+                "data": payload,
+                "meta": service.meta(request_id),
+            }, {"Set-Cookie": self._clear_session_cookie()}
+
+        self._validate_origin()
+        session_token = service.authenticate(self._single_header("Cookie"))
 
         if path == "/api/v1/auth/csrf":
             status, payload = service.commands.issue_csrf(
@@ -1005,7 +1093,12 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 and "/commands/" in path[len("/api/v1/reviews/"):]
             )
             if (
-                path not in {"/api/v1/auth/csrf", "/api/v1/objectives"}
+                path not in {
+                    "/api/v1/auth/login",
+                    "/api/v1/auth/logout",
+                    "/api/v1/auth/csrf",
+                    "/api/v1/objectives",
+                }
                 and not is_objective_command
                 and not is_review_command
             ):
@@ -1219,6 +1312,65 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 close_connection=True,
             )
 
+    def _handle_options(self) -> None:
+        request_id = self._request_id()
+        try:
+            self._validate_host()
+            self._validate_request_target()
+            self._reject_request_body()
+            parsed = urlsplit(self.path)
+            if parsed.query or parsed.fragment or not parsed.path.startswith("/api/v1/"):
+                raise ControllerError(404, "route_not_found", "Route not found")
+            self._validate_browser_origin()
+            method = self._single_header(
+                "Access-Control-Request-Method",
+                required=True,
+            )
+            if method not in {"GET", "HEAD", "POST"}:
+                raise ControllerError(405, "method_not_allowed", "Method not allowed")
+            raw_headers = self._single_header("Access-Control-Request-Headers") or ""
+            requested = {
+                value.strip().lower()
+                for value in raw_headers.split(",")
+                if value.strip()
+            }
+            allowed = {
+                "content-type",
+                "idempotency-key",
+                "x-csrf-token",
+                "x-request-id",
+            }
+            if not requested.issubset(allowed):
+                raise ControllerError(
+                    400,
+                    "cors_headers_forbidden",
+                    "CORS request headers are forbidden",
+                )
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", self.controller.service.settings.console_origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Idempotency-Key, X-CSRF-Token, X-Request-ID",
+            )
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Vary", "Origin")
+            for name, value in self._security_headers().items():
+                self.send_header(name, value)
+            self.end_headers()
+        except ControllerError as error:
+            self._problem(error, request_id, close_connection=True)
+        except Exception:
+            LOGGER.exception("Unhandled Controller CORS preflight failure")
+            self._problem(
+                ControllerError(500, "internal_error", "Internal server error"),
+                request_id,
+                close_connection=True,
+            )
+
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] == WEBSOCKET_PATH:
             self._handle_websocket()
@@ -1251,7 +1403,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
     do_PUT = _method_not_allowed
     do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed
-    do_OPTIONS = _method_not_allowed
+    do_OPTIONS = _handle_options
     do_TRACE = _method_not_allowed
     do_CONNECT = _method_not_allowed
 

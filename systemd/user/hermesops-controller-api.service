@@ -11,6 +11,7 @@ Environment=HERMESOPS_ROOT=/opt/docker/hermesops
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONPATH=/opt/docker/hermesops/repo
 ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-session.py check
+ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-operator.py ensure
 ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-api.py check --host 127.0.0.1 --port 8765
 ExecStart=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-api.py serve --host 127.0.0.1 --port 8765 --log-level INFO
 ExecStartPost=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-controller-probe.py --base-url http://127.0.0.1:8765 --wait-seconds 20

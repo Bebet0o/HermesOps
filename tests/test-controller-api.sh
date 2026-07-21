@@ -42,6 +42,9 @@ implemented = (
     ("/projects/{project_id}/objectives", "get"),
     ("/operations/{operation_id}", "get"),
     ("/auth/csrf", "post"),
+    ("/auth/login", "post"),
+    ("/auth/session", "get"),
+    ("/auth/logout", "post"),
 )
 for path, method in implemented:
     if path not in contract["paths"]:
