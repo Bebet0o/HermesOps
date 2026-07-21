@@ -409,10 +409,12 @@ class ControllerService:
         from .execution_reads import ExecutionReadStore
         from .review_recovery_reads import ReviewRecoveryReadStore
         from .objective_commands import ObjectiveCommandStore
+        from .review_commands import ReviewCommandStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
         self.commands = ObjectiveCommandStore(settings)
+        self.review_commands = ReviewCommandStore(settings)
 
     def version(self) -> str:
         try:
@@ -567,6 +569,9 @@ class ControllerService:
         command_ready, command_reason = self.commands.readiness()
         if not command_ready:
             reasons.append(command_reason)
+        review_command_ready, review_command_reason = self.review_commands.readiness()
+        if not review_command_ready:
+            reasons.append(review_command_reason)
         try:
             self.session_token()
         except ControllerError as error:
@@ -599,6 +604,10 @@ class ControllerService:
                 "durable_controller_operations": True,
                 "objective_writes": True,
                 "objective_write_commands": ["create", "pause", "resume", "cancel"],
+                "review_writes": True,
+                "review_write_commands": ["acknowledge-debt", "request-human-review"],
+                "review_rerun": False,
+                "review_write_if_match": False,
                 "csrf_challenges": True,
                 "idempotent_mutations": True,
                 "websocket_events": False,
@@ -609,6 +618,9 @@ class ControllerService:
 
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
+        review_operation = self.review_commands.get_operation(operation_id)
+        if review_operation is not None:
+            return review_operation
         controller_operation = self.commands.get_operation(operation_id)
         if controller_operation is not None:
             return controller_operation

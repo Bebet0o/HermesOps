@@ -920,6 +920,34 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
             return status, payload, {}
 
+        review_prefix = "/api/v1/reviews/"
+        if path.startswith(review_prefix) and marker in path[len(review_prefix):]:
+            review_part, command = path[len(review_prefix):].split(marker, 1)
+            review_id = unquote(review_part)
+            command = unquote(command)
+            if not review_id or "/" in review_id or not command or "/" in command:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            if self._single_header("If-Match") is not None:
+                raise ControllerError(
+                    409,
+                    "review_precondition_unavailable",
+                    "Review precondition is unavailable",
+                    "Milestone 2H does not yet implement review If-Match semantics.",
+                )
+            status, payload = service.review_commands.command_review(
+                session_token=session_token,
+                idempotency_key=key,
+                route=path,
+                review_id=review_id,
+                command=command,
+                body=body,
+                meta_factory=lambda revision: service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            )
+            return status, payload, {}
+
         raise ControllerError(404, "route_not_found", "Route not found")
 
     def _handle_post(self) -> None:
@@ -933,7 +961,15 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 path.startswith("/api/v1/objectives/")
                 and "/commands/" in path[len("/api/v1/objectives/"):]
             )
-            if path not in {"/api/v1/auth/csrf", "/api/v1/objectives"} and not is_objective_command:
+            is_review_command = (
+                path.startswith("/api/v1/reviews/")
+                and "/commands/" in path[len("/api/v1/reviews/"):]
+            )
+            if (
+                path not in {"/api/v1/auth/csrf", "/api/v1/objectives"}
+                and not is_objective_command
+                and not is_review_command
+            ):
                 self._method_not_allowed()
                 return
             body = self._read_json_body()

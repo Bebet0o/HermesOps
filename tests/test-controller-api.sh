@@ -13,6 +13,7 @@ python3 -m compileall -q \
     scripts/hermesops-controller-api.py \
     scripts/hermesops-controller-objective-probe.py \
     scripts/hermesops-controller-objective-command-probe.py \
+    scripts/hermesops-controller-review-command-probe.py \
     tests/test_controller_api.py
 
 python3 tests/test_controller_api.py
@@ -37,6 +38,7 @@ implemented = (
     ("/objectives", "post"),
     ("/objectives/{objective_id}", "get"),
     ("/objectives/{objective_id}/commands/{command}", "post"),
+    ("/reviews/{review_id}/commands/{command}", "post"),
     ("/projects/{project_id}/objectives", "get"),
     ("/operations/{operation_id}", "get"),
     ("/auth/csrf", "post"),

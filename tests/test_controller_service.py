@@ -144,6 +144,33 @@ class ControllerProbeTest(unittest.TestCase):
                     session_fingerprint TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
                     request_hash TEXT NOT NULL, outcome TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE controller_review_operations (
+                    operation_id TEXT PRIMARY KEY, command_kind TEXT NOT NULL,
+                    state TEXT NOT NULL, target_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL, error_code TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT
+                );
+                CREATE TABLE controller_review_idempotency (
+                    session_fingerprint TEXT NOT NULL, key_hash TEXT NOT NULL,
+                    method TEXT NOT NULL, route TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    response_status INTEGER, response_json TEXT, operation_id TEXT,
+                    created_at TEXT NOT NULL, completed_at TEXT,
+                    PRIMARY KEY(session_fingerprint, key_hash)
+                );
+                CREATE TABLE controller_review_command_audit (
+                    audit_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+                    session_fingerprint TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
+                    request_hash TEXT NOT NULL, outcome TEXT NOT NULL,
+                    reason_present INTEGER NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE controller_review_actions (
+                    action_id TEXT PRIMARY KEY, review_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                    command TEXT NOT NULL, reason_present INTEGER NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(review_id, command)
+                );
                 CREATE TABLE projects (
                     project_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,

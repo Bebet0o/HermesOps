@@ -193,7 +193,39 @@ default_branch = "main"
                     finished_at TEXT
                 );
                 CREATE TABLE review_results (
-                    review_id TEXT PRIMARY KEY
+                    review_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    details_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE controller_review_operations (
+                    operation_id TEXT PRIMARY KEY, command_kind TEXT NOT NULL,
+                    state TEXT NOT NULL, target_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL, error_code TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT
+                );
+                CREATE TABLE controller_review_idempotency (
+                    session_fingerprint TEXT NOT NULL, key_hash TEXT NOT NULL,
+                    method TEXT NOT NULL, route TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    response_status INTEGER, response_json TEXT, operation_id TEXT,
+                    created_at TEXT NOT NULL, completed_at TEXT,
+                    PRIMARY KEY(session_fingerprint, key_hash)
+                );
+                CREATE TABLE controller_review_command_audit (
+                    audit_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+                    session_fingerprint TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
+                    request_hash TEXT NOT NULL, outcome TEXT NOT NULL,
+                    reason_present INTEGER NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE controller_review_actions (
+                    action_id TEXT PRIMARY KEY, review_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL, command TEXT NOT NULL,
+                    reason_present INTEGER NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, UNIQUE(review_id)
                 );
                 CREATE TABLE reviewer_executions (
                     execution_id TEXT PRIMARY KEY
@@ -268,6 +300,38 @@ default_branch = "main"
                 )
                 """,
                 (str(self.project_config),),
+            )
+            connection.execute(
+                """
+                INSERT INTO runs VALUES (
+                    'run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'alpha', 'COMPLETED',
+                    '2026-07-18T00:00:00.000Z',
+                    '2026-07-18T00:01:00.000Z',
+                    '2026-07-18T00:02:00.000Z',
+                    '2026-07-18T00:02:00.000Z'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO review_results VALUES (
+                    'review-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'PASS_WITH_DEBT', 'Debt remains', '{}',
+                    '2026-07-18T00:02:00.000Z'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO review_results VALUES (
+                    'review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    'run-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'FIX', 'Fix required', '{}',
+                    '2026-07-18T00:03:00.000Z'
+                )
+                """
             )
             connection.commit()
         self.settings = Settings.from_root(
@@ -386,6 +450,12 @@ class ControllerAPITest(unittest.TestCase):
         self.assertTrue(features["legacy_operation_projection"])
         self.assertTrue(features["durable_controller_operations"])
         self.assertTrue(features["objective_writes"])
+        self.assertTrue(features["review_writes"])
+        self.assertEqual(
+            features["review_write_commands"],
+            ["acknowledge-debt", "request-human-review"],
+        )
+        self.assertFalse(features["review_rerun"])
 
     def test_protected_endpoint_requires_cookie(self) -> None:
         status, headers, payload = self.fixture.request(
