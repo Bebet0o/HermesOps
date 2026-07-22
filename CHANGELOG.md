@@ -5,6 +5,7 @@ All notable changes to HermesOps will be documented in this file.
 ## [Unreleased]
 
 - Add authenticated, redacted public reads for orchestration plans, DAG edges, attempts and reviewer assignments.
+- Add executable Hermesfile v1 parsing, semantic validation, canonical JSON and deterministic source/canonical SHA-256 fingerprints.
 
 ### Added
 

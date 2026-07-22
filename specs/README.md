@@ -17,3 +17,4 @@ The schemas are not proof that the runtime exists. Implementation milestones
 must claim support only after corresponding integration and security tests pass.
 
 - `controller-events-v1.asyncapi.json`: authenticated replayable WebSocket transport.
+- `hermesfile-v1.schema.json`: executable source contract for Hermesfile v1 sandbox profiles.

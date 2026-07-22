@@ -57,7 +57,7 @@ required_headings = (
     "## Architecture",
     "## Roles",
     "## Worker image, archive, engine, and containers",
-    "## Hermesfiles — planned for `v0.2.0-beta`",
+    "## Hermesfile v1 — validation and canonicalization available",
     "## Security model",
     "## Installation",
     "## Current limitations",
@@ -74,8 +74,8 @@ limitations = text.index("## Current limitations")
 if future > limitations:
     raise SystemExit("Future milestone positioning is missing from introduction")
 
-if "not functional in\n`v0.1.0-alpha`" not in text:
-    raise SystemExit("README must explicitly mark Hermesfiles as unavailable")
+if "strictly parse, validate, canonicalize and\nfingerprint Hermesfile v1 sources" not in text:
+    raise SystemExit("README must describe the implemented Hermesfile v1 source tooling")
 
 print("HermesOps release documentation structure: PASS")
 PY

@@ -24,7 +24,11 @@ def require(value, message):
 openapi = load("specs/controller-api-v1.openapi.json")
 events = load("specs/events-v1.schema.json")
 asyncapi = load("specs/controller-events-v1.asyncapi.json")
-hermesfile = load("specs/hermesfile-v0.schema.json")
+hermesfile = load("specs/hermesfile-v1.schema.json")
+require(
+    hermesfile["properties"]["apiVersion"].get("const") == "hermesops.dev/v1",
+    "Hermesfile v1 apiVersion contract drift",
+)
 api_doc = (root / "docs/api/CONTROLLER_API_V1.md").read_text(encoding="utf-8")
 
 require(openapi.get("openapi") == "3.1.0", "OpenAPI must be 3.1.0")
@@ -92,9 +96,9 @@ for name in ("run.state_changed","review.verdict_recorded","sandbox.activated"):
     require(name in known, f"Known event missing: {name}")
 require(type_schema.get("pattern"), "Event type pattern missing")
 
-# Hermesfile v0 cannot opt into a feature the spec says is not supported.
+# Hermesfile v1 cannot opt into a feature the spec says is not supported.
 secrets = hermesfile["properties"]["spec"]["properties"]["security"]["properties"]["secrets"]
-require(secrets.get("const") is False, "Hermesfile v0 must force secrets=false")
+require(secrets.get("const") is False, "Hermesfile v1 must force secrets=false")
 require("CsrfChallenge" in openapi["components"]["schemas"], "CSRF challenge schema missing")
 require("CsrfChallengeResponse" in openapi["components"]["schemas"], "CSRF challenge response missing")
 require("CsrfToken" not in openapi["components"]["schemas"], "Scanner-ambiguous CSRF schema name returned")

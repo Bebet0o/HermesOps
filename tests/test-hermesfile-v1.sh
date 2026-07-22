@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export LC_ALL=C
+export PYTHONDONTWRITEBYTECODE=1
+
+REPO="${HERMESOPS_ROOT:-/opt/docker/hermesops}/repo"
+cd "$REPO"
+
+python3 -m unittest -v tests.test_hermesfile_v1
+
+python3 - <<'PY'
+from __future__ import annotations
+
+import ast
+import json
+from pathlib import Path
+
+root = Path.cwd()
+schema = json.loads(
+    (root / "specs/hermesfile-v1.schema.json").read_text(encoding="utf-8")
+)
+if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+    raise SystemExit("Hermesfile v1 must use JSON Schema 2020-12")
+if schema["properties"]["apiVersion"].get("const") != "hermesops.dev/v1":
+    raise SystemExit("Hermesfile v1 apiVersion contract drift")
+if schema["properties"]["kind"].get("const") != "SandboxProfile":
+    raise SystemExit("Hermesfile v1 kind contract drift")
+security = schema["properties"]["spec"]["properties"]["security"]["properties"]
+for field, expected in (
+    ("privileged", False),
+    ("noNewPrivileges", True),
+    ("secrets", False),
+    ("allowDockerSocket", False),
+    ("allowDeviceAccess", False),
+):
+    if security[field].get("const") is not expected:
+        raise SystemExit(f"Hermesfile security invariant drift: {field}")
+
+source = (root / "controller_api/hermesfile.py").read_text(encoding="utf-8")
+tree = ast.parse(source, filename="controller_api/hermesfile.py")
+for node in ast.walk(tree):
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name.split(".", 1)[0] for alias in node.names]
+        elif node.module:
+            names = [node.module.split(".", 1)[0]]
+        if any(name in {"subprocess", "socket", "urllib"} for name in names):
+            raise SystemExit("Hermesfile validator imports an execution/network module")
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in {"eval", "exec", "compile"}:
+            raise SystemExit("Hermesfile validator uses dynamic code execution")
+
+core = (root / "controller_api/core.py").read_text(encoding="utf-8")
+if '"hermesfile_versions": ["v1"]' not in core:
+    raise SystemExit("Controller capabilities do not advertise Hermesfile v1")
+if '"hermesfile_builds": False' not in core:
+    raise SystemExit("Controller must not claim Hermesfile builds in milestone 2N")
+
+contract = (root / "docs/hermesfile/SPECIFICATION_V1.md").read_text(encoding="utf-8")
+for phrase in (
+    "not a project configuration",
+    "does not contain secret values",
+    "canonical SHA-256",
+    "does not build or activate images",
+):
+    if phrase not in contract:
+        raise SystemExit(f"Hermesfile v1 contract phrase missing: {phrase}")
+
+openapi = json.loads(
+    (root / "specs/controller-api-v1.openapi.json").read_text(encoding="utf-8")
+)
+serialized = json.dumps(openapi, sort_keys=True)
+if '"hermesfile-v0"' in serialized or '"v0alpha1"' in serialized:
+    raise SystemExit("OpenAPI still advertises Hermesfile v0")
+if '"hermesfile-v1"' not in serialized:
+    raise SystemExit("OpenAPI does not accept Hermesfile v1 sources")
+
+version_schemas = []
+def collect_version_schemas(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "hermesfile_versions" and isinstance(item, dict):
+                version_schemas.append(item)
+            collect_version_schemas(item)
+    elif isinstance(value, list):
+        for item in value:
+            collect_version_schemas(item)
+
+collect_version_schemas(openapi)
+if not version_schemas:
+    raise SystemExit("OpenAPI has no Hermesfile version capability schema")
+for version_schema in version_schemas:
+    if version_schema.get("type") != "array":
+        raise SystemExit("OpenAPI Hermesfile versions must be an array")
+    if version_schema.get("minItems") != 1:
+        raise SystemExit("OpenAPI Hermesfile versions must be non-empty")
+    if version_schema.get("uniqueItems") is not True:
+        raise SystemExit("OpenAPI Hermesfile versions must be unique")
+    items = version_schema.get("items")
+    if not isinstance(items, dict) or items.get("enum") != ["v1"]:
+        raise SystemExit("OpenAPI does not advertise only Hermesfile v1")
+
+print("Hermesfile v1 schema/code/capability contract: PASS")
+PY
+
+python3 scripts/hermesops-hermesfile.py \
+    validate config/examples/Hermesfile
+
+python3 scripts/hermesops-hermesfile.py \
+    fingerprint config/examples/Hermesfile --json \
+    | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+assert payload["source_format"] == "hermesfile-v1"
+assert payload["api_version"] == "hermesops.dev/v1"
+assert len(payload["source_sha256"]) == 64
+assert len(payload["canonical_sha256"]) == 64
+print("Hermesfile v1 CLI fingerprint: PASS")
+'
+
+echo HERMESOPS_HERMESFILE_V1_PASS

@@ -63,6 +63,10 @@ static_validation() {
   tests/test-controller-browser-auth-adversarial.sh \
   tests/test_controller_browser_auth_adversarial.py \
   controller_api/orchestration_reads.py \
+  controller_api/hermesfile.py \
+  scripts/hermesops-hermesfile.py \
+  tests/test_hermesfile_v1.py \
+  tests/test-hermesfile-v1.sh \
   scripts/hermesops-controller-orchestration-probe.py \
   tests/test_controller_orchestration_reads.py \
   scripts/hermesops_review_assignment.py \
@@ -111,6 +115,10 @@ static_validation() {
   docs/milestones/2I_CONTROLLER_EVENT_JOURNAL.md \
   docs/milestones/2J_AUTHENTICATED_WEBSOCKET_TRANSPORT.md \
   docs/milestones/2M_PUBLIC_ORCHESTRATION_READS.md \
+  docs/milestones/2N_HERMESFILE_V1.md \
+  docs/hermesfile/SPECIFICATION_V1.md \
+  specs/hermesfile-v1.schema.json \
+  config/examples/Hermesfile \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -209,6 +217,7 @@ PY
   "${REPO}/tests/test-controller-browser-auth.sh"
   "${REPO}/tests/test-controller-browser-auth-adversarial.sh"
   "${REPO}/tests/test-controller-orchestration-reads.sh"
+  "${REPO}/tests/test-hermesfile-v1.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

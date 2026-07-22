@@ -63,3 +63,10 @@ secure through a WebUI.
 ### Execute mutable tags
 
 Rejected because the same tag can resolve to different content over time.
+
+## Milestone 2N implementation boundary
+
+Hermesfile v1 makes parsing, semantic validation, canonical JSON and
+fingerprinting executable. It deliberately does not build, test, activate or
+roll back images yet. Project registration, role policy, concurrency and Git
+configuration remain separate sources of truth.

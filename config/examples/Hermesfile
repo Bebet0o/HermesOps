@@ -1,0 +1,84 @@
+apiVersion: hermesops.dev/v1
+kind: SandboxProfile
+metadata:
+  name: python-project
+  displayName: Python Project Worker
+  description: Pinned Python sandbox with offline runtime networking.
+  labels:
+    language: python
+    purpose: general
+spec:
+  base:
+    registry: docker.io
+    image: library/python
+    tag: 3.12.10-slim-bookworm
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  build:
+    apt:
+      update: true
+      packages:
+        - git=1:2.39.5-0+deb12u2
+        - build-essential=12.9
+    python:
+      interpreter: python3
+      packages:
+        - pytest==9.0.2
+        - ruff==0.14.10
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: verify-toolchain
+        run: [python3, --version]
+        timeout: 30s
+  workspace:
+    user: hermes
+    group: hermes
+    directory: /workspace
+    sourceMode: worktree
+  runtime:
+    cpu: 4
+    memory: 8GiB
+    pids: 512
+    timeout: 2h
+    stopGracePeriod: 30s
+    tmpfsSize: 1GiB
+  network:
+    build:
+      mode: allowlist
+      allow:
+        - deb.debian.org
+        - pypi.org
+        - files.pythonhosted.org
+    runtime:
+      mode: none
+      allow: []
+  security:
+    privileged: false
+    noNewPrivileges: true
+    readOnlyRoot: false
+    capabilities:
+      drop: [ALL]
+      add: []
+    seccompProfile: default
+    secrets: false
+    allowDockerSocket: false
+    allowDeviceAccess: false
+  mounts:
+    - name: python-cache
+      type: cache
+      target: /home/hermes/.cache
+      readOnly: false
+    - name: artifacts
+      type: artifact
+      target: /artifacts
+      readOnly: false
+  validation:
+    commands:
+      - name: python
+        run: [python3, --version]
+        timeout: 30s
+        expectExitCode: 0
+      - name: pytest
+        run: [pytest, --version]
+        timeout: 30s
+        expectExitCode: 0
