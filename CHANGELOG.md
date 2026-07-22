@@ -4,6 +4,8 @@ All notable changes to HermesOps will be documented in this file.
 
 ## [Unreleased]
 
+- Add authenticated, redacted public reads for orchestration plans, DAG edges, attempts and reviewer assignments.
+
 ### Added
 
 - public Debian 12 installer, preflight, validation, and conservative

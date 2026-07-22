@@ -455,6 +455,30 @@ BLOCK_HUMAN
 
 The Controller rejects decisions unsupported by current evidence.
 
+### Orchestration plans and reviewer assignments
+
+```text
+GET /plans
+GET /plans/{plan_id}
+GET /plans/{plan_id}/tasks
+GET /plans/{plan_id}/dependencies
+GET /plans/{plan_id}/attempts
+GET /reviewer-assignments
+GET /reviewer-assignments/{assignment_id}
+GET /runs/{run_id}/reviewer-assignments
+```
+
+Plan and reviewer-assignment collections use the standard bounded cursor
+pagination. Plan lists may filter by `project_id` and public `state`.
+Reviewer-assignment lists may additionally filter by public `run_id`.
+
+These resources expose identifiers, state, timestamps, bounded counts, role
+metadata and links between public resources. The Controller never returns plan
+JSON, task instructions, acceptance criteria, completion markers, raw results,
+raw failures, host paths, container names, executor identities, assignment
+owners, prompts, logs, credentials or provider data through these routes.
+Presence of a private failure is represented only by bounded metadata.
+
 ### Sandbox profiles
 
 ```text

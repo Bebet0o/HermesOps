@@ -470,11 +470,13 @@ class ControllerService:
         from .objective_reads import ObjectiveReadStore
         from .execution_reads import ExecutionReadStore
         from .review_recovery_reads import ReviewRecoveryReadStore
+        from .orchestration_reads import OrchestrationReadStore
         from .objective_commands import ObjectiveCommandStore
         from .review_commands import ReviewCommandStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
+        self.orchestration = OrchestrationReadStore(settings)
         self.commands = ObjectiveCommandStore(settings)
         self.review_commands = ReviewCommandStore(settings)
         from .browser_auth import BrowserAuthStore
@@ -652,6 +654,11 @@ class ControllerService:
                 "review_evidence_reads": True,
                 "integration_summary_reads": True,
                 "recovery_reads": True,
+                "orchestration_plan_reads": True,
+                "orchestration_graph_reads": True,
+                "orchestration_attempt_reads": True,
+                "reviewer_assignment_reads": True,
+                "raw_orchestration_payload_reads": False,
                 "raw_review_artifact_reads": False,
                 "raw_worker_log_reads": False,
                 "run_artifact_reads": False,

@@ -92,3 +92,11 @@ Reviewer transport retries are distinct durable assignments. At most one
 assignment may be active for a run. The assignment captures the selected role
 and profile before launch and cannot be reassigned or rewritten after it reaches
 a terminal state.
+
+## Public read boundary
+
+The Controller exposes a redacted plan graph, attempts and reviewer assignments
+for the HermesOps Console. Public reads never reuse the internal CLI status
+payload because that payload contains task definitions, raw result objects and
+failure text. Cursor pagination is authenticated and all mutation authority
+remains outside these routes.

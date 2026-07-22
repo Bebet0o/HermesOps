@@ -62,6 +62,9 @@ static_validation() {
   tests/test_controller_browser_auth.py \
   tests/test-controller-browser-auth-adversarial.sh \
   tests/test_controller_browser_auth_adversarial.py \
+  controller_api/orchestration_reads.py \
+  scripts/hermesops-controller-orchestration-probe.py \
+  tests/test_controller_orchestration_reads.py \
   scripts/hermesops_review_assignment.py \
   tests/test_reviewer_assignments.py \
         tests/test-controller-service-contract.sh \
@@ -107,6 +110,7 @@ static_validation() {
         docs/milestones/2H_HUMAN_REVIEW_COMMANDS.md \
   docs/milestones/2I_CONTROLLER_EVENT_JOURNAL.md \
   docs/milestones/2J_AUTHENTICATED_WEBSOCKET_TRANSPORT.md \
+  docs/milestones/2M_PUBLIC_ORCHESTRATION_READS.md \
         compose/agent.yaml compose/images.lock.env \
         compose/agent.env.example compose/webui.env.example \
         compose/notifications.env.example config/host-packages.lock.toml
@@ -204,6 +208,7 @@ PY
   "${REPO}/tests/test-controller-websocket-adversarial.sh"
   "${REPO}/tests/test-controller-browser-auth.sh"
   "${REPO}/tests/test-controller-browser-auth-adversarial.sh"
+  "${REPO}/tests/test-controller-orchestration-reads.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
