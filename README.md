@@ -854,3 +854,17 @@ See [`LICENSE`](LICENSE).
 
 Third-party components, including Hermes Agent and the temporary upstream
 WebUI, retain their own licenses and copyrights.
+
+## Persisted sandbox profiles
+
+Hermesfile v1 sources can be validated and imported into the durable Controller
+database by an operator:
+
+```bash
+scripts/hermesops-hermesfile.py validate Hermesfile
+scripts/hermesops-sandbox-profile.py import Hermesfile
+scripts/hermesops-sandbox-profile.py list
+```
+
+The Controller exposes authenticated list/detail metadata at
+`/api/v1/sandboxes`. Image builds and HTTP profile writes remain disabled.

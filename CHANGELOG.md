@@ -1,4 +1,5 @@
 # Changelog
+- Added durable, immutable Hermesfile v1 sandbox profile source revisions and authenticated profile reads.
 
 All notable changes to HermesOps will be documented in this file.
 

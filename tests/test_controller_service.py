@@ -436,6 +436,18 @@ class ControllerProbeTest(unittest.TestCase):
                 """
             )
 
+        migration_connection = sqlite3.connect(database)
+        try:
+            migration_connection.executescript(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "migrations/020_sandbox_profile_persistence.sql"
+                ).read_text(encoding="utf-8")
+            )
+            migration_connection.commit()
+        finally:
+            migration_connection.close()
+
         settings = Settings.from_root(
             self.root,
             host="127.0.0.1",
@@ -497,6 +509,8 @@ class ControllerProbeTest(unittest.TestCase):
                 "orchestration_tasks",
                 "orchestration_attempts",
                 "orchestration_dependencies",
+                "sandbox_profiles",
+                "sandbox_profile_revisions",
             }.issubset(tables)
         )
 

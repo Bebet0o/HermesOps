@@ -471,12 +471,14 @@ class ControllerService:
         from .execution_reads import ExecutionReadStore
         from .review_recovery_reads import ReviewRecoveryReadStore
         from .orchestration_reads import OrchestrationReadStore
+        from .sandbox_profiles import SandboxProfileStore
         from .objective_commands import ObjectiveCommandStore
         from .review_commands import ReviewCommandStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
         self.orchestration = OrchestrationReadStore(settings)
+        self.sandbox_profiles = SandboxProfileStore(settings)
         self.commands = ObjectiveCommandStore(settings)
         self.review_commands = ReviewCommandStore(settings)
         from .browser_auth import BrowserAuthStore
@@ -628,6 +630,9 @@ class ControllerService:
         review_command_ready, review_command_reason = self.review_commands.readiness()
         if not review_command_ready:
             reasons.append(review_command_reason)
+        sandbox_ready, sandbox_reason = self.sandbox_profiles.readiness()
+        if not sandbox_ready:
+            reasons.append(sandbox_reason)
         try:
             self.session_token()
         except ControllerError as error:
@@ -674,6 +679,10 @@ class ControllerService:
                 "websocket_events": True,
                 "browser_session_lifecycle": self.browser_auth.readiness()[0],
                 "operator_login": self.browser_auth.readiness()[0],
+                "sandbox_profile_reads": True,
+                "sandbox_profile_operator_import": True,
+                "sandbox_profile_http_writes": False,
+                "sandbox_profile_http_validation": False,
                 "hermesfile_builds": False,
                 "console": False,
             },
