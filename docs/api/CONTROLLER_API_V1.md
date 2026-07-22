@@ -514,8 +514,8 @@ Create/update operations accept:
 ```json
 {
   "name": "Default Python Worker",
-  "source_format": "hermesfile-v0",
-  "source": "apiVersion: hermesops.dev/v0alpha1\n..."
+  "source_format": "hermesfile-v1",
+  "source": "apiVersion: hermesops.dev/v1\n..."
 }
 ```
 
@@ -711,7 +711,7 @@ The Controller is the only authority for transitions.
 {
   "api_versions": ["v1"],
   "event_schema_versions": [1],
-  "hermesfile_versions": ["v0alpha1"]
+  "hermesfile_versions": ["v1"]
 }
 ```
 

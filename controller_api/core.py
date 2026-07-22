@@ -638,7 +638,7 @@ class ControllerService:
         return {
             "api_versions": [API_VERSION],
             "event_schema_versions": [1],
-            "hermesfile_versions": ["v0alpha1"],
+            "hermesfile_versions": ["v1"],
             "features": {
                 "read_only_controller_api": False,
                 "project_reads": True,

@@ -295,80 +295,42 @@ The practical concurrency limit depends on:
 The default policy allows only one writer per project while permitting limited
 parallel read-oriented work.
 
-## Hermesfiles — planned for `v0.2.0-beta`
+## Hermesfile v1 — validation and canonicalization available
 
-A **Hermesfile** will be a single declarative source file describing a sandbox
-profile.
+A **Hermesfile** is one declarative YAML source describing a sandbox profile,
+not a project or orchestration plan.
 
-It will define concepts such as:
-
-- base image and immutable digest;
-- system and language packages;
-- workspace user and paths;
-- CPU, memory, PID, and timeout limits;
-- network policy;
-- filesystem policy;
-- capabilities and security restrictions;
-- validation commands.
-
-Conceptual example:
+Hermesfile v1 uses:
 
 ```yaml
-version: 1
-
-name: cpp-worker
-
-base:
-  image: debian:12
-  digest: sha256:REQUIRED_IMMUTABLE_DIGEST
-
-packages:
-  apt:
-    - git
-    - cmake
-    - ninja-build
-    - clang
-
-workspace:
-  user: hermes
-  directory: /workspace
-
-runtime:
-  cpu: 4
-  memory: 8GiB
-  pids: 512
-  network: false
-
-security:
-  no_new_privileges: true
-  drop_capabilities: all
-  allow_secrets: false
-
-validation:
-  commands:
-    - git --version
-    - cmake --version
-    - clang --version
+apiVersion: hermesops.dev/v1
+kind: SandboxProfile
 ```
 
-A Hermesfile will not eliminate Docker images internally. Instead, it will
-replace manual image handling from the user's perspective:
+It defines the pinned base image, declarative package inputs, workspace
+identity, resource bounds, network declaration, mandatory security invariants,
+logical mounts and validation commands.
 
-```text
-Hermesfile
-    ↓ validate
-HermesOps sandbox builder
-    ↓ build and test
-Versioned Docker image
-    ↓ activate
-Temporary worker containers
+The current development tree can strictly parse, validate, canonicalize and
+fingerprint Hermesfile v1 sources:
+
+```bash
+scripts/hermesops-hermesfile.py validate Hermesfile
+scripts/hermesops-hermesfile.py fingerprint Hermesfile --json
+scripts/hermesops-hermesfile.py canonicalize Hermesfile
 ```
 
-The future HermesOps Console is intended to provide an editor and the complete
-validate/build/test/activate/rollback workflow.
+Validation rejects duplicate YAML keys, aliases, unknown fields, secret-like
+values, shell pass-through, protected or overlapping mount paths, privileged
+mode, added capabilities, Docker socket access and device access.
 
-Hermesfiles are a roadmap feature and are **not functional in
-`v0.1.0-alpha`**.
+Source formatting and comments do not change the canonical digest. The source
+digest and canonical digest are both retained.
+
+Image build, package resolution, validation-container execution, profile
+activation, rollback and the Console editor remain planned for `v0.2.0-beta`.
+A Hermesfile still compiles to an immutable container image internally; it does
+not replace images at runtime.
 
 ## Security model
 
@@ -796,7 +758,7 @@ Review `./uninstall.sh --help` before requesting destructive removal.
 - the current WebUI is a temporary upstream compatibility interface;
 - project and objective administration still uses CLI tools;
 - sandbox profiles cannot yet be edited in the WebUI;
-- Hermesfiles are not implemented;
+- Hermesfile v1 validation and canonicalization are implemented, but image build, activation and rollback are not yet available;
 - the default worker image must be imported from a release archive;
 - custom worker images are not yet a supported first-class workflow;
 - public installation currently targets Debian 12 amd64 only;
@@ -820,7 +782,7 @@ Review `./uninstall.sh --help` before requesting destructive removal.
 - HermesOps Controller API;
 - dedicated HermesOps Console;
 - WebUI-first daily operation;
-- functional Hermesfile schema;
+- Hermesfile-backed image build, validation, activation, versioning and rollback;
 - sandbox profile editor;
 - build, validation, test, activation, and rollback workflows;
 - automatic official worker-image retrieval;
