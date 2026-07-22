@@ -5811,6 +5811,595 @@
           }
         }
       }
+    },
+    "/plans": {
+      "get": {
+        "operationId": "listOrchestrationPlans",
+        "summary": "List redacted orchestration plans",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicOrchestrationPlan"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/plans/{plan_id}": {
+      "get": {
+        "operationId": "getOrchestrationPlan",
+        "summary": "Read one redacted orchestration plan",
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/PublicOrchestrationPlan"
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/plans/{plan_id}/tasks": {
+      "get": {
+        "operationId": "listOrchestrationPlanTasks",
+        "summary": "List tasks in an orchestration plan",
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicOrchestrationTask"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/plans/{plan_id}/dependencies": {
+      "get": {
+        "operationId": "listOrchestrationPlanDependencies",
+        "summary": "List dependencies in an orchestration plan",
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicOrchestrationDependency"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/plans/{plan_id}/attempts": {
+      "get": {
+        "operationId": "listOrchestrationPlanAttempts",
+        "summary": "List attempts in an orchestration plan",
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicOrchestrationAttempt"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/reviewer-assignments": {
+      "get": {
+        "operationId": "listReviewerAssignments",
+        "summary": "List redacted reviewer assignments",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicReviewerAssignment"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/reviewer-assignments/{assignment_id}": {
+      "get": {
+        "operationId": "getReviewerAssignment",
+        "summary": "Read one redacted reviewer assignment",
+        "parameters": [
+          {
+            "name": "assignment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/PublicReviewerAssignment"
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
+    },
+    "/runs/{run_id}/reviewer-assignments": {
+      "get": {
+        "operationId": "listRunReviewerAssignments",
+        "summary": "List reviewer assignments for one public run",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated redacted orchestration projection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/PublicReviewerAssignment"
+                      }
+                    },
+                    "meta": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier, filter, limit or cursor."
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "404": {
+            "description": "Resource not found."
+          },
+          "503": {
+            "description": "Stored projection is inconsistent or unavailable."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -7580,6 +8169,522 @@
           },
           "meta": {
             "$ref": "#/components/schemas/ResponseMeta"
+          }
+        }
+      },
+      "PublicOrchestrationPlan": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "objective_id",
+          "project_ids",
+          "state",
+          "raw_state",
+          "source",
+          "planner_role_id",
+          "max_parallel_tasks",
+          "plan_digest",
+          "task_counts",
+          "attempt_count",
+          "reviewer_assignment_count",
+          "created_at",
+          "updated_at",
+          "started_at",
+          "finished_at",
+          "definition_redacted",
+          "error",
+          "resource_revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "objective_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "type": "string"
+          },
+          "raw_state": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "planner_role_id": {
+            "type": "string"
+          },
+          "max_parallel_tasks": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "plan_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "task_counts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "attempt_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reviewer_assignment_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "definition_redacted": {
+            "const": true
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "resource_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PublicOrchestrationTask": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "plan_id",
+          "task_key",
+          "title",
+          "kind",
+          "project_id",
+          "role_id",
+          "writer",
+          "state",
+          "raw_state",
+          "priority",
+          "attempt_count",
+          "max_attempts",
+          "dependency_count",
+          "dependent_count",
+          "created_at",
+          "updated_at",
+          "started_at",
+          "finished_at",
+          "result",
+          "error",
+          "instruction_redacted",
+          "acceptance_redacted",
+          "marker_redacted",
+          "resource_revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "task_key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "writer": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          },
+          "raw_state": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "attempt_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dependency_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dependent_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "instruction_redacted": {
+            "const": true
+          },
+          "acceptance_redacted": {
+            "const": true
+          },
+          "marker_redacted": {
+            "const": true
+          },
+          "resource_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PublicOrchestrationDependency": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "plan_id",
+          "task_id",
+          "depends_on_task_id",
+          "condition",
+          "resource_revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "depends_on_task_id": {
+            "type": "string"
+          },
+          "condition": {
+            "const": "success"
+          },
+          "resource_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PublicOrchestrationAttempt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "run_id",
+          "plan_id",
+          "task_id",
+          "attempt_number",
+          "state",
+          "raw_state",
+          "transaction_reference",
+          "worker_execution_id",
+          "review_execution_id",
+          "integration_id",
+          "reviewer_assignment_count",
+          "created_at",
+          "updated_at",
+          "started_at",
+          "finished_at",
+          "result",
+          "error",
+          "resource_revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "attempt_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "type": "string"
+          },
+          "raw_state": {
+            "type": "string"
+          },
+          "transaction_reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "worker_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "review_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "integration_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "reviewer_assignment_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "result": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "resource_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PublicReviewerAssignment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "plan_id",
+          "task_id",
+          "run_id",
+          "project_id",
+          "assignment_number",
+          "role_id",
+          "source_profile",
+          "state",
+          "raw_state",
+          "review_execution_id",
+          "review_id",
+          "failure_code",
+          "created_at",
+          "updated_at",
+          "claimed_at",
+          "finished_at",
+          "claim_owner_redacted",
+          "assigned_by_redacted",
+          "internal_transaction_redacted",
+          "resource_revision"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "assignment_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "source_profile": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "raw_state": {
+            "type": "string"
+          },
+          "review_execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "review_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "claim_owner_redacted": {
+            "const": true
+          },
+          "assigned_by_redacted": {
+            "const": true
+          },
+          "internal_transaction_redacted": {
+            "const": true
+          },
+          "resource_revision": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       }

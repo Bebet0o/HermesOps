@@ -30,6 +30,8 @@ ALLOWED_PROJECT_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_OBJECTIVE_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 ALLOWED_EXECUTION_LIST_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_REVIEW_RECOVERY_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
+ALLOWED_PLAN_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
+ALLOWED_ASSIGNMENT_QUERY_FIELDS = {"cursor", "limit", "project_id", "state", "run_id"}
 ALLOWED_LOG_QUERY_FIELDS = {"after_sequence", "limit"}
 
 
@@ -498,6 +500,169 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 ),
             }, {}
 
+        if path == "/api/v1/plans":
+            unknown = set(query) - ALLOWED_PLAN_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor, limit, project_id and state are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            raw_project = query.get("project_id", [])
+            raw_state = query.get("state", [])
+            if (
+                len(raw_limit) != 1
+                or len(raw_cursor) > 1
+                or len(raw_project) > 1
+                or len(raw_state) > 1
+            ):
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                    "limit must be an integer.",
+                ) from error
+            plans, next_cursor = service.orchestration.list_plans(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                project_id=raw_project[0] if raw_project else None,
+                state=raw_state[0] if raw_state else None,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": plans,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        plan_prefix = "/api/v1/plans/"
+        if path.startswith(plan_prefix):
+            nested_routes = (
+                ("/tasks", service.orchestration.list_plan_tasks),
+                ("/dependencies", service.orchestration.list_plan_dependencies),
+                ("/attempts", service.orchestration.list_plan_attempts),
+            )
+            for suffix, reader in nested_routes:
+                if not path.endswith(suffix):
+                    continue
+                plan_id = unquote(path[len(plan_prefix):-len(suffix)])
+                if not plan_id or "/" in plan_id:
+                    raise ControllerError(404, "route_not_found", "Route not found")
+                unknown = set(query) - ALLOWED_EXECUTION_LIST_QUERY_FIELDS
+                if unknown:
+                    raise ControllerError(
+                        400,
+                        "unknown_query_parameter",
+                        "Unknown query parameter",
+                        "Only cursor and limit are supported.",
+                    )
+                raw_limit = query.get("limit", ["50"])
+                raw_cursor = query.get("cursor", [])
+                if len(raw_limit) != 1 or len(raw_cursor) > 1:
+                    raise ControllerError(400, "invalid_query", "Invalid query string")
+                try:
+                    limit = int(raw_limit[0])
+                except ValueError as error:
+                    raise ControllerError(
+                        400,
+                        "invalid_limit",
+                        "Invalid pagination limit",
+                    ) from error
+                items, next_cursor = reader(
+                    plan_id,
+                    limit=limit,
+                    cursor=raw_cursor[0] if raw_cursor else None,
+                    cursor_secret=session_token,
+                )
+                return 200, {
+                    "data": items,
+                    "meta": service.meta(request_id, next_cursor=next_cursor),
+                }, {}
+
+            if query:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                )
+            plan_id = unquote(path[len(plan_prefix):])
+            if not plan_id or "/" in plan_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            plan = service.orchestration.get_plan(plan_id)
+            revision = int(plan["resource_revision"])
+            return 200, {
+                "data": plan,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
+        if path == "/api/v1/reviewer-assignments":
+            unknown = set(query) - ALLOWED_ASSIGNMENT_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor, limit, project_id, state and run_id are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            raw_project = query.get("project_id", [])
+            raw_state = query.get("state", [])
+            raw_run = query.get("run_id", [])
+            if (
+                len(raw_limit) != 1
+                or len(raw_cursor) > 1
+                or len(raw_project) > 1
+                or len(raw_state) > 1
+                or len(raw_run) > 1
+            ):
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                    "limit must be an integer.",
+                ) from error
+            assignments, next_cursor = service.orchestration.list_assignments(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                project_id=raw_project[0] if raw_project else None,
+                state=raw_state[0] if raw_state else None,
+                run_id=raw_run[0] if raw_run else None,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": assignments,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
+        assignment_prefix = "/api/v1/reviewer-assignments/"
+        if path.startswith(assignment_prefix):
+            if query:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                )
+            assignment_id = unquote(path[len(assignment_prefix):])
+            if not assignment_id or "/" in assignment_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            assignment = service.orchestration.get_assignment(assignment_id)
+            revision = int(assignment["resource_revision"])
+            return 200, {
+                "data": assignment,
+                "meta": service.meta(request_id, resource_revision=revision),
+            }, {"ETag": f'"{revision}"'}
+
         if path == "/api/v1/objectives":
             unknown = set(query) - ALLOWED_OBJECTIVE_QUERY_FIELDS
             if unknown:
@@ -734,6 +899,45 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             }, {}
 
         run_prefix = "/api/v1/runs/"
+        nested_assignment_suffix = "/reviewer-assignments"
+        if path.startswith(run_prefix) and path.endswith(nested_assignment_suffix):
+            run_id = unquote(path[len(run_prefix):-len(nested_assignment_suffix)])
+            if not run_id or "/" in run_id:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            unknown = set(query) - ALLOWED_EXECUTION_LIST_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor and limit are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            if len(raw_limit) != 1 or len(raw_cursor) > 1:
+                raise ControllerError(400, "invalid_query", "Invalid query string")
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                ) from error
+            service.executions.get_run(run_id)
+            assignments, next_cursor = service.orchestration.list_assignments(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                project_id=None,
+                state=None,
+                run_id=run_id,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": assignments,
+                "meta": service.meta(request_id, next_cursor=next_cursor),
+            }, {}
+
         run_logs_suffix = "/logs"
         if path.startswith(run_prefix) and path.endswith(run_logs_suffix):
             run_id = unquote(path[len(run_prefix):-len(run_logs_suffix)])
