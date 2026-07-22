@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 export LC_ALL=C
 export PYTHONDONTWRITEBYTECODE=1
-REPO="${HERMESOPS_ROOT:-/opt/docker/hermesops}/repo"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 python3 -m unittest -v tests.test_reviewer_assignments
 
