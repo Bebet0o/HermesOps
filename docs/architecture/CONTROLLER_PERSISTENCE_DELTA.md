@@ -90,3 +90,12 @@ Milestone 2B may expose read-only status and project queries using adapters over
 current tables. It must report unsupported capabilities through
 `/system/capabilities`. Mutations remain disabled until the persistence delta
 is implemented.
+
+## Milestone 2O implemented delta
+
+Schema version 20 adds `sandbox_profiles` and
+`sandbox_profile_revisions`. Source revisions are immutable and retain only
+Hermesfile v1 sources that pass validation and persistence eligibility checks.
+The Controller exposes redacted authenticated profile reads. Build, image,
+activation, rollback, deletion and HTTP mutation persistence remain future
+deltas.

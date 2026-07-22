@@ -430,6 +430,15 @@ default_branch = "main"
                 """
             )
             connection.commit()
+        with closing(sqlite3.connect(self.database)) as migration_connection:
+            migration_connection.executescript(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "migrations/020_sandbox_profile_persistence.sql"
+                ).read_text(encoding="utf-8")
+            )
+            migration_connection.commit()
+
         self.settings = Settings.from_root(
             self.root,
             host="127.0.0.1",

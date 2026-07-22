@@ -522,6 +522,12 @@ Create/update operations accept:
 The Controller parses and validates the source. It returns canonical metadata,
 diagnostics, and references, never an unreviewed shell command.
 
+Milestone 2O implements authenticated `GET /sandboxes` and
+`GET /sandboxes/{sandbox_id}` reads over validated durable source revisions.
+The public projection excludes raw source and canonical JSON. Profile import is
+operator-local until HTTP mutation idempotency, CSRF, audit, event and
+optimistic-concurrency contracts are implemented for this resource.
+
 ### Operations
 
 ```text

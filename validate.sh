@@ -64,9 +64,16 @@ static_validation() {
   tests/test_controller_browser_auth_adversarial.py \
   controller_api/orchestration_reads.py \
   controller_api/hermesfile.py \
+  controller_api/sandbox_profiles.py \
+  controller_api/sandbox_profile_probe.py \
   scripts/hermesops-hermesfile.py \
+  scripts/hermesops-sandbox-profile.py \
+  scripts/hermesops-controller-sandbox-profile-probe.py \
   tests/test_hermesfile_v1.py \
   tests/test-hermesfile-v1.sh \
+  tests/test_sandbox_profiles.py \
+  tests/test_controller_sandbox_profile_reads.py \
+  tests/test-sandbox-profiles.sh \
   scripts/hermesops-controller-orchestration-probe.py \
   tests/test_controller_orchestration_reads.py \
   scripts/hermesops_review_assignment.py \
@@ -107,6 +114,7 @@ static_validation() {
   migrations/015_controller_event_journal.sql \
   migrations/016_controller_event_journal_hardening.sql \
   migrations/017_browser_session_lifecycle.sql \
+  migrations/020_sandbox_profile_persistence.sql \
         systemd/user/hermesops-controller-api.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
@@ -116,6 +124,7 @@ static_validation() {
   docs/milestones/2J_AUTHENTICATED_WEBSOCKET_TRANSPORT.md \
   docs/milestones/2M_PUBLIC_ORCHESTRATION_READS.md \
   docs/milestones/2N_HERMESFILE_V1.md \
+  docs/milestones/2O_SANDBOX_PROFILE_PERSISTENCE.md \
   docs/hermesfile/SPECIFICATION_V1.md \
   specs/hermesfile-v1.schema.json \
   config/examples/Hermesfile \
@@ -218,6 +227,7 @@ PY
   "${REPO}/tests/test-controller-browser-auth-adversarial.sh"
   "${REPO}/tests/test-controller-orchestration-reads.sh"
   "${REPO}/tests/test-hermesfile-v1.sh"
+  "${REPO}/tests/test-sandbox-profiles.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

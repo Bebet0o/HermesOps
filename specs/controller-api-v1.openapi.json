@@ -4187,6 +4187,21 @@
               "maximum": 200,
               "default": 50
             }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "ready",
+                "active",
+                "inactive",
+                "archived"
+              ]
+            }
           }
         ],
         "responses": {
@@ -4195,7 +4210,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SandboxProfileResponse"
+                  "$ref": "#/components/schemas/SandboxListResponse"
                 }
               }
             }
@@ -4253,7 +4268,8 @@
         },
         "tags": [
           "Sandboxes"
-        ]
+        ],
+        "description": "List persisted sandbox profile metadata. Milestone 2O never returns raw Hermesfile source or canonical JSON through this collection."
       },
       "post": {
         "operationId": "createSandbox",
@@ -4396,6 +4412,14 @@
                   "$ref": "#/components/schemas/SandboxProfileResponse"
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Quoted sandbox profile resource revision.",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "400": {
@@ -4451,7 +4475,8 @@
         },
         "tags": [
           "Sandboxes"
-        ]
+        ],
+        "description": "Return one persisted sandbox profile and its current validated revision metadata. Raw source remains private."
       },
       "patch": {
         "operationId": "updateSandbox",
@@ -7094,7 +7119,14 @@
           "source_format",
           "source_revision",
           "state",
-          "updated_at"
+          "updated_at",
+          "profile_name",
+          "description",
+          "labels",
+          "source_sha256",
+          "canonical_sha256",
+          "canonical_size",
+          "diagnostics"
         ],
         "properties": {
           "id": {
@@ -7140,6 +7172,43 @@
               "string",
               "null"
             ]
+          },
+          "profile_name": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            "maxLength": 63
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "labels": {
+            "type": "object",
+            "maxProperties": 64,
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 120
+            }
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "canonical_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "canonical_size": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 524288
+          },
+          "diagnostics": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/SandboxProfileDiagnostic"
+            }
           }
         }
       },
@@ -8701,6 +8770,43 @@
           "resource_revision": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "SandboxProfileDiagnostic": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "code",
+          "path",
+          "message",
+          "documentation"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "documentation": {
+            "type": "string",
+            "maxLength": 4096
           }
         }
       }

@@ -32,6 +32,7 @@ ALLOWED_EXECUTION_LIST_QUERY_FIELDS = {"cursor", "limit"}
 ALLOWED_REVIEW_RECOVERY_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 ALLOWED_PLAN_QUERY_FIELDS = {"cursor", "limit", "project_id", "state"}
 ALLOWED_ASSIGNMENT_QUERY_FIELDS = {"cursor", "limit", "project_id", "state", "run_id"}
+ALLOWED_SANDBOX_QUERY_FIELDS = {"cursor", "limit", "state"}
 ALLOWED_LOG_QUERY_FIELDS = {"after_sequence", "limit"}
 
 
@@ -452,6 +453,76 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "data": service.system_status(),
                 "meta": service.meta(request_id),
             }, {}
+
+        if path == "/api/v1/sandboxes":
+            unknown = set(query) - ALLOWED_SANDBOX_QUERY_FIELDS
+            if unknown:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                    "Only cursor, limit and state are supported.",
+                )
+            raw_limit = query.get("limit", ["50"])
+            raw_cursor = query.get("cursor", [])
+            raw_state = query.get("state", [])
+            if (
+                len(raw_limit) != 1
+                or len(raw_cursor) > 1
+                or len(raw_state) > 1
+            ):
+                raise ControllerError(
+                    400,
+                    "invalid_query",
+                    "Invalid query string",
+                )
+            try:
+                limit = int(raw_limit[0])
+            except ValueError as error:
+                raise ControllerError(
+                    400,
+                    "invalid_limit",
+                    "Invalid pagination limit",
+                    "limit must be an integer.",
+                ) from error
+            profiles, next_cursor = service.sandbox_profiles.list_profiles(
+                limit=limit,
+                cursor=raw_cursor[0] if raw_cursor else None,
+                state=raw_state[0] if raw_state else None,
+                cursor_secret=session_token,
+            )
+            return 200, {
+                "data": profiles,
+                "meta": service.meta(
+                    request_id,
+                    next_cursor=next_cursor,
+                ),
+            }, {}
+
+        sandbox_prefix = "/api/v1/sandboxes/"
+        if path.startswith(sandbox_prefix):
+            if query:
+                raise ControllerError(
+                    400,
+                    "unknown_query_parameter",
+                    "Unknown query parameter",
+                )
+            sandbox_id = unquote(path[len(sandbox_prefix):])
+            if not sandbox_id or "/" in sandbox_id:
+                raise ControllerError(
+                    404,
+                    "route_not_found",
+                    "Route not found",
+                )
+            profile = service.sandbox_profiles.get_profile(sandbox_id)
+            revision = int(profile["resource_revision"])
+            return 200, {
+                "data": profile,
+                "meta": service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            }, {"ETag": f'"{revision}"'}
 
         if path == "/api/v1/projects":
             unknown = set(query) - ALLOWED_PROJECT_QUERY_FIELDS
