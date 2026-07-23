@@ -868,3 +868,11 @@ scripts/hermesops-sandbox-profile.py list
 
 The Controller exposes authenticated list/detail metadata at
 `/api/v1/sandboxes`. Image builds and HTTP profile writes remain disabled.
+
+## Console HermesOps dédiée
+
+Le jalon 2P ajoute la fondation indépendante de la Console HermesOps sur
+`127.0.0.1:8788`. Elle fournit un shell navigable, un build Python déterministe,
+un service systemd utilisateur durci et des probes, sans encore appeler le
+Controller ni exposer de mutation. La WebUI Hermes historique reste sur le port
+8787 pendant la construction de la bêta.

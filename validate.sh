@@ -93,6 +93,11 @@ static_validation() {
         scripts/hermesops-controller-websocket-probe.py \
         scripts/hermesops-controller-operator.py \
         scripts/hermesops-controller-browser-auth-probe.py \
+        scripts/hermesops-console-build.py \
+        scripts/hermesops-console.py \
+        scripts/hermesops-console-probe.py \
+        tests/test-console-foundation.sh \
+        tests/test_console_service.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -116,6 +121,7 @@ static_validation() {
   migrations/017_browser_session_lifecycle.sql \
   migrations/020_sandbox_profile_persistence.sql \
         systemd/user/hermesops-controller-api.service \
+        systemd/user/hermesops-console.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
         docs/milestones/2C_CONTROLLER_API_SERVICE.md \
         docs/milestones/2G_SECURE_OBJECTIVE_COMMANDS.md \
@@ -125,6 +131,11 @@ static_validation() {
   docs/milestones/2M_PUBLIC_ORCHESTRATION_READS.md \
   docs/milestones/2N_HERMESFILE_V1.md \
   docs/milestones/2O_SANDBOX_PROFILE_PERSISTENCE.md \
+  docs/milestones/2P_CONSOLE_WEB_FOUNDATION.md \
+  docs/console/FOUNDATION.md \
+  console/src/index.html console/src/app.js console/src/styles.css \
+  console/dist/index.html console/dist/assets/app.js \
+  console/dist/assets/styles.css console/dist/asset-manifest.json \
   docs/hermesfile/SPECIFICATION_V1.md \
   specs/hermesfile-v1.schema.json \
   config/examples/Hermesfile \
@@ -228,6 +239,7 @@ PY
   "${REPO}/tests/test-controller-orchestration-reads.sh"
   "${REPO}/tests/test-hermesfile-v1.sh"
   "${REPO}/tests/test-sandbox-profiles.sh"
+  "${REPO}/tests/test-console-foundation.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 
@@ -287,6 +299,8 @@ runtime_validation() {
         http://127.0.0.1:8642/health >/dev/null
     curl --silent --show-error --fail --max-time 5 \
         http://127.0.0.1:8787/health >/dev/null
+    curl --silent --show-error --fail --max-time 5 \
+        http://127.0.0.1:8788/health >/dev/null
 
     readarray -t WORKER_LOCK < <(
         python3 - "${REPO}/config/worker-sandbox.lock.toml" <<'PY'
@@ -302,12 +316,15 @@ PY
     worker_actual="$(docker exec hermesops-sandbox-engine docker image inspect --format '{{.Id}}' "${WORKER_LOCK[0]}")"
     [[ "$worker_actual" == "${WORKER_LOCK[1]}" ]]
 
-    for unit in hermesops-supervisor.service hermesops-orchestrator.service hermesops-notifier.service hermesops-controller-api.service; do
+    for unit in hermesops-supervisor.service hermesops-orchestrator.service hermesops-notifier.service hermesops-controller-api.service hermesops-console.service; do
         systemctl --user is-enabled "$unit" >/dev/null
         systemctl --user is-active "$unit" >/dev/null
     done
 
     "${REPO}/tests/test-controller-service-persistence.sh"
+    "${REPO}/scripts/hermesops-console-probe.py" \
+        --base-url http://127.0.0.1:8788 \
+        --wait-seconds 10
     "${REPO}/scripts/hermesops-controller-objective-probe.py" \
         --base-url http://127.0.0.1:8765 \
         --session-file "${ROOT}/secrets/controller-session" \
