@@ -145,6 +145,98 @@
         </p>
       </section>
 
+      <section id="project-panel" class="project-panel" aria-labelledby="project-lifecycle-title" hidden>
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow">Jalon 2S</p>
+            <h2 id="project-lifecycle-title">Cycle de vie des projets</h2>
+            <p id="project-status" class="dashboard-status" aria-live="polite">Aucune lecture lancée.</p>
+          </div>
+          <button id="project-refresh" class="secondary-button" type="button">Actualiser</button>
+        </div>
+
+        <div class="project-grid">
+          <section class="dashboard-card" aria-labelledby="project-list-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Registre Controller</p>
+                <h3 id="project-list-title">Projets</h3>
+              </div>
+              <span id="project-count" class="count-badge">0</span>
+            </div>
+            <ul id="project-admin-list" class="project-admin-list"></ul>
+            <p id="project-coverage" class="coverage-note">Première page bornée du registre.</p>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="project-create-title">
+            <p class="eyebrow">Nouvelle intention</p>
+            <h3 id="project-create-title">Créer ou importer un projet</h3>
+            <form id="project-create-form" class="project-form" autocomplete="off">
+              <label>Nom
+                <input id="project-create-name" name="name" required maxlength="120">
+              </label>
+              <label>Identifiant
+                <input id="project-create-slug" name="slug" required maxlength="63" pattern="[a-z][a-z0-9-]{1,62}">
+              </label>
+              <label>Mode du dépôt
+                <select id="project-create-mode" name="mode">
+                  <option value="existing">Dépôt existant</option>
+                  <option value="initialize">Initialiser un dépôt</option>
+                  <option value="clone">Cloner un dépôt</option>
+                </select>
+              </label>
+              <label id="project-create-url-label" hidden>URL du dépôt
+                <input id="project-create-url" name="url" maxlength="2048" inputmode="url">
+              </label>
+              <label>Branche par défaut
+                <input id="project-create-branch" name="default_branch" value="main" required maxlength="255">
+              </label>
+              <label>Politique
+                <input id="project-create-policy" name="policy_id" value="default" required maxlength="63">
+              </label>
+              <label>Profil sandbox facultatif
+                <input id="project-create-sandbox" name="sandbox_profile_id" maxlength="63">
+              </label>
+              <button id="project-create-submit" type="submit">Soumettre au Controller</button>
+            </form>
+          </section>
+
+          <section id="project-detail-card" class="dashboard-card project-detail-card" aria-labelledby="project-detail-title" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Ressource sélectionnée</p>
+                <h3 id="project-detail-title">Détail projet</h3>
+              </div>
+              <span id="project-detail-state" class="state-badge">inconnu</span>
+            </div>
+            <p id="project-detail-meta" class="project-meta"></p>
+            <form id="project-update-form" class="project-form" autocomplete="off">
+              <label>Nom
+                <input id="project-update-name" name="name" required maxlength="120">
+              </label>
+              <label>Politique
+                <input id="project-update-policy" name="policy_id" required maxlength="63">
+              </label>
+              <label>Profil sandbox facultatif
+                <input id="project-update-sandbox" name="sandbox_profile_id" maxlength="63">
+              </label>
+              <button id="project-update-submit" type="submit">Enregistrer les métadonnées</button>
+            </form>
+            <div class="project-command-box">
+              <label>Motif facultatif
+                <textarea id="project-command-reason" maxlength="1000" rows="3"></textarea>
+              </label>
+              <div id="project-command-buttons" class="project-command-buttons">
+                <button type="button" data-project-command="enable">Activer</button>
+                <button type="button" data-project-command="disable">Désactiver</button>
+                <button type="button" data-project-command="rescan">Rescanner</button>
+                <button type="button" data-project-command="archive" class="danger-button">Archiver</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <section id="route-panel" class="route-panel" aria-live="polite">
         <div>
           <p class="eyebrow">Espace fonctionnel</p>
@@ -156,7 +248,7 @@
 
       <footer>
         <span>HermesOps v0.1.0-alpha</span>
-        <span>Dashboard 2R · lectures Controller bornées · aucune persistance navigateur</span>
+        <span>Console 2S · cycle de vie projet borné · aucune persistance navigateur</span>
       </footer>
     </main>
   </div>

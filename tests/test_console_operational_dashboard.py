@@ -29,6 +29,7 @@ class ConsoleOperationalDashboardSourceTest(unittest.TestCase):
             ("POST", "/api/v1/auth/logout"),
             ("GET", "/api/v1/system/capabilities"),
             ("GET", "/api/v1/projects"),
+            ("POST", "/api/v1/projects"),
             ("GET", "/api/v1/objectives"),
             ("GET", "/api/v1/reviews"),
             ("GET", "/api/v1/recoveries"),

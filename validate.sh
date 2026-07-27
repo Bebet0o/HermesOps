@@ -99,9 +99,13 @@ static_validation() {
         tests/test-console-foundation.sh \
         tests/test-console-controller-client.sh \
         tests/test-console-operational-dashboard.sh \
+        tests/test-controller-project-lifecycle.sh \
+        tests/test-console-project-lifecycle.sh \
         tests/test_console_service.py \
         tests/test_console_controller_client.py \
         tests/test_console_operational_dashboard.py \
+        tests/test_controller_project_lifecycle.py \
+        tests/test_console_project_lifecycle.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -110,6 +114,7 @@ static_validation() {
         controller_api/review_recovery_probe.py \
         controller_api/objective_commands.py \
         controller_api/objective_command_probe.py \
+        controller_api/project_commands.py \
         controller_api/review_commands.py \
         controller_api/review_command_probe.py \
   controller_api/event_journal.py \
@@ -124,6 +129,7 @@ static_validation() {
   migrations/016_controller_event_journal_hardening.sql \
   migrations/017_browser_session_lifecycle.sql \
   migrations/020_sandbox_profile_persistence.sql \
+  migrations/021_project_lifecycle.sql \
         systemd/user/hermesops-controller-api.service \
         systemd/user/hermesops-console.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
@@ -138,8 +144,10 @@ static_validation() {
   docs/milestones/2P_CONSOLE_WEB_FOUNDATION.md \
   docs/milestones/2Q_BROWSER_SESSION_CONTROLLER_CLIENT.md \
   docs/milestones/2R_OPERATIONAL_DASHBOARD.md \
+  docs/milestones/2S_PROJECT_LIFECYCLE.md \
   docs/console/FOUNDATION.md docs/console/CONTROLLER_CLIENT.md \
   docs/console/OPERATIONAL_DASHBOARD.md \
+  docs/console/PROJECT_LIFECYCLE.md \
   console/src/index.html console/src/app.js \
   console/src/controller-client.js console/src/styles.css \
   console/dist/index.html console/dist/assets/app.js \
@@ -251,6 +259,8 @@ PY
   "${REPO}/tests/test-console-foundation.sh"
   "${REPO}/tests/test-console-controller-client.sh"
   "${REPO}/tests/test-console-operational-dashboard.sh"
+  "${REPO}/tests/test-controller-project-lifecycle.sh"
+  "${REPO}/tests/test-console-project-lifecycle.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

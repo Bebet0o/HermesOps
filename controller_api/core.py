@@ -301,47 +301,10 @@ class ReadOnlyDatabase:
             return False, "database cannot be read"
         return True, "ready"
 
-    def _read_default_branch(self, row: sqlite3.Row) -> str:
-        configured = Path(str(row["config_source"]))
-        allowed = (
-            self.settings.root / "repo" / "config" / "projects.d"
-        ).resolve(strict=False)
-
-        try:
-            candidate = configured.resolve(strict=True)
-            relative = candidate.relative_to(allowed)
-        except (OSError, ValueError):
-            return "unknown"
-
-        if (
-            len(relative.parts) != 1
-            or candidate.suffix != ".toml"
-        ):
-            return "unknown"
-
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-
-        try:
-            descriptor = os.open(candidate, flags)
-        except OSError:
-            return "unknown"
-
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                return "unknown"
-            if metadata.st_size > MAX_CONFIG_BYTES:
-                return "unknown"
-            with os.fdopen(descriptor, "rb", closefd=False) as stream:
-                data = tomllib.load(stream)
-            value = data.get("git", {}).get("default_branch")
-        except (OSError, tomllib.TOMLDecodeError, AttributeError):
-            return "unknown"
-        finally:
-            os.close(descriptor)
-
-        return value if isinstance(value, str) and value else "unknown"
+    @staticmethod
+    def _read_default_branch(row: sqlite3.Row) -> str:
+        value = str(row["default_branch"])
+        return value if value else "unknown"
 
     @staticmethod
     def _revision(config_hash: str) -> int:
@@ -352,15 +315,28 @@ class ReadOnlyDatabase:
 
     def _project(self, row: sqlite3.Row) -> dict[str, Any]:
         project_id = str(row["project_id"])
+        state = (
+            "archived"
+            if int(row["archived"])
+            else ("enabled" if int(row["enabled"]) else "disabled")
+        )
         return {
             "id": project_id,
             "slug": project_id,
             "name": str(row["display_name"]),
-            "state": "enabled" if int(row["enabled"]) else "disabled",
+            "state": state,
             "default_branch": self._read_default_branch(row),
             "policy_id": str(row["policy_id"]),
-            "sandbox_profile_id": None,
-            "resource_revision": self._revision(str(row["config_hash"])),
+            "sandbox_profile_id": (
+                str(row["sandbox_profile_id"])
+                if row["sandbox_profile_id"] is not None
+                else None
+            ),
+            "repository": {
+                "mode": str(row["repository_mode"]),
+                "managed_path": True,
+            },
+            "resource_revision": int(row["resource_revision"]),
             "created_at": str(row["registered_at"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -394,6 +370,11 @@ class ReadOnlyDatabase:
                 enabled,
                 config_source,
                 config_hash,
+                default_branch,
+                sandbox_profile_id,
+                archived,
+                repository_mode,
+                resource_revision,
                 registered_at,
                 updated_at
             FROM projects
@@ -441,6 +422,11 @@ class ReadOnlyDatabase:
                         enabled,
                         config_source,
                         config_hash,
+                        default_branch,
+                        sandbox_profile_id,
+                        archived,
+                        repository_mode,
+                        resource_revision,
                         registered_at,
                         updated_at
                     FROM projects
@@ -474,12 +460,14 @@ class ControllerService:
         from .sandbox_profiles import SandboxProfileStore
         from .objective_commands import ObjectiveCommandStore
         from .review_commands import ReviewCommandStore
+        from .project_commands import ProjectCommandStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
         self.orchestration = OrchestrationReadStore(settings)
         self.sandbox_profiles = SandboxProfileStore(settings)
         self.commands = ObjectiveCommandStore(settings)
+        self.project_commands = ProjectCommandStore(settings)
         self.review_commands = ReviewCommandStore(settings)
         from .browser_auth import BrowserAuthStore
         self.browser_auth = BrowserAuthStore(settings)
@@ -627,6 +615,9 @@ class ControllerService:
         command_ready, command_reason = self.commands.readiness()
         if not command_ready:
             reasons.append(command_reason)
+        project_command_ready, project_command_reason = self.project_commands.readiness()
+        if not project_command_ready:
+            reasons.append(project_command_reason)
         review_command_ready, review_command_reason = self.review_commands.readiness()
         if not review_command_ready:
             reasons.append(review_command_reason)
@@ -647,7 +638,11 @@ class ControllerService:
             "features": {
                 "read_only_controller_api": False,
                 "project_reads": True,
-                "project_writes": False,
+                "project_writes": True,
+                "project_write_commands": [
+                    "create", "update", "enable", "disable", "rescan", "archive"
+                ],
+                "project_delete": False,
                 "objective_reads": True,
                 "operation_reads": True,
                 "legacy_operation_projection": True,
@@ -690,6 +685,9 @@ class ControllerService:
 
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
+        project_operation = self.project_commands.get_operation(operation_id)
+        if project_operation is not None:
+            return project_operation
         review_operation = self.review_commands.get_operation(operation_id)
         if review_operation is not None:
             return review_operation

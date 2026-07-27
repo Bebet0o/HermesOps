@@ -52,6 +52,7 @@ CONTROLLER_ROUTES = frozenset(
         ("POST", "/api/v1/auth/logout"),
         ("GET", "/api/v1/system/capabilities"),
         ("GET", "/api/v1/projects"),
+        ("POST", "/api/v1/projects"),
         ("GET", "/api/v1/objectives"),
         ("GET", "/api/v1/reviews"),
         ("GET", "/api/v1/recoveries"),
@@ -59,6 +60,29 @@ CONTROLLER_ROUTES = frozenset(
         ("GET", "/api/v1/reviewer-assignments"),
     }
 )
+PROJECT_ID_PATTERN = __import__("re").compile(r"^[a-z][a-z0-9-]{1,62}$")
+PROJECT_COMMANDS = frozenset({"enable", "disable", "rescan", "archive"})
+
+
+def _controller_route_exposed(method: str, path: str) -> bool:
+    if (method, path) in CONTROLLER_ROUTES:
+        return True
+    prefix = "/api/v1/projects/"
+    if not path.startswith(prefix):
+        return False
+    suffix = path[len(prefix):]
+    if method in {"GET", "PATCH"}:
+        return PROJECT_ID_PATTERN.fullmatch(suffix) is not None
+    marker = "/commands/"
+    if method == "POST" and marker in suffix:
+        project_id, command = suffix.split(marker, 1)
+        return (
+            PROJECT_ID_PATTERN.fullmatch(project_id) is not None
+            and command in PROJECT_COMMANDS
+        )
+    return False
+
+
 REQUEST_HEADER_ALLOWLIST = frozenset(
     {
         "accept",
@@ -77,6 +101,7 @@ SINGLETON_REQUEST_HEADERS = frozenset(
         "cookie",
         "expect",
         "idempotency-key",
+        "if-match",
         "origin",
         "transfer-encoding",
         "x-csrf-token",
@@ -458,7 +483,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return
         if path.startswith("/api/"):
             if head_only:
-                self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, POST")
+                self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, POST, PATCH")
             else:
                 self._proxy_controller("GET", path, request_id)
             return
@@ -541,7 +566,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._problem(400, "unexpected_request_body", "GET request body is not allowed", request_id)
             self.close_connection = True
             return None
-        if method == "POST":
+        if method in {"POST", "PATCH"}:
             content_type = self.headers.get("Content-Type", "")
             if content_type.split(";", 1)[0].strip().lower() != "application/json":
                 self._problem(415, "unsupported_media_type", "Controller requests require JSON", request_id)
@@ -563,7 +588,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     def _validated_origin(self, method: str, request_id: str) -> bool:
         values = self.headers.get_all("Origin", failobj=[])
-        if method == "POST":
+        if method in {"POST", "PATCH"}:
             if len(values) != 1 or values[0] != self._browser_origin():
                 self._problem(403, "origin_forbidden", "Request origin is forbidden", request_id)
                 return False
@@ -587,18 +612,18 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         return result
 
     def _proxy_controller(self, method: str, path: str, request_id: str) -> None:
-        if (method, path) not in CONTROLLER_ROUTES:
+        if not _controller_route_exposed(method, path):
             self._problem(404, "controller_route_not_exposed", "Controller route is not exposed", request_id)
-            if method == "POST":
+            if method in {"POST", "PATCH"}:
                 self.close_connection = True
             return
         if not self._singleton_headers_valid():
             self._problem(400, "duplicate_header", "Duplicate request header", request_id)
-            if method == "POST":
+            if method in {"POST", "PATCH"}:
                 self.close_connection = True
             return
         if not self._validated_origin(method, request_id):
-            if method == "POST":
+            if method in {"POST", "PATCH"}:
                 self.close_connection = True
             return
         body = self._validated_proxy_body(method, request_id)
@@ -613,7 +638,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             connection.request(
                 method,
                 path,
-                body=body if method == "POST" else None,
+                body=body if method in {"POST", "PATCH"} else None,
                 headers=self._proxy_request_headers(method),
             )
             response = connection.getresponse()
@@ -680,7 +705,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._serve_static(head_only=True)
 
-    def do_POST(self) -> None:
+    def _serve_mutation(self, method: str) -> None:
         request_id = self._request_id()
         if not self._valid_host():
             self._problem(400, "invalid_host", "Invalid Host header", request_id)
@@ -689,18 +714,23 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if path is None:
             return
         if path.startswith("/api/"):
-            self._proxy_controller("POST", path, request_id)
+            self._proxy_controller(method, path, request_id)
             return
         self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, HEAD")
         self.close_connection = True
 
+    def do_POST(self) -> None:
+        self._serve_mutation("POST")
+
+    def do_PATCH(self) -> None:
+        self._serve_mutation("PATCH")
+
     def _method_not_allowed(self) -> None:
         request_id = self._request_id()
-        self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, HEAD, POST")
+        self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, HEAD, POST, PATCH")
         self.close_connection = True
 
     do_PUT = _method_not_allowed
-    do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed
     do_OPTIONS = _method_not_allowed
     do_TRACE = _method_not_allowed

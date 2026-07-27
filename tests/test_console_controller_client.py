@@ -46,7 +46,14 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
         )
         return body
 
-    def _send_json(self, status: int, payload: dict[str, object], *, cookie: str | None = None) -> None:
+    def _send_json(
+        self,
+        status: int,
+        payload: dict[str, object],
+        *,
+        cookie: str | None = None,
+        etag: str | None = None,
+    ) -> None:
         body = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -57,6 +64,8 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Request-ID", "controller-request-0001")
         if cookie is not None:
             self.send_header("Set-Cookie", cookie)
+        if etag is not None:
+            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 
@@ -66,6 +75,8 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(401, {"code": "authentication_required", "title": "Authentication required"})
         elif self.path == "/api/v1/system/capabilities":
             self._send_json(200, {"data": {"features": {"browser_session_lifecycle": True}}})
+        elif self.path == "/api/v1/projects/alpha":
+            self._send_json(200, {"data": {"id": "alpha", "name": "Alpha", "state": "disabled", "resource_revision": 1}}, etag='"1"')
         elif self.path in {
             "/api/v1/projects",
             "/api/v1/objectives",
@@ -98,6 +109,15 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
                 {"data": {"authenticated": False}},
                 cookie="hermesops_session=; Max-Age=0; HttpOnly; Secure; SameSite=Strict; Path=/",
             )
+        elif self.path == "/api/v1/projects" or self.path.startswith("/api/v1/projects/alpha/commands/"):
+            self._send_json(202, {"data": {"operation_id": "operation-" + "a" * 32, "state": "succeeded"}})
+        else:
+            self._send_json(404, {"code": "not_found", "title": "Not found"})
+
+    def do_PATCH(self) -> None:
+        self._record()
+        if self.path == "/api/v1/projects/alpha":
+            self._send_json(202, {"data": {"operation_id": "operation-" + "b" * 32, "state": "succeeded"}})
         else:
             self._send_json(404, {"code": "not_found", "title": "Not found"})
 

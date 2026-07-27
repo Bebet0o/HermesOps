@@ -130,6 +130,9 @@ def load_controller() -> dict[str, Any]:
             "Unsupported controller schema version"
         )
 
+    if "HERMESOPS_ROOT" in os.environ:
+        controller["root"] = str(ROOT)
+
     return controller
 
 
@@ -429,19 +432,52 @@ def command_sync() -> None:
                     config_source,
                     config_hash,
                     registered_at,
-                    updated_at
+                    updated_at,
+                    default_branch,
+                    archived,
+                    repository_mode,
+                    resource_revision
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'existing', 1)
                 ON CONFLICT(project_id)
                 DO UPDATE SET
+                    resource_revision = projects.resource_revision + CASE WHEN
+                           projects.display_name IS NOT excluded.display_name
+                        OR projects.repo_path IS NOT excluded.repo_path
+                        OR projects.data_path IS NOT excluded.data_path
+                        OR projects.policy_id IS NOT excluded.policy_id
+                        OR projects.enabled IS NOT CASE
+                            WHEN projects.archived = 1 THEN 0
+                            ELSE excluded.enabled
+                        END
+                        OR projects.config_source IS NOT excluded.config_source
+                        OR projects.config_hash IS NOT excluded.config_hash
+                        OR projects.default_branch IS NOT excluded.default_branch
+                    THEN 1 ELSE 0 END,
                     display_name = excluded.display_name,
                     repo_path = excluded.repo_path,
                     data_path = excluded.data_path,
                     policy_id = excluded.policy_id,
-                    enabled = excluded.enabled,
+                    enabled = CASE
+                        WHEN projects.archived = 1 THEN 0
+                        ELSE excluded.enabled
+                    END,
                     config_source = excluded.config_source,
                     config_hash = excluded.config_hash,
-                    updated_at = excluded.updated_at
+                    default_branch = excluded.default_branch,
+                    updated_at = CASE WHEN
+                           projects.display_name IS NOT excluded.display_name
+                        OR projects.repo_path IS NOT excluded.repo_path
+                        OR projects.data_path IS NOT excluded.data_path
+                        OR projects.policy_id IS NOT excluded.policy_id
+                        OR projects.enabled IS NOT CASE
+                            WHEN projects.archived = 1 THEN 0
+                            ELSE excluded.enabled
+                        END
+                        OR projects.config_source IS NOT excluded.config_source
+                        OR projects.config_hash IS NOT excluded.config_hash
+                        OR projects.default_branch IS NOT excluded.default_branch
+                    THEN excluded.updated_at ELSE projects.updated_at END
                 """,
                 (
                     project["project_id"],
@@ -454,6 +490,7 @@ def command_sync() -> None:
                     project["config_hash"],
                     now,
                     now,
+                    project["default_branch"],
                 ),
             )
 
@@ -472,8 +509,10 @@ def command_sync() -> None:
                 f"""
                 UPDATE projects
                 SET enabled = 0,
-                    updated_at = ?
+                    updated_at = ?,
+                    resource_revision = resource_revision + 1
                 WHERE project_id NOT IN ({placeholders})
+                  AND enabled != 0
                 """,
                 (now, *project_ids),
             )
@@ -482,7 +521,9 @@ def command_sync() -> None:
                 """
                 UPDATE projects
                 SET enabled = 0,
-                    updated_at = ?
+                    updated_at = ?,
+                    resource_revision = resource_revision + 1
+                WHERE enabled != 0
                 """,
                 (now,),
             )

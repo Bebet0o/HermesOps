@@ -14,7 +14,7 @@ const routes = Object.freeze({
   "/projects": {
     key: "projects",
     title: "Projets",
-    message: "La création, l’import et l’administration des projets arriveront au jalon 2S.",
+    message: "Connectez-vous pour créer, importer et administrer les projets via le Controller.",
   },
   "/objectives": {
     key: "objectives",
@@ -58,6 +58,25 @@ const dashboardRefresh = document.getElementById("dashboard-refresh");
 const dashboardStatus = document.getElementById("dashboard-status");
 const dashboardCoverage = document.getElementById("dashboard-coverage");
 const routePanel = document.getElementById("route-panel");
+const projectPanel = document.getElementById("project-panel");
+const projectRefresh = document.getElementById("project-refresh");
+const projectStatus = document.getElementById("project-status");
+const projectCoverage = document.getElementById("project-coverage");
+const projectCount = document.getElementById("project-count");
+const projectAdminList = document.getElementById("project-admin-list");
+const projectCreateForm = document.getElementById("project-create-form");
+const projectCreateMode = document.getElementById("project-create-mode");
+const projectCreateUrlLabel = document.getElementById("project-create-url-label");
+const projectCreateUrl = document.getElementById("project-create-url");
+const projectCreateSubmit = document.getElementById("project-create-submit");
+const projectDetailCard = document.getElementById("project-detail-card");
+const projectDetailTitle = document.getElementById("project-detail-title");
+const projectDetailState = document.getElementById("project-detail-state");
+const projectDetailMeta = document.getElementById("project-detail-meta");
+const projectUpdateForm = document.getElementById("project-update-form");
+const projectUpdateSubmit = document.getElementById("project-update-submit");
+const projectCommandReason = document.getElementById("project-command-reason");
+const projectCommandButtons = document.getElementById("project-command-buttons");
 
 const dashboardResources = Object.freeze([
   Object.freeze({ key: "projects", load: () => client.projects() }),
@@ -79,6 +98,12 @@ let authenticated = false;
 let dashboardLoading = false;
 let dashboardGeneration = 0;
 let dashboardLoaded = false;
+let projectLoading = false;
+let projectGeneration = 0;
+let projectsLoaded = false;
+let selectedProjectId = "";
+let selectedProjectEtag = "";
+let selectedProject = null;
 
 function canonicalPath(pathname) {
   if (pathname.length > 1 && pathname.endsWith("/")) {
@@ -112,9 +137,12 @@ function safeId(item, fallback) {
 }
 
 function displayFunctionalPanel() {
-  const dashboardRoute = currentRoute().key === "dashboard";
+  const key = currentRoute().key;
+  const dashboardRoute = key === "dashboard";
+  const projectsRoute = key === "projects";
   dashboardPanel.hidden = !dashboardRoute || !authenticated;
-  routePanel.hidden = dashboardRoute && authenticated;
+  projectPanel.hidden = !projectsRoute || !authenticated;
+  routePanel.hidden = authenticated && (dashboardRoute || projectsRoute);
 }
 
 function render(pathname, focusMain = false) {
@@ -136,6 +164,9 @@ function render(pathname, focusMain = false) {
   if (route.key === "dashboard" && authenticated && !dashboardLoaded) {
     void refreshDashboard();
   }
+  if (route.key === "projects" && authenticated && !projectsLoaded) {
+    void refreshProjects();
+  }
 
   if (focusMain) {
     document.getElementById("main-content").focus({ preventScroll: true });
@@ -154,6 +185,7 @@ function showSignedOut(message = "Authentification requise pour accéder aux don
   dashboardLoading = false;
   dashboardLoaded = false;
   dashboardRefresh.disabled = false;
+  clearProjectState();
   sessionPanel.dataset.state = "signed-out";
   sessionStatus.textContent = "Session fermée";
   sessionDetail.textContent = message;
@@ -183,6 +215,9 @@ function showAuthenticated(session, capabilities) {
   if (currentRoute().key === "dashboard") {
     void refreshDashboard();
   }
+  if (currentRoute().key === "projects") {
+    void refreshProjects();
+  }
 }
 
 function showUnavailable(error) {
@@ -191,6 +226,7 @@ function showUnavailable(error) {
   dashboardLoading = false;
   dashboardLoaded = false;
   dashboardRefresh.disabled = false;
+  clearProjectState();
   sessionPanel.dataset.state = "unavailable";
   sessionStatus.textContent = "Controller indisponible";
   const requestSuffix = error instanceof ControllerClientError && error.requestId
@@ -418,6 +454,217 @@ async function refreshDashboard() {
   }
 }
 
+function clearProjectState() {
+  projectGeneration += 1;
+  projectLoading = false;
+  projectsLoaded = false;
+  selectedProjectId = "";
+  selectedProjectEtag = "";
+  selectedProject = null;
+  projectRefresh.disabled = false;
+  projectCount.textContent = "0";
+  projectAdminList.replaceChildren();
+  projectDetailCard.hidden = true;
+  projectCommandReason.value = "";
+}
+
+function projectErrorMessage(error, fallback) {
+  const reference = error instanceof ControllerClientError && error.requestId
+    ? ` Référence : ${error.requestId}.`
+    : "";
+  const title = error instanceof Error ? safeText(error.message, fallback, 160) : fallback;
+  return `${title}${reference}`;
+}
+
+function setProjectBusy(busy) {
+  projectLoading = busy;
+  projectRefresh.disabled = busy;
+  projectCreateSubmit.disabled = busy;
+  projectUpdateSubmit.disabled = busy;
+  projectCreateForm.querySelectorAll("input, select").forEach((control) => {
+    control.disabled = busy;
+  });
+  projectUpdateForm.querySelectorAll("input").forEach((control) => {
+    control.disabled = busy;
+  });
+  projectCommandButtons.querySelectorAll("button").forEach((button) => {
+    button.disabled = busy;
+  });
+}
+
+function renderProjectList(collection) {
+  projectAdminList.replaceChildren();
+  projectCount.textContent = String(collection.items.length);
+  projectCoverage.textContent = collection.truncated
+    ? "Une page suivante existe : la liste reste volontairement bornée."
+    : "La première page reçue est complète selon les métadonnées Controller.";
+  if (collection.items.length === 0) {
+    appendEmpty(projectAdminList, "Aucun projet enregistré.");
+    return;
+  }
+  for (const project of collection.items) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const heading = document.createElement("strong");
+    const detail = document.createElement("span");
+    const state = document.createElement("span");
+    const identifier = safeId(project, "projet");
+    button.type = "button";
+    button.dataset.projectId = identifier;
+    button.className = "project-list-button";
+    if (identifier === selectedProjectId) {
+      button.setAttribute("aria-current", "true");
+    }
+    heading.textContent = safeText(project.name, identifier, 120);
+    detail.textContent = `${identifier} · ${safeText(project.default_branch, "branche inconnue", 64)}`;
+    state.className = "state-badge";
+    state.dataset.state = safeState(project);
+    state.textContent = safeState(project);
+    button.append(heading, detail, state);
+    item.append(button);
+    projectAdminList.append(item);
+  }
+}
+
+function renderProjectDetail(project, etag) {
+  selectedProject = project;
+  selectedProjectId = safeId(project, "");
+  selectedProjectEtag = typeof etag === "string" ? etag : "";
+  projectDetailCard.hidden = false;
+  projectDetailTitle.textContent = safeText(project.name, selectedProjectId, 120);
+  const state = safeState(project);
+  projectDetailState.dataset.state = state;
+  projectDetailState.textContent = state;
+  projectDetailMeta.textContent = [
+    `Identifiant ${selectedProjectId}`,
+    `branche ${safeText(project.default_branch, "inconnue", 64)}`,
+    `mode ${safeText(project.repository && project.repository.mode, "non renseigné", 32)}`,
+    `révision ${Number.isInteger(project.resource_revision) ? project.resource_revision : "inconnue"}`,
+  ].join(" · ");
+  document.getElementById("project-update-name").value = safeText(project.name, "", 120);
+  document.getElementById("project-update-policy").value = safeText(project.policy_id, "default", 63);
+  document.getElementById("project-update-sandbox").value = typeof project.sandbox_profile_id === "string"
+    ? safeText(project.sandbox_profile_id, "", 63)
+    : "";
+  projectCommandReason.value = "";
+  projectCommandButtons.querySelectorAll("button[data-project-command]").forEach((button) => {
+    const command = button.dataset.projectCommand;
+    button.hidden = (command === "enable" && state === "enabled")
+      || (command === "disable" && state !== "enabled")
+      || (state === "archived" && command !== "rescan");
+  });
+}
+
+async function selectProject(identifier) {
+  if (!authenticated || projectLoading) {
+    return;
+  }
+  setProjectBusy(true);
+  projectStatus.textContent = `Lecture du projet ${safeText(identifier, "sélectionné", 63)}…`;
+  try {
+    const result = await client.project(identifier);
+    renderProjectDetail(result.project, result.etag);
+    projectStatus.textContent = "Détail projet chargé depuis le Controller.";
+    const collection = await client.projects();
+    renderProjectList(collection);
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les projets.");
+      return;
+    }
+    projectStatus.textContent = projectErrorMessage(error, "Lecture du projet impossible.");
+  } finally {
+    setProjectBusy(false);
+  }
+}
+
+async function refreshProjects() {
+  if (!authenticated || projectLoading) {
+    return;
+  }
+  const generation = ++projectGeneration;
+  setProjectBusy(true);
+  projectStatus.textContent = "Lecture du registre projet…";
+  try {
+    const collection = await client.projects();
+    if (generation !== projectGeneration || !authenticated) {
+      return;
+    }
+    renderProjectList(collection);
+    projectsLoaded = true;
+    projectStatus.textContent = `${collection.items.length} projet(s) reçu(s) du Controller.`;
+    if (selectedProjectId && collection.items.some((item) => safeId(item, "") === selectedProjectId)) {
+      const result = await client.project(selectedProjectId);
+      if (generation === projectGeneration && authenticated) {
+        renderProjectDetail(result.project, result.etag);
+      }
+    } else {
+      selectedProjectId = "";
+      selectedProjectEtag = "";
+      selectedProject = null;
+      projectDetailCard.hidden = true;
+    }
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les projets.");
+      return;
+    }
+    projectStatus.textContent = projectErrorMessage(error, "Registre projet indisponible.");
+  } finally {
+    if (generation === projectGeneration) {
+      setProjectBusy(false);
+    }
+  }
+}
+
+async function runProjectMutation(label, operation) {
+  if (!authenticated || projectLoading) {
+    return;
+  }
+  setProjectBusy(true);
+  projectStatus.textContent = `${label}…`;
+  try {
+    const accepted = await operation();
+    const operationId = safeText(accepted.operation_id, "opération acceptée", 96);
+    projectStatus.textContent = `${label} acceptée par le Controller · ${operationId}.`;
+    projectsLoaded = false;
+    setProjectBusy(false);
+    await refreshProjects();
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous avant toute nouvelle commande.");
+      return;
+    }
+    projectStatus.textContent = projectErrorMessage(error, `${label} impossible.`);
+  } finally {
+    setProjectBusy(false);
+  }
+}
+
+async function submitProjectCreate() {
+  const mode = projectCreateMode.value;
+  const sandbox = document.getElementById("project-create-sandbox").value.trim();
+  const intent = {
+    name: document.getElementById("project-create-name").value.trim(),
+    slug: document.getElementById("project-create-slug").value.trim(),
+    repository: {
+      mode,
+      default_branch: document.getElementById("project-create-branch").value.trim(),
+      url: mode === "clone" ? projectCreateUrl.value.trim() : null,
+    },
+    policy_id: document.getElementById("project-create-policy").value.trim(),
+    sandbox_profile_id: sandbox || null,
+  };
+  await runProjectMutation("Création du projet", () => client.createProject(intent));
+  if (!projectLoading) {
+    projectCreateForm.reset();
+    projectCreateMode.value = "existing";
+    document.getElementById("project-create-branch").value = "main";
+    document.getElementById("project-create-policy").value = "default";
+    projectCreateUrlLabel.hidden = true;
+  }
+}
+
 async function refreshSession() {
   setConnection("checking", "Vérification…", "Lecture de la session auprès du Controller.");
   try {
@@ -488,6 +735,78 @@ logoutButton.addEventListener("click", async () => {
 dashboardRefresh.addEventListener("click", () => {
   dashboardLoaded = false;
   void refreshDashboard();
+});
+
+projectRefresh.addEventListener("click", () => {
+  projectsLoaded = false;
+  void refreshProjects();
+});
+
+projectCreateMode.addEventListener("change", () => {
+  const clone = projectCreateMode.value === "clone";
+  projectCreateUrlLabel.hidden = !clone;
+  projectCreateUrl.required = clone;
+  if (!clone) {
+    projectCreateUrl.value = "";
+  }
+});
+
+projectCreateForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitProjectCreate();
+});
+
+projectAdminList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-project-id]");
+  if (button) {
+    void selectProject(button.dataset.projectId || "");
+  }
+});
+
+projectUpdateForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!selectedProjectId || !selectedProjectEtag) {
+    projectStatus.textContent = "Sélectionnez un projet avant de modifier ses métadonnées.";
+    return;
+  }
+  const sandbox = document.getElementById("project-update-sandbox").value.trim();
+  const changes = {
+    name: document.getElementById("project-update-name").value.trim(),
+    policy_id: document.getElementById("project-update-policy").value.trim(),
+    sandbox_profile_id: sandbox || null,
+  };
+  void runProjectMutation(
+    "Mise à jour du projet",
+    () => client.updateProject(selectedProjectId, selectedProjectEtag, changes),
+  );
+});
+
+projectCommandButtons.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-project-command]");
+  if (!button || !selectedProjectId || !selectedProjectEtag) {
+    return;
+  }
+  const command = button.dataset.projectCommand || "";
+  if (command === "archive") {
+    const accepted = globalThis.confirm(
+      `Archiver ${selectedProjectId} désactive définitivement son usage opérationnel. Continuer ?`,
+    );
+    if (!accepted) {
+      projectStatus.textContent = "Archivage annulé avant envoi au Controller.";
+      return;
+    }
+  }
+  const labels = {
+    enable: "Activation du projet",
+    disable: "Désactivation du projet",
+    rescan: "Rescan du dépôt",
+    archive: "Archivage du projet",
+  };
+  const reason = projectCommandReason.value.trim() || null;
+  void runProjectMutation(
+    labels[command] || "Commande projet",
+    () => client.commandProject(selectedProjectId, command, selectedProjectEtag, reason),
+  );
 });
 
 window.addEventListener("popstate", () => render(window.location.pathname));

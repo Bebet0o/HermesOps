@@ -566,8 +566,15 @@ curl --fail http://127.0.0.1:8787/health
 curl --fail http://127.0.0.1:8788/health
 ```
 
-## Registering a project
+## Registering and managing a project
 
+The preferred 2S workflow is the authenticated HermesOps Console at
+`http://127.0.0.1:8788/projects`. It can create or import a managed repository,
+update bounded metadata, and enable, disable, rescan, or archive the project.
+Project deletion, automatic push, remote/default-branch mutation, and Hermesfile
+editing remain unavailable.
+
+The local registry commands remain a compatibility and recovery interface.
 Create the workspace and data paths:
 
 ```bash

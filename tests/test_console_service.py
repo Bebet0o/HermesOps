@@ -174,7 +174,7 @@ class ConsoleHTTPTest(unittest.TestCase):
         for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"):
             status, headers, body = self.request("/", method=method, body=b"ignored")
             self.assertEqual(status, 405, method)
-            self.assertIn(headers["allow"], {"GET, HEAD", "GET, HEAD, POST"})
+            self.assertIn(headers["allow"], {"GET, HEAD", "GET, HEAD, POST, PATCH"})
             self.assertLess(len(body), 500)
 
     def test_capacity_exhaustion_is_bounded_and_hardened(self) -> None:

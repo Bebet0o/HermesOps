@@ -1,6 +1,6 @@
 # Console Browser Session and Controller Client
 
-Status: **implemented by milestone 2Q and extended by 2R**
+Status: **implemented by milestone 2Q and extended through 2S**
 
 ## Boundary
 
@@ -18,13 +18,13 @@ The Console service exposes a deliberately narrow same-origin gateway for:
 
 Milestone 2R additionally exposes six exact query-free GET collections for the
 operational dashboard: projects, objectives, reviews, recoveries, plans, and
-reviewer assignments. All other Controller paths remain unavailable until their
-owning milestones.
-The gateway is not a general reverse proxy.
+reviewer assignments. Milestone 2S adds only project detail, create, update, and
+`enable|disable|rescan|archive` command routes. All other Controller paths remain
+unavailable. The gateway is not a general reverse proxy.
 
 ## Origin translation
 
-The browser request must be same-origin with the live Console Host. For POST
+The browser request must be same-origin with the live Console Host. For POST and PATCH
 requests, one exact `Origin` header is mandatory. The Console validates that
 origin and then sends the Controller's configured trusted origin
 `http://127.0.0.1:8787` upstream. This preserves the existing Controller browser
@@ -55,7 +55,7 @@ capability reads. Every request uses:
 - `cache: "no-store"`;
 - redirect rejection;
 - a bounded timeout;
-- a cryptographically random idempotency key for POST requests.
+- a cryptographically random idempotency key for POST and PATCH requests.
 
 The application does not treat a login response as sufficient. It re-reads the
 authoritative session and capabilities before rendering an authenticated state.
@@ -70,7 +70,8 @@ queue mutations, retry passwords, or preserve destructive intent.
 
 Milestone 2Q does not add:
 
-- project or Hermesfile lifecycle operations;
+- Hermesfile lifecycle operations;
+- project deletion or repository/default-branch mutation;
 - objective or review commands;
 - WebSocket events;
 - offline queues or browser persistence;

@@ -12,6 +12,8 @@ const ALLOWED_ENDPOINTS = Object.freeze({
   reviewerAssignments: Object.freeze({ method: "GET", path: "/api/v1/reviewer-assignments" }),
 });
 
+const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{1,62}$/;
+const PROJECT_COMMANDS = new Set(["enable", "disable", "rescan", "archive"]);
 const REQUEST_TIMEOUT_MS = 7000;
 const MAX_ERROR_TEXT = 160;
 const MAX_COLLECTION_ITEMS = 200;
@@ -43,6 +45,16 @@ function safeText(value, fallback) {
   return normalized.slice(0, MAX_ERROR_TEXT) || fallback;
 }
 
+function projectId(value) {
+  if (typeof value !== "string" || !PROJECT_ID_PATTERN.test(value)) {
+    throw new ControllerClientError("Identifiant projet invalide.", {
+      status: 400,
+      code: "invalid_project_id",
+    });
+  }
+  return value;
+}
+
 async function parsePayload(response) {
   const contentType = response.headers.get("content-type") || "";
   const mediaType = contentType.split(";", 1)[0].trim().toLowerCase();
@@ -71,9 +83,15 @@ async function parsePayload(response) {
   }
 }
 
-async function request(endpointName, { body, csrfToken, idempotencyLabel } = {}) {
-  const endpoint = ALLOWED_ENDPOINTS[endpointName];
-  if (!endpoint) {
+async function request(endpoint, {
+  body,
+  csrfToken,
+  idempotencyLabel,
+  ifMatch,
+  includeEtag = false,
+} = {}) {
+  const resolved = typeof endpoint === "string" ? ALLOWED_ENDPOINTS[endpoint] : endpoint;
+  if (!resolved || !["GET", "POST", "PATCH"].includes(resolved.method)) {
     throw new ControllerClientError("Opération Controller non autorisée.", {
       code: "unsupported_controller_operation",
     });
@@ -81,21 +99,24 @@ async function request(endpointName, { body, csrfToken, idempotencyLabel } = {})
 
   const headers = new Headers({ Accept: "application/json" });
   let encodedBody;
-  if (endpoint.method === "POST") {
+  if (["POST", "PATCH"].includes(resolved.method)) {
     headers.set("Content-Type", "application/json");
-    headers.set("Idempotency-Key", idempotencyKey(idempotencyLabel || endpointName));
+    headers.set("Idempotency-Key", idempotencyKey(idempotencyLabel || "mutation"));
     encodedBody = JSON.stringify(body ?? {});
   }
   if (csrfToken) {
     headers.set("X-CSRF-Token", csrfToken);
+  }
+  if (ifMatch) {
+    headers.set("If-Match", ifMatch);
   }
 
   const controller = new AbortController();
   const timeout = globalThis.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let response;
   try {
-    response = await fetch(endpoint.path, {
-      method: endpoint.method,
+    response = await fetch(resolved.path, {
+      method: resolved.method,
       headers,
       body: encodedBody,
       credentials: "same-origin",
@@ -123,6 +144,9 @@ async function request(endpointName, { body, csrfToken, idempotencyLabel } = {})
         requestId: safeText(payload.request_id, response.headers.get("x-request-id") || ""),
       },
     );
+  }
+  if (includeEtag) {
+    return Object.freeze({ payload, etag: response.headers.get("etag") || "" });
   }
   return payload;
 }
@@ -152,6 +176,19 @@ function collection(payload) {
   });
 }
 
+async function csrfToken() {
+  const csrf = dataObject(await request("csrf", {
+    body: {},
+    idempotencyLabel: "csrf",
+  }));
+  if (typeof csrf.token !== "string" || !csrf.token.startsWith("csrf1.")) {
+    throw new ControllerClientError("Jeton de sécurité Controller invalide.", {
+      code: "invalid_csrf_response",
+    });
+  }
+  return csrf.token;
+}
+
 export function createControllerClient() {
   return Object.freeze({
     async session() {
@@ -175,6 +212,51 @@ export function createControllerClient() {
     async projects() {
       return collection(await request("projects"));
     },
+    async project(identifier) {
+      const result = await request({
+        method: "GET",
+        path: `/api/v1/projects/${projectId(identifier)}`,
+      }, { includeEtag: true });
+      return Object.freeze({ project: dataObject(result.payload), etag: result.etag });
+    },
+    async createProject(intent) {
+      const csrf = await csrfToken();
+      return dataObject(await request({ method: "POST", path: "/api/v1/projects" }, {
+        body: intent,
+        csrfToken: csrf,
+        idempotencyLabel: "project-create",
+      }));
+    },
+    async updateProject(identifier, etag, changes) {
+      const csrf = await csrfToken();
+      return dataObject(await request({
+        method: "PATCH",
+        path: `/api/v1/projects/${projectId(identifier)}`,
+      }, {
+        body: changes,
+        csrfToken: csrf,
+        ifMatch: etag,
+        idempotencyLabel: "project-update",
+      }));
+    },
+    async commandProject(identifier, command, etag, reason = null) {
+      if (!PROJECT_COMMANDS.has(command)) {
+        throw new ControllerClientError("Commande projet non autorisée.", {
+          status: 400,
+          code: "unsupported_project_command",
+        });
+      }
+      const csrf = await csrfToken();
+      return dataObject(await request({
+        method: "POST",
+        path: `/api/v1/projects/${projectId(identifier)}/commands/${command}`,
+      }, {
+        body: { reason },
+        csrfToken: csrf,
+        ifMatch: etag,
+        idempotencyLabel: `project-${command}`,
+      }));
+    },
     async objectives() {
       return collection(await request("objectives"));
     },
@@ -191,18 +273,10 @@ export function createControllerClient() {
       return collection(await request("reviewerAssignments"));
     },
     async logout() {
-      const csrf = dataObject(await request("csrf", {
-        body: {},
-        idempotencyLabel: "csrf",
-      }));
-      if (typeof csrf.token !== "string" || !csrf.token.startsWith("csrf1.")) {
-        throw new ControllerClientError("Jeton de sécurité Controller invalide.", {
-          code: "invalid_csrf_response",
-        });
-      }
+      const csrf = await csrfToken();
       return dataObject(await request("logout", {
         body: {},
-        csrfToken: csrf.token,
+        csrfToken: csrf,
         idempotencyLabel: "logout",
       }));
     },

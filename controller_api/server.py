@@ -1287,6 +1287,42 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self._single_header("X-CSRF-Token"),
         )
         key = service.commands.validate_idempotency_key(idempotency_key)
+        if path == "/api/v1/projects":
+            status, payload = service.project_commands.create_project(
+                session_token=session_token,
+                idempotency_key=key,
+                route=path,
+                body=body,
+                meta_factory=lambda revision: service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            )
+            return status, payload, {}
+
+        project_prefix = "/api/v1/projects/"
+        marker = "/commands/"
+        if path.startswith(project_prefix) and marker in path[len(project_prefix):]:
+            project_part, command = path[len(project_prefix):].split(marker, 1)
+            project_id = unquote(project_part)
+            command = unquote(command)
+            if not project_id or "/" in project_id or not command or "/" in command:
+                raise ControllerError(404, "route_not_found", "Route not found")
+            status, payload = service.project_commands.command_project(
+                session_token=session_token,
+                idempotency_key=key,
+                route=path,
+                project_id=project_id,
+                command=command,
+                if_match=self._single_header("If-Match"),
+                body=body,
+                meta_factory=lambda revision: service.meta(
+                    request_id,
+                    resource_revision=revision,
+                ),
+            )
+            return status, payload, {}
+
         if path == "/api/v1/objectives":
             status, payload = service.commands.create_objective(
                 session_token=session_token,
@@ -1301,7 +1337,6 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             return status, payload, {}
 
         prefix = "/api/v1/objectives/"
-        marker = "/commands/"
         if path.startswith(prefix) and marker in path[len(prefix):]:
             objective_part, command = path[len(prefix):].split(marker, 1)
             objective_id = unquote(objective_part)
@@ -1359,6 +1394,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self._validate_request_target()
             parsed = urlsplit(self.path)
             path = parsed.path
+            is_project_command = (
+                path.startswith("/api/v1/projects/")
+                and "/commands/" in path[len("/api/v1/projects/"):]
+            )
             is_objective_command = (
                 path.startswith("/api/v1/objectives/")
                 and "/commands/" in path[len("/api/v1/objectives/"):]
@@ -1372,8 +1411,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     "/api/v1/auth/login",
                     "/api/v1/auth/logout",
                     "/api/v1/auth/csrf",
+                    "/api/v1/projects",
                     "/api/v1/objectives",
                 }
+                and not is_project_command
                 and not is_objective_command
                 and not is_review_command
             ):
@@ -1396,6 +1437,79 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self._problem(error, request_id, close_connection=True)
         except Exception:
             LOGGER.exception("Unhandled Controller API mutation failure")
+            self._problem(
+                ControllerError(500, "internal_error", "Internal server error"),
+                request_id,
+                close_connection=True,
+            )
+
+    def _protected_patch(
+        self,
+        path: str,
+        query: dict[str, list[str]],
+        request_id: str,
+        body: dict[str, Any],
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        if query:
+            raise ControllerError(400, "unknown_query_parameter", "Unknown query parameter")
+        prefix = "/api/v1/projects/"
+        if not path.startswith(prefix):
+            raise ControllerError(404, "route_not_found", "Route not found")
+        project_id = unquote(path[len(prefix):])
+        if not project_id or "/" in project_id:
+            raise ControllerError(404, "route_not_found", "Route not found")
+        service = self.controller.service
+        self._validate_origin()
+        session_token = service.authenticate(self._single_header("Cookie"))
+        service.commands.verify_csrf_token(
+            session_token,
+            self._single_header("X-CSRF-Token"),
+        )
+        key = service.commands.validate_idempotency_key(
+            self._single_header("Idempotency-Key")
+        )
+        status, payload = service.project_commands.update_project(
+            session_token=session_token,
+            idempotency_key=key,
+            route=path,
+            project_id=project_id,
+            if_match=self._single_header("If-Match"),
+            body=body,
+            meta_factory=lambda revision: service.meta(
+                request_id,
+                resource_revision=revision,
+            ),
+        )
+        return status, payload, {}
+
+    def _handle_patch(self) -> None:
+        request_id = self._request_id()
+        try:
+            self._validate_host()
+            self._validate_request_target()
+            parsed = urlsplit(self.path)
+            path = parsed.path
+            prefix = "/api/v1/projects/"
+            if not path.startswith(prefix) or "/" in path[len(prefix):]:
+                self._method_not_allowed()
+                return
+            body = self._read_json_body()
+            status, payload, headers = self._protected_patch(
+                path,
+                self._parse_query(parsed.query),
+                request_id,
+                body,
+            )
+            self._send_json(
+                status,
+                payload,
+                request_id,
+                extra_headers=headers,
+            )
+        except ControllerError as error:
+            self._problem(error, request_id, close_connection=True)
+        except Exception:
+            LOGGER.exception("Unhandled Controller API patch failure")
             self._problem(
                 ControllerError(500, "internal_error", "Internal server error"),
                 request_id,
@@ -1601,7 +1715,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "Access-Control-Request-Method",
                 required=True,
             )
-            if method not in {"GET", "HEAD", "POST"}:
+            if method not in {"GET", "HEAD", "POST", "PATCH"}:
                 raise ControllerError(405, "method_not_allowed", "Method not allowed")
             raw_headers = self._single_header("Access-Control-Request-Headers") or ""
             requested = {
@@ -1614,6 +1728,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "idempotency-key",
                 "x-csrf-token",
                 "x-request-id",
+                "if-match",
             }
             if not requested.issubset(allowed):
                 raise ControllerError(
@@ -1626,10 +1741,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Access-Control-Allow-Origin", self.controller.service.settings.console_origin)
             self.send_header("Access-Control-Allow-Credentials", "true")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Idempotency-Key, X-CSRF-Token, X-Request-ID",
+                "Content-Type, Idempotency-Key, If-Match, X-CSRF-Token, X-Request-ID",
             )
             self.send_header("Access-Control-Max-Age", "600")
             self.send_header("Vary", "Origin")
@@ -1675,8 +1790,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._handle_post()
 
+    def do_PATCH(self) -> None:
+        self._handle_patch()
+
     do_PUT = _method_not_allowed
-    do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed
     do_OPTIONS = _handle_options
     do_TRACE = _method_not_allowed

@@ -101,6 +101,10 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"createControllerClient" not in body
         or b"refreshDashboard" not in body
         or b"Promise.allSettled" not in body
+        or b"refreshProjects" not in body
+        or b"client.createProject" not in body
+        or b"client.updateProject" not in body
+        or b"client.commandProject" not in body
         or b"fetch(" in body
         or b"innerHTML" in body
     ):
@@ -121,8 +125,12 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b'path: "/api/v1/recoveries"' not in body
         or b'path: "/api/v1/plans"' not in body
         or b'path: "/api/v1/reviewer-assignments"' not in body
+        or b"createProject" not in body
+        or b"updateProject" not in body
+        or b"commandProject" not in body
+        or b'"delete"' in body
     ):
-        raise ProbeError("Console Controller client violates the 2R browser boundary")
+        raise ProbeError("Console Controller client violates the 2S browser boundary")
 
     status, headers, body = request(parsed.hostname, port, "/", method="HEAD")
     if status != 200 or body or int(headers.get("content-length", "0")) <= 0:
@@ -156,13 +164,51 @@ def validate(base_url: str, wait_seconds: float) -> None:
         if status != 401:
             raise ProbeError(f"Unauthenticated dashboard proxy returned HTTP {status}: {path}")
 
-    status, _, _ = request(parsed.hostname, port, "/api/v1/tasks")
-    if status != 404:
-        raise ProbeError("Console exposes an out-of-scope Controller route")
+    status, _, _ = request(parsed.hostname, port, "/api/v1/projects/probe-project")
+    if status != 401:
+        raise ProbeError(f"Unauthenticated project detail returned HTTP {status}")
+
+    mutation_headers = {
+        "Origin": base_url,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "console-probe-project-0001",
+        "X-CSRF-Token": "csrf1.probe",
+        "If-Match": '"1"',
+    }
+    for method, path in (
+        ("POST", "/api/v1/projects"),
+        ("PATCH", "/api/v1/projects/probe-project"),
+        ("POST", "/api/v1/projects/probe-project/commands/enable"),
+    ):
+        status, _, _ = request(
+            parsed.hostname,
+            port,
+            path,
+            method=method,
+            headers=mutation_headers,
+            body=b"{}",
+        )
+        if status != 401:
+            raise ProbeError(f"Unauthenticated project mutation returned HTTP {status}: {method} {path}")
+
+    for method, path in (
+        ("GET", "/api/v1/tasks"),
+        ("POST", "/api/v1/projects/probe-project/commands/delete"),
+    ):
+        status, _, _ = request(
+            parsed.hostname,
+            port,
+            path,
+            method=method,
+            headers=mutation_headers if method == "POST" else None,
+            body=b"{}" if method == "POST" else None,
+        )
+        if status != 404:
+            raise ProbeError(f"Console exposes an out-of-scope Controller route: {method} {path}")
 
     print(
         f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port} "
-        "session_proxy=401 dashboard_proxy=401"
+        "session_proxy=401 dashboard_proxy=401 project_lifecycle_proxy=401"
     )
 
 
