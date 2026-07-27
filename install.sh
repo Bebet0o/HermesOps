@@ -21,6 +21,13 @@ CONTROLLER_UNIT_EXISTED=0
 CONTROLLER_UNIT_WAS_ENABLED=0
 CONTROLLER_UNIT_WAS_ACTIVE=0
 CONTROLLER_UNIT_TOUCHED=0
+CONSOLE_UNIT_NAME="hermesops-console.service"
+CONSOLE_UNIT_TARGET=""
+CONSOLE_UNIT_BACKUP=""
+CONSOLE_UNIT_EXISTED=0
+CONSOLE_UNIT_WAS_ENABLED=0
+CONSOLE_UNIT_WAS_ACTIVE=0
+CONSOLE_UNIT_TOUCHED=0
 
 usage() {
     cat <<'HELP'
@@ -151,9 +158,42 @@ restore_controller_unit() {
     fi
 }
 
+restore_console_unit() {
+    [[ "$CONSOLE_UNIT_TOUCHED" == 1 ]] || return 0
+
+    user_run systemctl --user disable --now \
+        "$CONSOLE_UNIT_NAME" >/dev/null 2>&1 || true
+    user_run systemctl --user reset-failed \
+        "$CONSOLE_UNIT_NAME" >/dev/null 2>&1 || true
+
+    if [[ "$CONSOLE_UNIT_EXISTED" == 1 ]]; then
+        sudo_run install -m 0640 \
+            -o "$TARGET_USER" -g "$TARGET_GROUP" \
+            "$CONSOLE_UNIT_BACKUP" "$CONSOLE_UNIT_TARGET"
+    else
+        sudo_run rm -f \
+            "$CONSOLE_UNIT_TARGET" \
+            "${TARGET_HOME}/.config/systemd/user/default.target.wants/${CONSOLE_UNIT_NAME}"
+    fi
+
+    user_run systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+    if [[ "$CONSOLE_UNIT_EXISTED" == 1 &&
+          "$CONSOLE_UNIT_WAS_ENABLED" == 1 ]]; then
+        user_run systemctl --user enable \
+            "$CONSOLE_UNIT_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ "$CONSOLE_UNIT_EXISTED" == 1 &&
+          "$CONSOLE_UNIT_WAS_ACTIVE" == 1 ]]; then
+        user_run systemctl --user start \
+            "$CONSOLE_UNIT_NAME" >/dev/null 2>&1 || true
+    fi
+}
+
 on_error() {
     rc=$?
     trap - ERR
+    restore_console_unit || true
     restore_controller_unit || true
     printf 'FAILED rc=%s\n' "$rc" >"$STATUS"
     echo "Installation échouée. Rapport: $REPORT" >&2
@@ -548,6 +588,8 @@ fi
 SYSTEMD_DIR="${TARGET_HOME}/.config/systemd/user"
 CONTROLLER_UNIT_TARGET="${SYSTEMD_DIR}/${CONTROLLER_UNIT_NAME}"
 CONTROLLER_UNIT_BACKUP="${BACKUP_DIR}/${CONTROLLER_UNIT_NAME}.before-install"
+CONSOLE_UNIT_TARGET="${SYSTEMD_DIR}/${CONSOLE_UNIT_NAME}"
+CONSOLE_UNIT_BACKUP="${BACKUP_DIR}/${CONSOLE_UNIT_NAME}.before-install"
 
 sudo_run install -d -m 0700 -o "$TARGET_USER" -g "$TARGET_GROUP" "$SYSTEMD_DIR"
 sudo_run install -d -m 0750 -o "$TARGET_USER" -g "$TARGET_GROUP" "$BACKUP_DIR"
@@ -567,7 +609,23 @@ if user_run systemctl --user is-active --quiet \
     CONTROLLER_UNIT_WAS_ACTIVE=1
 fi
 
+if [[ -f "$CONSOLE_UNIT_TARGET" ]]; then
+    CONSOLE_UNIT_EXISTED=1
+    sudo_run install -m 0600 \
+        -o "$TARGET_USER" -g "$TARGET_GROUP" \
+        "$CONSOLE_UNIT_TARGET" "$CONSOLE_UNIT_BACKUP"
+fi
+if user_run systemctl --user is-enabled --quiet \
+   "$CONSOLE_UNIT_NAME" 2>/dev/null; then
+    CONSOLE_UNIT_WAS_ENABLED=1
+fi
+if user_run systemctl --user is-active --quiet \
+   "$CONSOLE_UNIT_NAME" 2>/dev/null; then
+    CONSOLE_UNIT_WAS_ACTIVE=1
+fi
+
 CONTROLLER_UNIT_TOUCHED=1
+CONSOLE_UNIT_TOUCHED=1
 for unit in "${REPO}"/systemd/user/*.service; do
     sudo_run install -m 0640 -o "$TARGET_USER" -g "$TARGET_GROUP" "$unit" "$SYSTEMD_DIR/"
 done
@@ -579,6 +637,7 @@ if [[ "$SKIP_START" == 0 ]]; then
         hermesops-orchestrator.service
         hermesops-notifier.service
         hermesops-controller-api.service
+        hermesops-console.service
     )
 
     user_run systemctl --user daemon-reload
@@ -588,6 +647,7 @@ if [[ "$SKIP_START" == 0 ]]; then
     user_run systemctl --user restart hermesops-orchestrator.service
     user_run systemctl --user restart hermesops-notifier.service
     user_run systemctl --user restart hermesops-controller-api.service
+    user_run systemctl --user restart hermesops-console.service
 
     for unit in "${USER_UNITS[@]}"; do
         user_run systemctl --user is-active --quiet "$unit" || {
@@ -601,6 +661,11 @@ if [[ "$SKIP_START" == 0 ]]; then
         --base-url http://127.0.0.1:8765 \
         --wait-seconds 30
 
+    user_run \
+        "${REPO}/scripts/hermesops-console-probe.py" \
+        --base-url http://127.0.0.1:8788 \
+        --wait-seconds 30
+
     if [[ -f "${ROOT}/state/hermes-home/auth.json" ]]; then
         user_run env HERMESOPS_ROOT="$ROOT" "${REPO}/validate.sh" --runtime
     else
@@ -609,6 +674,7 @@ if [[ "$SKIP_START" == 0 ]]; then
 fi
 
 CONTROLLER_UNIT_TOUCHED=0
+CONSOLE_UNIT_TOUCHED=0
 printf 'FINISHED_SUCCESS\n' >"$STATUS"
 trap - ERR
 echo "HERMESOPS_INSTALL_PASS"

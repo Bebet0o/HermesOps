@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Console locale HermesOps">
+  <title>HermesOps Console</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Aller au contenu</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Navigation principale">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">H</div>
+        <div>
+          <strong>HermesOps</strong>
+          <span>Console</span>
+        </div>
+      </div>
+      <nav id="primary-navigation">
+        <a href="/dashboard" data-route="dashboard">Tableau de bord</a>
+        <a href="/projects" data-route="projects">Projets</a>
+        <a href="/objectives" data-route="objectives">Objectifs</a>
+        <a href="/executions" data-route="executions">Exécutions</a>
+        <a href="/reviews" data-route="reviews">Reviews</a>
+        <a href="/events" data-route="events">Événements</a>
+        <a href="/administration" data-route="administration">Administration</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="status-dot" aria-hidden="true"></span>
+        Fondation 2P
+      </div>
+    </aside>
+
+    <main id="main-content" tabindex="-1">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">HermesOps Control Plane</p>
+          <h1 id="page-title">Tableau de bord</h1>
+        </div>
+        <div class="environment-badge">Local · lecture de démonstration</div>
+      </header>
+
+      <section class="hero" aria-labelledby="hero-title">
+        <div>
+          <p class="eyebrow">Jalon 2P</p>
+          <h2 id="hero-title">La nouvelle Console est installée.</h2>
+          <p id="page-description">
+            Cette fondation fournit le shell, la navigation et le service HTTP sécurisé.
+            Les données du Controller seront reliées au jalon 2Q.
+          </p>
+        </div>
+        <div class="foundation-state" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          Service Console prêt
+        </div>
+      </section>
+
+      <section class="cards" aria-label="État de la fondation">
+        <article class="card">
+          <span class="card-label">Frontière</span>
+          <strong>Client non privilégié</strong>
+          <p>Aucun accès direct à SQLite, Docker, Hermes Agent ou aux chemins hôte.</p>
+        </article>
+        <article class="card">
+          <span class="card-label">Chaîne de build</span>
+          <strong>Python standard library</strong>
+          <p>Build déterministe, sans Node.js, npm ni dépendance téléchargée.</p>
+        </article>
+        <article class="card">
+          <span class="card-label">Exposition</span>
+          <strong>Loopback uniquement</strong>
+          <p>Le service écoute sur 127.0.0.1:8788 et refuse les chemins non autorisés.</p>
+        </article>
+      </section>
+
+      <section class="route-panel" aria-live="polite">
+        <div>
+          <p class="eyebrow">Espace fonctionnel</p>
+          <h2 id="route-title">Tableau de bord</h2>
+          <p id="route-message">Les indicateurs opérationnels seront ajoutés au jalon 2R.</p>
+        </div>
+        <span class="coming-soon">Préparé pour la suite</span>
+      </section>
+
+      <footer>
+        <span>HermesOps v0.1.0-alpha</span>
+        <span>Console foundation · aucune mutation disponible</span>
+      </footer>
+    </main>
+  </div>
+  <noscript>JavaScript est requis uniquement pour la navigation du shell HermesOps.</noscript>
+</body>
+</html>

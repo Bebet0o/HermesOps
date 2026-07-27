@@ -71,3 +71,12 @@ All notable changes to HermesOps will be documented in this file.
 - backups before divergent upgrades;
 - no generated secret is stored in the source repository;
 - host Docker socket is not exposed to workers.
+
+### Milestone 2P — Console Web Foundation
+
+- add the independent loopback-only HermesOps Console shell;
+- add a deterministic Python-only static build and manifest;
+- add a dedicated hardened user service on port 8788;
+- add bounded HTTP, build, install, probe, and adversarial test coverage;
+- keep Controller integration and all business workflows disabled until later
+  beta milestones.

@@ -89,3 +89,20 @@ backups et les fichiers locaux `config/projects.d/*.toml`.
 Cette commande désactive les services, retire les copies des unités systemd
 utilisateur et arrête les conteneurs sans supprimer les volumes, secrets,
 bases, projets ou sauvegardes.
+
+## HermesOps Console foundation (2P)
+
+The dedicated HermesOps Console is served by the user service
+`hermesops-console.service` on `127.0.0.1:8788`. The legacy Hermes WebUI remains
+on `127.0.0.1:8787` during the beta construction milestones.
+
+Check the service with:
+
+```bash
+systemctl --user status hermesops-console.service
+curl --fail http://127.0.0.1:8788/health
+```
+
+The service is loopback-only. Remote browser access still requires an
+operator-managed SSH tunnel or TLS reverse proxy. Milestone 2P exposes no
+Controller API proxy and performs no browser authentication or mutation.

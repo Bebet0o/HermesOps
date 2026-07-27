@@ -136,11 +136,14 @@ if [[ "$CI_MODE" == 0 ]]; then
             || warn "install.sh ajoutera $TARGET_USER au groupe docker puis demandera une reconnexion"
     fi
 
-    for port in 8642 8787; do
+    for port in 8642 8787 8788; do
         if command -v ss >/dev/null 2>&1 &&
            ss -H -ltn "sport = :${port}" 2>/dev/null | grep -q .; then
-            if docker ps --format '{{.Names}}' 2>/dev/null |
-               grep -Eq '^hermesops-(agent|webui)$'; then
+            if [[ "$port" == "8788" ]] &&
+               systemctl --user is-active --quiet hermesops-console.service 2>/dev/null; then
+                warn "Port ${port} déjà utilisé par la Console HermesOps"
+            elif docker ps --format '{{.Names}}' 2>/dev/null |
+                 grep -Eq '^hermesops-(agent|webui)$'; then
                 warn "Port ${port} déjà utilisé par l'installation HermesOps"
             else
                 fail "Port ${port} déjà utilisé"
@@ -154,7 +157,7 @@ fi
 for required in \
     VERSION README.md compose/agent.yaml compose/images.lock.env \
     config/controller.toml config/roles.toml migrations \
-    profiles scripts systemd/user tests
+    console/src console/dist profiles scripts systemd/user tests
 do
     [[ -e "${SOURCE}/${required}" ]] \
         && pass "Présent: ${required}" \

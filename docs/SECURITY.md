@@ -27,3 +27,11 @@ Docker hôte.
 - secrets non transmis par défaut ;
 - persistance validée ;
 - daemon hôte et daemon sandbox séparés.
+
+## Console foundation security boundary
+
+The milestone 2P Console is a static, loopback-only, unprivileged service. It
+uses an exact route and asset allowlist, a no-network Content Security Policy,
+bounded request concurrency, no browser storage, no external dependency, no
+API credential, and no direct access to Controller state. The legacy Hermes
+WebUI and Hermes Agent are not trusted as Console data sources.

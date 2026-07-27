@@ -94,9 +94,30 @@ do
     grep -Fq "$marker" "$INSTALLER"
 done
 
-grep -Fq \
-    'for unit in hermesops-controller-api.service hermesops-notifier.service' \
-    "$UNINSTALLER"
+python3 - "$UNINSTALLER" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+uninstaller = Path(sys.argv[1]).read_text(encoding="utf-8")
+expected = (
+    "hermesops-console.service",
+    "hermesops-controller-api.service",
+    "hermesops-notifier.service",
+    "hermesops-orchestrator.service",
+    "hermesops-supervisor.service",
+)
+loops = re.findall(r"^for unit in ([^;]+); do$", uninstaller, flags=re.MULTILINE)
+if len(loops) != 2:
+    raise SystemExit(f"Expected exactly two service uninstall loops, found {len(loops)}")
+for index, loop in enumerate(loops, start=1):
+    actual = tuple(loop.split())
+    if actual != expected:
+        raise SystemExit(
+            f"Service uninstall loop {index} mismatch: expected={expected!r} actual={actual!r}"
+        )
+print("HermesOps service uninstall unit set: PASS")
+PY
 
 if grep -Fq 'rm -f "${ROOT}/secrets/controller-session"' "$UNINSTALLER"; then
     echo "Conservative uninstall must preserve Controller session." >&2
