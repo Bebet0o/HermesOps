@@ -66,6 +66,15 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(401, {"code": "authentication_required", "title": "Authentication required"})
         elif self.path == "/api/v1/system/capabilities":
             self._send_json(200, {"data": {"features": {"browser_session_lifecycle": True}}})
+        elif self.path in {
+            "/api/v1/projects",
+            "/api/v1/objectives",
+            "/api/v1/reviews",
+            "/api/v1/recoveries",
+            "/api/v1/plans",
+            "/api/v1/reviewer-assignments",
+        }:
+            self._send_json(200, {"data": [], "meta": {"next_cursor": None}})
         else:
             self._send_json(404, {"code": "not_found", "title": "Not found"})
 
@@ -203,6 +212,21 @@ class ConsoleControllerProxyTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(payload)["data"]["features"]["browser_session_lifecycle"])
 
+    def test_operational_dashboard_gets_are_forwarded(self) -> None:
+        for path in (
+            "/api/v1/projects",
+            "/api/v1/objectives",
+            "/api/v1/reviews",
+            "/api/v1/recoveries",
+            "/api/v1/plans",
+            "/api/v1/reviewer-assignments",
+        ):
+            with self.subTest(path=path):
+                status, _, payload = self.request("GET", path)
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(payload)["data"], [])
+                self.assertEqual(self.controller.records[-1]["path"], path)
+
     def test_cross_origin_unsupported_routes_and_large_bodies_fail_before_upstream(self) -> None:
         before = len(self.controller.records)
         status, _, payload = self.request(
@@ -219,7 +243,7 @@ class ConsoleControllerProxyTest(unittest.TestCase):
         self.assertEqual(json.loads(payload)["type"], "urn:hermesops:console:origin_forbidden")
         self.assertEqual(len(self.controller.records), before)
 
-        status, _, payload = self.request("GET", "/api/v1/projects")
+        status, _, payload = self.request("GET", "/api/v1/tasks")
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(payload)["type"], "urn:hermesops:console:controller_route_not_exposed")
         self.assertEqual(len(self.controller.records), before)

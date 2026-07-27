@@ -4,10 +4,17 @@ const ALLOWED_ENDPOINTS = Object.freeze({
   csrf: Object.freeze({ method: "POST", path: "/api/v1/auth/csrf" }),
   logout: Object.freeze({ method: "POST", path: "/api/v1/auth/logout" }),
   capabilities: Object.freeze({ method: "GET", path: "/api/v1/system/capabilities" }),
+  projects: Object.freeze({ method: "GET", path: "/api/v1/projects" }),
+  objectives: Object.freeze({ method: "GET", path: "/api/v1/objectives" }),
+  reviews: Object.freeze({ method: "GET", path: "/api/v1/reviews" }),
+  recoveries: Object.freeze({ method: "GET", path: "/api/v1/recoveries" }),
+  plans: Object.freeze({ method: "GET", path: "/api/v1/plans" }),
+  reviewerAssignments: Object.freeze({ method: "GET", path: "/api/v1/reviewer-assignments" }),
 });
 
 const REQUEST_TIMEOUT_MS = 7000;
 const MAX_ERROR_TEXT = 160;
+const MAX_COLLECTION_ITEMS = 200;
 
 export class ControllerClientError extends Error {
   constructor(message, { status = 0, code = "controller_unavailable", requestId = "" } = {}) {
@@ -129,6 +136,22 @@ function dataObject(payload) {
   return payload.data;
 }
 
+function collection(payload) {
+  if (!Array.isArray(payload.data) || payload.data.length > MAX_COLLECTION_ITEMS) {
+    throw new ControllerClientError("Collection Controller invalide.", {
+      code: "invalid_controller_response",
+    });
+  }
+  const meta = payload.meta && typeof payload.meta === "object" && !Array.isArray(payload.meta)
+    ? payload.meta
+    : {};
+  const nextCursor = typeof meta.next_cursor === "string" ? meta.next_cursor : "";
+  return Object.freeze({
+    items: Object.freeze(payload.data.slice()),
+    truncated: nextCursor.length > 0,
+  });
+}
+
 export function createControllerClient() {
   return Object.freeze({
     async session() {
@@ -148,6 +171,24 @@ export function createControllerClient() {
     },
     async capabilities() {
       return dataObject(await request("capabilities"));
+    },
+    async projects() {
+      return collection(await request("projects"));
+    },
+    async objectives() {
+      return collection(await request("objectives"));
+    },
+    async reviews() {
+      return collection(await request("reviews"));
+    },
+    async recoveries() {
+      return collection(await request("recoveries"));
+    },
+    async plans() {
+      return collection(await request("plans"));
+    },
+    async reviewerAssignments() {
+      return collection(await request("reviewerAssignments"));
     },
     async logout() {
       const csrf = dataObject(await request("csrf", {
