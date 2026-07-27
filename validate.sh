@@ -97,7 +97,9 @@ static_validation() {
         scripts/hermesops-console.py \
         scripts/hermesops-console-probe.py \
         tests/test-console-foundation.sh \
+        tests/test-console-controller-client.sh \
         tests/test_console_service.py \
+        tests/test_console_controller_client.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -132,9 +134,12 @@ static_validation() {
   docs/milestones/2N_HERMESFILE_V1.md \
   docs/milestones/2O_SANDBOX_PROFILE_PERSISTENCE.md \
   docs/milestones/2P_CONSOLE_WEB_FOUNDATION.md \
-  docs/console/FOUNDATION.md \
-  console/src/index.html console/src/app.js console/src/styles.css \
+  docs/milestones/2Q_BROWSER_SESSION_CONTROLLER_CLIENT.md \
+  docs/console/FOUNDATION.md docs/console/CONTROLLER_CLIENT.md \
+  console/src/index.html console/src/app.js \
+  console/src/controller-client.js console/src/styles.css \
   console/dist/index.html console/dist/assets/app.js \
+  console/dist/assets/controller-client.js \
   console/dist/assets/styles.css console/dist/asset-manifest.json \
   docs/hermesfile/SPECIFICATION_V1.md \
   specs/hermesfile-v1.schema.json \
@@ -240,6 +245,7 @@ PY
   "${REPO}/tests/test-hermesfile-v1.sh"
   "${REPO}/tests/test-sandbox-profiles.sh"
   "${REPO}/tests/test-console-foundation.sh"
+  "${REPO}/tests/test-console-controller-client.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

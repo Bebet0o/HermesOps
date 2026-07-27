@@ -1,7 +1,8 @@
 [Unit]
-Description=HermesOps local Console foundation
-Documentation=file:///opt/docker/hermesops/repo/docs/milestones/2P_CONSOLE_WEB_FOUNDATION.md
-After=network.target
+Description=HermesOps local Console browser client
+Documentation=file:///opt/docker/hermesops/repo/docs/milestones/2Q_BROWSER_SESSION_CONTROLLER_CLIENT.md
+After=network.target hermesops-controller-api.service
+Wants=hermesops-controller-api.service
 StartLimitIntervalSec=60
 StartLimitBurst=6
 
@@ -9,8 +10,8 @@ StartLimitBurst=6
 Type=simple
 WorkingDirectory=/opt/docker/hermesops/repo
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-console.py check --root /opt/docker/hermesops/repo/console/dist --host 127.0.0.1 --port 8788
-ExecStart=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-console.py serve --root /opt/docker/hermesops/repo/console/dist --host 127.0.0.1 --port 8788 --max-connections 16
+ExecStartPre=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-console.py check --root /opt/docker/hermesops/repo/console/dist --host 127.0.0.1 --port 8788 --controller-host 127.0.0.1 --controller-port 8765 --controller-origin http://127.0.0.1:8787
+ExecStart=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-console.py serve --root /opt/docker/hermesops/repo/console/dist --host 127.0.0.1 --port 8788 --max-connections 16 --controller-host 127.0.0.1 --controller-port 8765 --controller-origin http://127.0.0.1:8787 --controller-timeout 5
 ExecStartPost=/usr/bin/python3 /opt/docker/hermesops/repo/scripts/hermesops-console-probe.py --base-url http://127.0.0.1:8788 --wait-seconds 20
 Restart=on-failure
 RestartSec=5s

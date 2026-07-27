@@ -80,3 +80,14 @@ All notable changes to HermesOps will be documented in this file.
 - add bounded HTTP, build, install, probe, and adversarial test coverage;
 - keep Controller integration and all business workflows disabled until later
   beta milestones.
+
+### Milestone 2Q — Browser Session and Controller Client
+
+- add a narrow same-origin Console gateway for browser session lifecycle and
+  capability reads;
+- add login, authoritative session refresh, CSRF-protected logout, and degraded
+  Controller-unavailable states;
+- keep passwords, cookies, CSRF values, and pending actions out of browser
+  storage;
+- add bounded proxy, origin, header, body, response, and live-probe coverage;
+- keep business workflows and WebSocket events assigned to later milestones.

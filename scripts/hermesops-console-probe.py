@@ -30,20 +30,37 @@ class ProbeError(RuntimeError):
     pass
 
 
-def request(host: str, port: int, path: str, *, method: str = "GET", timeout: float = 3.0):
+def request(
+    host: str,
+    port: int,
+    path: str,
+    *,
+    method: str = "GET",
+    timeout: float = 3.0,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+):
     connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    request_headers = {"Host": f"{host}:{port}"}
+    request_headers.update(headers or {})
     try:
-        connection.request(method, path, headers={"Host": f"{host}:{port}"})
+        connection.request(method, path, body=body, headers=request_headers)
         response = connection.getresponse()
-        body = response.read(600_000)
-        return response.status, {name.lower(): value for name, value in response.getheaders()}, body
+        payload = response.read(1_100_000)
+        return response.status, {name.lower(): value for name, value in response.getheaders()}, payload
     finally:
         connection.close()
 
 
 def validate(base_url: str, wait_seconds: float) -> None:
     parsed = urlsplit(base_url)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"} or parsed.path or parsed.query or parsed.fragment:
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "::1"}
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ProbeError("Console probe requires one canonical loopback HTTP origin")
     port = parsed.port or 80
     deadline = time.monotonic() + wait_seconds
@@ -70,28 +87,62 @@ def validate(base_url: str, wait_seconds: float) -> None:
         for name, fragment in REQUIRED_HEADERS.items():
             if fragment not in headers.get(name, ""):
                 raise ProbeError(f"Console security header missing on {route}: {name}")
+        csp = headers.get("content-security-policy", "")
+        if "connect-src 'self'" not in csp or "form-action 'self'" not in csp:
+            raise ProbeError(f"Console Controller-client CSP is invalid on {route}")
         if headers.get("cache-control") != "no-store":
             raise ProbeError(f"Console cache policy is invalid on {route}")
         if not headers.get("x-request-id", "").startswith("req_"):
             raise ProbeError(f"Console request ID is invalid on {route}")
 
     status, _, body = request(parsed.hostname, port, "/assets/app.js")
-    if status != 200 or b"fetch(" in body or b"WebSocket(" in body or b"localStorage" in body:
-        raise ProbeError("Console foundation script violates the 2P network/storage boundary")
+    if status != 200 or b"createControllerClient" not in body or b"fetch(" in body:
+        raise ProbeError("Console application script does not isolate the Controller client")
+
+    status, _, body = request(parsed.hostname, port, "/assets/controller-client.js")
+    if (
+        status != 200
+        or b"fetch(" not in body
+        or b'credentials: "same-origin"' not in body
+        or b"127.0.0.1:8765" in body
+        or b"localStorage" in body
+        or b"sessionStorage" in body
+        or b"WebSocket(" in body
+    ):
+        raise ProbeError("Console Controller client violates the 2Q browser boundary")
 
     status, headers, body = request(parsed.hostname, port, "/", method="HEAD")
     if status != 200 or body or int(headers.get("content-length", "0")) <= 0:
         raise ProbeError("Console HEAD contract failed")
 
-    status, _, _ = request(parsed.hostname, port, "/api/v1/system/health")
-    if status != 404:
-        raise ProbeError("Console foundation unexpectedly exposes an API proxy")
+    status, headers, body = request(parsed.hostname, port, "/api/v1/auth/session")
+    if status != 401:
+        raise ProbeError(f"Unauthenticated same-origin session probe returned HTTP {status}")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProbeError("Controller proxy returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise ProbeError("Controller proxy payload is invalid")
+    if "access-control-allow-origin" in headers or "access-control-allow-credentials" in headers:
+        raise ProbeError("Controller proxy leaked cross-origin response headers")
+    if "connect-src 'self'" not in headers.get("content-security-policy", ""):
+        raise ProbeError("Controller proxy response lacks Console security headers")
+    if not headers.get("x-request-id", "").startswith("req_"):
+        raise ProbeError("Controller proxy request ID is invalid")
 
-    print(f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port}")
+    status, _, _ = request(parsed.hostname, port, "/api/v1/projects")
+    if status != 404:
+        raise ProbeError("Console exposes an out-of-scope Controller route")
+
+    print(
+        f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port} "
+        "session_proxy=401"
+    )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Probe the HermesOps Console foundation")
+    parser = argparse.ArgumentParser(description="Probe the HermesOps Console browser client")
     parser.add_argument("--base-url", default="http://127.0.0.1:8788")
     parser.add_argument("--wait-seconds", type=float, default=10.0)
     arguments = parser.parse_args()
