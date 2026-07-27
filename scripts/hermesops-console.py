@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import http.server
 import ipaddress
 import json
@@ -19,6 +20,10 @@ from typing import BinaryIO
 from urllib.parse import urlsplit
 
 MAX_FILE_SIZE = 512 * 1024
+MAX_PROXY_REQUEST_BODY = 64 * 1024
+MAX_PROXY_RESPONSE_BODY = 1024 * 1024
+PROXY_TIMEOUT_MIN = 0.25
+PROXY_TIMEOUT_MAX = 30.0
 ROUTES = frozenset(
     {
         "/",
@@ -33,13 +38,57 @@ ROUTES = frozenset(
 )
 ASSETS = {
     "/assets/app.js": (Path("assets/app.js"), "text/javascript"),
+    "/assets/controller-client.js": (
+        Path("assets/controller-client.js"),
+        "text/javascript",
+    ),
     "/assets/styles.css": (Path("assets/styles.css"), "text/css"),
 }
+CONTROLLER_ROUTES = frozenset(
+    {
+        ("GET", "/api/v1/auth/session"),
+        ("POST", "/api/v1/auth/login"),
+        ("POST", "/api/v1/auth/csrf"),
+        ("POST", "/api/v1/auth/logout"),
+        ("GET", "/api/v1/system/capabilities"),
+    }
+)
+REQUEST_HEADER_ALLOWLIST = frozenset(
+    {
+        "accept",
+        "content-type",
+        "cookie",
+        "idempotency-key",
+        "if-match",
+        "user-agent",
+        "x-csrf-token",
+    }
+)
+SINGLETON_REQUEST_HEADERS = frozenset(
+    {
+        "content-length",
+        "content-type",
+        "cookie",
+        "expect",
+        "idempotency-key",
+        "origin",
+        "transfer-encoding",
+        "x-csrf-token",
+    }
+)
+RESPONSE_HEADER_ALLOWLIST = frozenset(
+    {
+        "allow",
+        "etag",
+        "retry-after",
+        "set-cookie",
+    }
+)
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'none'; script-src 'self'; style-src 'self'; "
-        "img-src 'self'; font-src 'self'; connect-src 'none'; "
-        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+        "img-src 'self'; font-src 'self'; connect-src 'self'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"
     ),
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",
@@ -59,7 +108,12 @@ def read_safe_file(path: Path, maximum: int = MAX_FILE_SIZE) -> bytes:
         before = path.lstat()
     except OSError as error:
         raise ConsoleServiceError("Console file is unavailable") from error
-    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or before.st_size > maximum:
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
         raise ConsoleServiceError("Console file is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -85,6 +139,36 @@ def read_safe_file(path: Path, maximum: int = MAX_FILE_SIZE) -> bytes:
     return data
 
 
+def _canonical_loopback_origin(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "http"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.hostname is None
+        or parsed.port is None
+    ):
+        raise ConsoleServiceError("Controller origin must be one canonical loopback HTTP origin")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError as error:
+        raise ConsoleServiceError("Controller origin host must be a loopback IP address") from error
+    if not address.is_loopback:
+        raise ConsoleServiceError("Controller origin must be loopback")
+    host = f"[{address.compressed}]" if address.version == 6 else address.compressed
+    canonical = f"http://{host}:{parsed.port}"
+    if value != canonical:
+        raise ConsoleServiceError("Controller origin is not canonical")
+    return canonical
+
+
+def _safe_header_value(value: str, maximum: int = 4096) -> bool:
+    return 0 < len(value) <= maximum and "\r" not in value and "\n" not in value and "\0" not in value
+
+
 @dataclass(frozen=True)
 class Settings:
     root: Path
@@ -92,6 +176,10 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8788
     max_connections: int = 16
+    controller_host: str = "127.0.0.1"
+    controller_port: int = 8765
+    controller_origin: str = "http://127.0.0.1:8787"
+    controller_timeout: float = 5.0
 
     @classmethod
     def from_root(
@@ -101,6 +189,10 @@ class Settings:
         host: str = "127.0.0.1",
         port: int = 8788,
         max_connections: int = 16,
+        controller_host: str = "127.0.0.1",
+        controller_port: int = 8765,
+        controller_origin: str = "http://127.0.0.1:8787",
+        controller_timeout: float = 5.0,
     ) -> "Settings":
         if root.is_symlink():
             raise ConsoleServiceError("Console distribution root must not be a symlink")
@@ -112,6 +204,10 @@ class Settings:
             host=host,
             port=port,
             max_connections=max_connections,
+            controller_host=controller_host,
+            controller_port=controller_port,
+            controller_origin=controller_origin,
+            controller_timeout=controller_timeout,
         )
         settings.validate()
         return settings
@@ -119,20 +215,27 @@ class Settings:
     def validate(self) -> None:
         try:
             address = ipaddress.ip_address(self.host)
+            controller_address = ipaddress.ip_address(self.controller_host)
         except ValueError as error:
-            raise ConsoleServiceError("Console host must be a loopback IP address") from error
-        if not address.is_loopback:
-            raise ConsoleServiceError("Console host must be loopback")
+            raise ConsoleServiceError("Console and Controller hosts must be loopback IP addresses") from error
+        if not address.is_loopback or not controller_address.is_loopback:
+            raise ConsoleServiceError("Console and Controller hosts must be loopback")
         if not 0 <= self.port <= 65_535:
             raise ConsoleServiceError("Console port is invalid")
+        if not 1 <= self.controller_port <= 65_535:
+            raise ConsoleServiceError("Controller port is invalid")
         if not 1 <= self.max_connections <= 128:
             raise ConsoleServiceError("Console connection limit is invalid")
+        if not PROXY_TIMEOUT_MIN <= self.controller_timeout <= PROXY_TIMEOUT_MAX:
+            raise ConsoleServiceError("Controller timeout is invalid")
+        _canonical_loopback_origin(self.controller_origin)
         if self.root.is_symlink() or not self.root.is_dir():
             raise ConsoleServiceError("Console distribution root is invalid")
         expected = {
             Path("index.html"),
             Path("asset-manifest.json"),
             Path("assets/app.js"),
+            Path("assets/controller-client.js"),
             Path("assets/styles.css"),
         }
         actual: set[Path] = set()
@@ -148,10 +251,19 @@ class Settings:
             manifest = json.loads(file_bytes[Path("asset-manifest.json")])
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ConsoleServiceError("Console asset manifest is invalid") from error
-        if set(manifest) != {"schema_version", "entrypoint", "files"} or manifest.get("schema_version") != 1 or manifest.get("entrypoint") != "index.html":
+        if (
+            set(manifest) != {"schema_version", "entrypoint", "files"}
+            or manifest.get("schema_version") != 1
+            or manifest.get("entrypoint") != "index.html"
+        ):
             raise ConsoleServiceError("Console asset manifest contract is invalid")
         entries = manifest.get("files")
-        expected_entries = {"index.html", "assets/app.js", "assets/styles.css"}
+        expected_entries = {
+            "index.html",
+            "assets/app.js",
+            "assets/controller-client.js",
+            "assets/styles.css",
+        }
         if not isinstance(entries, dict) or set(entries) != expected_entries:
             raise ConsoleServiceError("Console asset manifest file set is invalid")
         for name in sorted(expected_entries):
@@ -159,7 +271,10 @@ class Settings:
             data = file_bytes[Path(name)]
             if not isinstance(metadata, dict) or set(metadata) != {"sha256", "size"}:
                 raise ConsoleServiceError("Console asset manifest metadata is invalid")
-            if metadata.get("size") != len(data) or metadata.get("sha256") != hashlib.sha256(data).hexdigest():
+            if (
+                metadata.get("size") != len(data)
+                or metadata.get("sha256") != hashlib.sha256(data).hexdigest()
+            ):
                 raise ConsoleServiceError("Console asset digest mismatch")
         if self.version_file.is_symlink() or not self.version_file.is_file():
             raise ConsoleServiceError("HermesOps version file is invalid")
@@ -236,6 +351,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         }
         return supplied in expected
 
+    def _browser_origin(self) -> str:
+        host = f"[{self.settings.host}]" if ":" in self.settings.host else self.settings.host
+        return f"http://{host}:{self.server.server_port}"
+
     def _headers(
         self,
         *,
@@ -244,6 +363,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         content_type: str,
         request_id: str,
         allow: str | None = None,
+        extra_headers: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
@@ -252,6 +372,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("X-Request-ID", request_id)
         if allow is not None:
             self.send_header("Allow", allow)
+        for name, value in extra_headers:
+            self.send_header(name, value)
         for name, value in SECURITY_HEADERS.items():
             self.send_header(name, value)
         self.end_headers()
@@ -265,6 +387,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         request_id: str,
         head_only: bool = False,
         allow: str | None = None,
+        extra_headers: tuple[tuple[str, str], ...] = (),
     ) -> None:
         self._headers(
             status=status,
@@ -272,86 +395,304 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             content_type=content_type,
             request_id=request_id,
             allow=allow,
+            extra_headers=extra_headers,
         )
         if not head_only:
             self.wfile.write(body)
 
-    def _problem(self, status: int, code: str, title: str, request_id: str, *, head_only: bool) -> None:
-        body = (json.dumps(
-            {
-                "type": f"urn:hermesops:console:{code}",
-                "title": title,
-                "status": status,
-                "request_id": request_id,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n").encode("utf-8")
+    def _problem(
+        self,
+        status: int,
+        code: str,
+        title: str,
+        request_id: str,
+        *,
+        head_only: bool = False,
+        allow: str | None = None,
+    ) -> None:
+        body = (
+            json.dumps(
+                {
+                    "type": f"urn:hermesops:console:{code}",
+                    "title": title,
+                    "status": status,
+                    "request_id": request_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
         self._send(
             status=status,
             body=body,
             content_type="application/problem+json",
             request_id=request_id,
             head_only=head_only,
+            allow=allow,
         )
 
     def _read_regular(self, relative: Path) -> bytes:
         return read_safe_file(self.settings.root / relative)
 
-    def _serve(self, *, head_only: bool) -> None:
+    def _parsed_path(self, request_id: str, *, head_only: bool = False) -> str | None:
+        parsed = urlsplit(self.path)
+        if parsed.query or parsed.fragment or "%" in parsed.path or "\\" in parsed.path:
+            self._problem(400, "invalid_path", "Invalid request path", request_id, head_only=head_only)
+            return None
+        return parsed.path
+
+    def _serve_static(self, *, head_only: bool) -> None:
         request_id = self._request_id()
         if not self._valid_host():
             self._problem(400, "invalid_host", "Invalid Host header", request_id, head_only=head_only)
             return
-        parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment or "%" in parsed.path or "\\" in parsed.path:
-            self._problem(400, "invalid_path", "Invalid request path", request_id, head_only=head_only)
+        path = self._parsed_path(request_id, head_only=head_only)
+        if path is None:
             return
-        path = parsed.path
+        if path.startswith("/api/"):
+            if head_only:
+                self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, POST")
+            else:
+                self._proxy_controller("GET", path, request_id)
+            return
         try:
             if path == "/health":
                 body = b'{"service":"hermesops-console","status":"ok"}\n'
-                self._send(status=200, body=body, content_type="application/json", request_id=request_id, head_only=head_only)
+                self._send(
+                    status=200,
+                    body=body,
+                    content_type="application/json",
+                    request_id=request_id,
+                    head_only=head_only,
+                )
                 return
             if path == "/version":
                 version = read_safe_file(self.settings.version_file, 1024).decode("utf-8").strip()
-                body = (json.dumps({"service": "hermesops-console", "version": version}, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-                self._send(status=200, body=body, content_type="application/json", request_id=request_id, head_only=head_only)
+                body = (
+                    json.dumps(
+                        {"service": "hermesops-console", "version": version},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                self._send(
+                    status=200,
+                    body=body,
+                    content_type="application/json",
+                    request_id=request_id,
+                    head_only=head_only,
+                )
                 return
             if path in ROUTES:
                 body = self._read_regular(Path("index.html"))
-                self._send(status=200, body=body, content_type="text/html", request_id=request_id, head_only=head_only)
+                self._send(
+                    status=200,
+                    body=body,
+                    content_type="text/html",
+                    request_id=request_id,
+                    head_only=head_only,
+                )
                 return
             asset = ASSETS.get(path)
             if asset is not None:
                 relative, content_type = asset
                 body = self._read_regular(relative)
-                self._send(status=200, body=body, content_type=content_type, request_id=request_id, head_only=head_only)
+                self._send(
+                    status=200,
+                    body=body,
+                    content_type=content_type,
+                    request_id=request_id,
+                    head_only=head_only,
+                )
                 return
         except (OSError, ConsoleServiceError, UnicodeError):
             self._problem(503, "asset_unavailable", "Console asset unavailable", request_id, head_only=head_only)
             return
         self._problem(404, "route_not_found", "Route not found", request_id, head_only=head_only)
 
+    def _singleton_headers_valid(self) -> bool:
+        return all(len(self.headers.get_all(name, failobj=[])) <= 1 for name in SINGLETON_REQUEST_HEADERS)
+
+    def _validated_proxy_body(self, method: str, request_id: str) -> bytes | None:
+        if self.headers.get("Transfer-Encoding") is not None or self.headers.get("Expect") is not None:
+            self._problem(400, "unsupported_request_framing", "Unsupported request framing", request_id)
+            self.close_connection = True
+            return None
+        raw_length = self.headers.get("Content-Length")
+        try:
+            length = 0 if raw_length is None else int(raw_length, 10)
+        except ValueError:
+            self._problem(400, "invalid_content_length", "Invalid Content-Length", request_id)
+            self.close_connection = True
+            return None
+        if length < 0 or length > MAX_PROXY_REQUEST_BODY:
+            self._problem(413, "request_too_large", "Controller request body is too large", request_id)
+            self.close_connection = True
+            return None
+        if method == "GET" and length != 0:
+            self._problem(400, "unexpected_request_body", "GET request body is not allowed", request_id)
+            self.close_connection = True
+            return None
+        if method == "POST":
+            content_type = self.headers.get("Content-Type", "")
+            if content_type.split(";", 1)[0].strip().lower() != "application/json":
+                self._problem(415, "unsupported_media_type", "Controller requests require JSON", request_id)
+                self.close_connection = True
+                return None
+        if length == 0:
+            return b""
+        try:
+            body = self.rfile.read(length)
+        except OSError:
+            self._problem(400, "request_body_unavailable", "Request body is unavailable", request_id)
+            self.close_connection = True
+            return None
+        if len(body) != length:
+            self._problem(400, "incomplete_request_body", "Request body is incomplete", request_id)
+            self.close_connection = True
+            return None
+        return body
+
+    def _validated_origin(self, method: str, request_id: str) -> bool:
+        values = self.headers.get_all("Origin", failobj=[])
+        if method == "POST":
+            if len(values) != 1 or values[0] != self._browser_origin():
+                self._problem(403, "origin_forbidden", "Request origin is forbidden", request_id)
+                return False
+        elif values and (len(values) != 1 or values[0] != self._browser_origin()):
+            self._problem(403, "origin_forbidden", "Request origin is forbidden", request_id)
+            return False
+        return True
+
+    def _proxy_request_headers(self, method: str) -> dict[str, str]:
+        result = {
+            "Host": f"{self.settings.controller_host}:{self.settings.controller_port}",
+            "Connection": "close",
+            "Origin": self.settings.controller_origin,
+        }
+        for name in REQUEST_HEADER_ALLOWLIST:
+            values = self.headers.get_all(name, failobj=[])
+            if len(values) == 1 and _safe_header_value(values[0]):
+                result[name] = values[0]
+        if method == "GET":
+            result.pop("content-type", None)
+        return result
+
+    def _proxy_controller(self, method: str, path: str, request_id: str) -> None:
+        if (method, path) not in CONTROLLER_ROUTES:
+            self._problem(404, "controller_route_not_exposed", "Controller route is not exposed", request_id)
+            if method == "POST":
+                self.close_connection = True
+            return
+        if not self._singleton_headers_valid():
+            self._problem(400, "duplicate_header", "Duplicate request header", request_id)
+            if method == "POST":
+                self.close_connection = True
+            return
+        if not self._validated_origin(method, request_id):
+            if method == "POST":
+                self.close_connection = True
+            return
+        body = self._validated_proxy_body(method, request_id)
+        if body is None:
+            return
+        connection = http.client.HTTPConnection(
+            self.settings.controller_host,
+            self.settings.controller_port,
+            timeout=self.settings.controller_timeout,
+        )
+        try:
+            connection.request(
+                method,
+                path,
+                body=body if method == "POST" else None,
+                headers=self._proxy_request_headers(method),
+            )
+            response = connection.getresponse()
+            if 100 <= response.status < 200 or 300 <= response.status < 400:
+                raise ConsoleServiceError("Controller returned an unsupported status")
+            raw_headers = response.getheaders()
+            preliminary: dict[str, list[str]] = {}
+            for name, value in raw_headers:
+                preliminary.setdefault(name.lower(), []).append(value)
+            if preliminary.get("transfer-encoding"):
+                raise ConsoleServiceError("Controller response framing is unsupported")
+            content_lengths = preliminary.get("content-length", [])
+            if len(content_lengths) != 1:
+                raise ConsoleServiceError("Controller response length is invalid")
+            try:
+                declared = int(content_lengths[0], 10)
+            except ValueError as error:
+                raise ConsoleServiceError("Controller response length is invalid") from error
+            if declared < 0 or declared > MAX_PROXY_RESPONSE_BODY:
+                raise ConsoleServiceError("Controller response is too large")
+            response_body = response.read(MAX_PROXY_RESPONSE_BODY + 1)
+            if len(response_body) != declared or len(response_body) > MAX_PROXY_RESPONSE_BODY:
+                raise ConsoleServiceError("Controller response length is invalid")
+        except (OSError, TimeoutError, http.client.HTTPException):
+            self._problem(503, "controller_unavailable", "Controller is unavailable", request_id)
+            return
+        except ConsoleServiceError:
+            self._problem(502, "invalid_controller_response", "Controller response is invalid", request_id)
+            return
+        finally:
+            connection.close()
+
+        header_map: dict[str, list[str]] = {}
+        for name, value in raw_headers:
+            header_map.setdefault(name.lower(), []).append(value)
+        content_types = header_map.get("content-type", [])
+        if len(content_types) != 1 or not _safe_header_value(content_types[0], 256):
+            self._problem(502, "invalid_controller_response", "Controller response is invalid", request_id)
+            return
+        media_type = content_types[0].split(";", 1)[0].strip().lower()
+        if media_type not in {"application/json", "application/problem+json"}:
+            self._problem(502, "invalid_controller_response", "Controller response is invalid", request_id)
+            return
+
+        extra: list[tuple[str, str]] = []
+        for name in RESPONSE_HEADER_ALLOWLIST:
+            for value in header_map.get(name, []):
+                if _safe_header_value(value):
+                    extra.append(("-".join(part.capitalize() for part in name.split("-")), value))
+        upstream_request_ids = header_map.get("x-request-id", [])
+        if len(upstream_request_ids) == 1 and _safe_header_value(upstream_request_ids[0], 128):
+            extra.append(("X-HermesOps-Controller-Request-ID", upstream_request_ids[0]))
+        self._send(
+            status=response.status,
+            body=response_body,
+            content_type=media_type,
+            request_id=request_id,
+            extra_headers=tuple(extra),
+        )
+
     def do_GET(self) -> None:
-        self._serve(head_only=False)
+        self._serve_static(head_only=False)
 
     def do_HEAD(self) -> None:
-        self._serve(head_only=True)
+        self._serve_static(head_only=True)
+
+    def do_POST(self) -> None:
+        request_id = self._request_id()
+        if not self._valid_host():
+            self._problem(400, "invalid_host", "Invalid Host header", request_id)
+            return
+        path = self._parsed_path(request_id)
+        if path is None:
+            return
+        if path.startswith("/api/"):
+            self._proxy_controller("POST", path, request_id)
+            return
+        self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, HEAD")
+        self.close_connection = True
 
     def _method_not_allowed(self) -> None:
         request_id = self._request_id()
-        body = b'{"status":405,"title":"Method not allowed","type":"urn:hermesops:console:method_not_allowed"}\n'
-        self._send(
-            status=405,
-            body=body,
-            content_type="application/problem+json",
-            request_id=request_id,
-            allow="GET, HEAD",
-        )
+        self._problem(405, "method_not_allowed", "Method not allowed", request_id, allow="GET, HEAD, POST")
         self.close_connection = True
 
-    do_POST = _method_not_allowed
     do_PUT = _method_not_allowed
     do_PATCH = _method_not_allowed
     do_DELETE = _method_not_allowed
@@ -376,11 +717,15 @@ def settings_from_arguments(arguments: argparse.Namespace) -> Settings:
         host=arguments.host,
         port=arguments.port,
         max_connections=arguments.max_connections,
+        controller_host=arguments.controller_host,
+        controller_port=arguments.controller_port,
+        controller_origin=arguments.controller_origin,
+        controller_timeout=arguments.controller_timeout,
     )
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Serve the HermesOps Console foundation")
+    result = argparse.ArgumentParser(description="Serve the HermesOps Console browser client")
     subparsers = result.add_subparsers(dest="command", required=True)
     for name in ("check", "serve"):
         child = subparsers.add_parser(name)
@@ -388,6 +733,10 @@ def parser() -> argparse.ArgumentParser:
         child.add_argument("--host", default="127.0.0.1")
         child.add_argument("--port", type=int, default=8788)
         child.add_argument("--max-connections", type=int, default=16)
+        child.add_argument("--controller-host", default="127.0.0.1")
+        child.add_argument("--controller-port", type=int, default=8765)
+        child.add_argument("--controller-origin", default="http://127.0.0.1:8787")
+        child.add_argument("--controller-timeout", type=float, default=5.0)
     return result
 
 

@@ -17,6 +17,8 @@ API, HermesOps Console, and Hermesfile builder are developed.
 - [Historical Hermesfile v0 design](hermesfile/SPECIFICATION_V0.md)
 - [Console information architecture](console/INFORMATION_ARCHITECTURE.md)
 - [Console foundation](console/FOUNDATION.md)
+- [Console browser session and Controller client](console/CONTROLLER_CLIENT.md)
+- [Milestone 2Q scope](milestones/2Q_BROWSER_SESSION_CONTROLLER_CLIENT.md)
 
 ## Machine-readable contracts
 

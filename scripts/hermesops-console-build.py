@@ -13,11 +13,13 @@ from pathlib import Path
 SOURCE_FILES = (
     Path("index.html"),
     Path("app.js"),
+    Path("controller-client.js"),
     Path("styles.css"),
 )
 OUTPUT_MAP = {
     Path("index.html"): Path("index.html"),
     Path("app.js"): Path("assets/app.js"),
+    Path("controller-client.js"): Path("assets/controller-client.js"),
     Path("styles.css"): Path("assets/styles.css"),
 }
 MAX_SOURCE_SIZE = 256 * 1024

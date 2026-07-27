@@ -12,8 +12,12 @@ python3 "${REPO}/scripts/hermesops-console-build.py" check \
 python3 -m unittest -v tests.test_console_service
 
 grep -Fq "HermesOps Console" "${REPO}/console/dist/index.html"
-grep -Fq "connect-src 'none'" "${REPO}/scripts/hermesops-console.py"
-! grep -RInE '(fetch\(|WebSocket\(|localStorage|sessionStorage)' \
+grep -Fq "connect-src 'self'" "${REPO}/scripts/hermesops-console.py"
+grep -Fq 'import { ControllerClientError, createControllerClient }' \
+    "${REPO}/console/src/app.js"
+grep -Fq 'fetch(' "${REPO}/console/src/controller-client.js"
+
+! grep -RInE '(WebSocket\(|localStorage|sessionStorage|indexedDB|eval\(|new Function)' \
     "${REPO}/console/src" "${REPO}/console/dist/assets"
 
 systemd-analyze verify \

@@ -64,6 +64,10 @@ The target includes:
 Until that milestone exists, the current upstream WebUI must be understood as a
 temporary compatibility interface, not as the final HermesOps Console.
 
+The dedicated Console foundation now runs on `127.0.0.1:8788`. Milestone 2Q
+adds browser login, session verification, logout, and a narrow same-origin
+Controller client. Operational data and workflows remain staged across 2R–2X.
+
 ## What HermesOps is
 
 HermesOps is both:
@@ -113,7 +117,7 @@ flowchart TB
     subgraph UI["Operator interfaces"]
         CLI["HermesOps CLI<br/>current administration"]
         WEB["Temporary upstream WebUI<br/>chat compatibility"]
-        FUTURE["Future HermesOps Console<br/>planned for v0.2.0-beta"]
+        FUTURE["HermesOps Console<br/>foundation and Controller client"]
     end
 
     subgraph CONTROL["HermesOps control plane"]
@@ -140,10 +144,10 @@ flowchart TB
 
     USER --> CLI
     USER --> WEB
-    USER -. future .-> FUTURE
+    USER --> FUTURE
 
     CLI --> CONTROL
-    FUTURE -. API .-> CONTROL
+    FUTURE -->|bounded API client| CONTROL
     WEB --> AGENT
 
     CONTROL <--> DB
@@ -190,7 +194,7 @@ logical HermesOps roles defined by configuration and controller state.
 | Sandbox engine | Dedicated nested Docker daemon used only for isolated execution |
 | Worker image | Reproducible template from which temporary work containers are created |
 | Temporary upstream WebUI | Current compatibility interface on `127.0.0.1:8787` |
-| Future HermesOps Console | Dedicated HermesOps WebUI planned for `v0.2.0-beta` |
+| HermesOps Console | Dedicated loopback WebUI foundation with browser session and Controller client on `127.0.0.1:8788` |
 
 ## Roles
 
@@ -532,16 +536,17 @@ HERMESOPS_ROOT=/opt/docker/hermesops \
 Provider-specific authentication procedures remain the responsibility of
 Hermes Agent and the selected model provider.
 
-## Accessing the current WebUI
+## Accessing the browser interfaces
 
-The current WebUI is temporary and comes from the upstream Hermes ecosystem.
-It is not the future HermesOps Console.
+The upstream Hermes WebUI remains a temporary chat compatibility interface on
+port 8787. The dedicated HermesOps Console runs independently on port 8788.
 
 From the operator workstation:
 
 ```bash
 ssh \
   -L 8787:127.0.0.1:8787 \
+  -L 8788:127.0.0.1:8788 \
   -L 8642:127.0.0.1:8642 \
   user@server
 ```
@@ -549,7 +554,8 @@ ssh \
 Open:
 
 ```text
-http://127.0.0.1:8787
+HermesOps Console:      http://127.0.0.1:8788
+Legacy Hermes WebUI:   http://127.0.0.1:8787
 ```
 
 Health endpoints:
@@ -557,6 +563,7 @@ Health endpoints:
 ```bash
 curl --fail http://127.0.0.1:8642/health
 curl --fail http://127.0.0.1:8787/health
+curl --fail http://127.0.0.1:8788/health
 ```
 
 ## Registering a project
@@ -754,7 +761,7 @@ Review `./uninstall.sh --help` before requesting destructive removal.
 
 `v0.1.0-alpha` is a foundation release. Important limitations include:
 
-- the dedicated HermesOps Console does not exist yet;
+- the dedicated HermesOps Console currently provides only its shell, browser session, and bounded Controller client;
 - the current WebUI is a temporary upstream compatibility interface;
 - project and objective administration still uses CLI tools;
 - sandbox profiles cannot yet be edited in the WebUI;

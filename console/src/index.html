@@ -31,7 +31,7 @@
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot" aria-hidden="true"></span>
-        Fondation 2P
+        Session et client 2Q
       </div>
     </aside>
 
@@ -41,40 +41,60 @@
           <p class="eyebrow">HermesOps Control Plane</p>
           <h1 id="page-title">Tableau de bord</h1>
         </div>
-        <div class="environment-badge">Local · lecture de démonstration</div>
+        <div id="controller-connection" class="environment-badge" data-state="checking">Vérification…</div>
       </header>
 
       <section class="hero" aria-labelledby="hero-title">
         <div>
-          <p class="eyebrow">Jalon 2P</p>
-          <h2 id="hero-title">La nouvelle Console est installée.</h2>
+          <p class="eyebrow">Jalon 2Q</p>
+          <h2 id="hero-title">La Console dialogue avec le Controller.</h2>
           <p id="page-description">
-            Cette fondation fournit le shell, la navigation et le service HTTP sécurisé.
-            Les données du Controller seront reliées au jalon 2Q.
+            Le transport same-origin, la session navigateur et le client HTTP sont actifs.
+            Les données opérationnelles détaillées restent attribuées aux jalons suivants.
           </p>
         </div>
         <div class="foundation-state" role="status">
           <span class="status-dot" aria-hidden="true"></span>
-          Service Console prêt
+          <span id="controller-message">Lecture de la session auprès du Controller.</span>
         </div>
       </section>
 
-      <section class="cards" aria-label="État de la fondation">
+      <section class="cards" aria-label="État du client Controller">
         <article class="card">
-          <span class="card-label">Frontière</span>
-          <strong>Client non privilégié</strong>
-          <p>Aucun accès direct à SQLite, Docker, Hermes Agent ou aux chemins hôte.</p>
+          <span class="card-label">Transport</span>
+          <strong>Proxy same-origin borné</strong>
+          <p>Le navigateur appelle uniquement la Console. Aucun port Controller n’est exposé au code JavaScript.</p>
         </article>
         <article class="card">
-          <span class="card-label">Chaîne de build</span>
-          <strong>Python standard library</strong>
-          <p>Build déterministe, sans Node.js, npm ni dépendance téléchargée.</p>
+          <span class="card-label">Session</span>
+          <strong>Cookie HTTP-only</strong>
+          <p>Le mot de passe et le jeton de session ne sont jamais stockés dans le JavaScript ou le stockage navigateur.</p>
         </article>
         <article class="card">
-          <span class="card-label">Exposition</span>
-          <strong>Loopback uniquement</strong>
-          <p>Le service écoute sur 127.0.0.1:8788 et refuse les chemins non autorisés.</p>
+          <span class="card-label">Dégradation</span>
+          <strong>Aucune file d’attente locale</strong>
+          <p>Quand le Controller est indisponible, la Console reste statique et ne simule aucune mutation.</p>
         </article>
+      </section>
+
+      <section id="session-panel" class="session-panel" data-state="checking" aria-labelledby="session-title">
+        <div>
+          <p class="eyebrow">Session opérateur</p>
+          <h2 id="session-title"><span id="session-status" aria-live="polite">Vérification en cours…</span></h2>
+          <p id="session-detail">La Console vérifie l’état autoritaire de la session.</p>
+        </div>
+        <form id="login-form" class="login-form" autocomplete="on" hidden>
+          <label>
+            Identifiant
+            <input name="username" value="operator" autocomplete="username" readonly>
+          </label>
+          <label>
+            Mot de passe
+            <input id="operator-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+          </label>
+          <button id="login-button" type="submit">Se connecter</button>
+        </form>
+        <button id="logout-button" class="secondary-button" type="button" hidden>Se déconnecter</button>
       </section>
 
       <section class="route-panel" aria-live="polite">
@@ -88,10 +108,10 @@
 
       <footer>
         <span>HermesOps v0.1.0-alpha</span>
-        <span>Console foundation · aucune mutation disponible</span>
+        <span>Client Controller 2Q · aucune donnée sensible persistée</span>
       </footer>
     </main>
   </div>
-  <noscript>JavaScript est requis uniquement pour la navigation du shell HermesOps.</noscript>
+  <noscript>JavaScript est requis pour la session navigateur et la navigation du shell HermesOps.</noscript>
 </body>
 </html>

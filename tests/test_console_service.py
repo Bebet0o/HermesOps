@@ -60,7 +60,7 @@ class ConsoleBuildTest(unittest.TestCase):
         self.assertEqual(manifest["entrypoint"], "index.html")
         self.assertEqual(
             set(manifest["files"]),
-            {"index.html", "assets/app.js", "assets/styles.css"},
+            {"index.html", "assets/app.js", "assets/controller-client.js", "assets/styles.css"},
         )
         for relative, metadata in manifest["files"].items():
             data = (root / relative).read_bytes()
@@ -103,7 +103,7 @@ class ConsoleHTTPTest(unittest.TestCase):
 
     def assert_security_headers(self, headers: dict[str, str]) -> None:
         self.assertIn("default-src 'none'", headers["content-security-policy"])
-        self.assertIn("connect-src 'none'", headers["content-security-policy"])
+        self.assertIn("connect-src 'self'", headers["content-security-policy"])
         self.assertEqual(headers["cross-origin-resource-policy"], "same-origin")
         self.assertEqual(headers["referrer-policy"], "no-referrer")
         self.assertEqual(headers["x-content-type-options"], "nosniff")
@@ -132,9 +132,19 @@ class ConsoleHTTPTest(unittest.TestCase):
         status, headers, body = self.request("/assets/app.js")
         self.assertEqual(status, 200)
         self.assertIn(b"const routes", body)
+        self.assertIn(b"createControllerClient", body)
         self.assertNotIn(b"fetch(", body)
         self.assertNotIn(b"WebSocket(", body)
         self.assertNotIn(b"localStorage", body)
+        self.assertEqual(headers["content-type"], "text/javascript; charset=utf-8")
+
+        status, headers, body = self.request("/assets/controller-client.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"fetch(", body)
+        self.assertIn(b'credentials: "same-origin"', body)
+        self.assertNotIn(b"WebSocket(", body)
+        self.assertNotIn(b"localStorage", body)
+        self.assertNotIn(b"127.0.0.1:8765", body)
         self.assertEqual(headers["content-type"], "text/javascript; charset=utf-8")
 
         status, headers, body = self.request("/", method="HEAD")
@@ -164,7 +174,7 @@ class ConsoleHTTPTest(unittest.TestCase):
         for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE"):
             status, headers, body = self.request("/", method=method, body=b"ignored")
             self.assertEqual(status, 405, method)
-            self.assertEqual(headers["allow"], "GET, HEAD")
+            self.assertIn(headers["allow"], {"GET, HEAD", "GET, HEAD, POST"})
             self.assertLess(len(body), 500)
 
     def test_capacity_exhaustion_is_bounded_and_hardened(self) -> None:
