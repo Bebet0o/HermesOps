@@ -91,3 +91,11 @@ All notable changes to HermesOps will be documented in this file.
   storage;
 - add bounded proxy, origin, header, body, response, and live-probe coverage;
 - keep business workflows and WebSocket events assigned to later milestones.
+
+### Milestone 2R — Operational Dashboard
+
+- add six explicit query-free read-only Controller collections to the Console gateway;
+- add bounded project, objective, attention, plan and portfolio summaries;
+- add partial-data, session-expiry, empty-state and manual-refresh handling;
+- keep SQLite, host paths, browser storage, WebSocket and all mutations outside the Console;
+- add deterministic dashboard source, proxy, build and live-probe coverage.

@@ -96,8 +96,15 @@ def validate(base_url: str, wait_seconds: float) -> None:
             raise ProbeError(f"Console request ID is invalid on {route}")
 
     status, _, body = request(parsed.hostname, port, "/assets/app.js")
-    if status != 200 or b"createControllerClient" not in body or b"fetch(" in body:
-        raise ProbeError("Console application script does not isolate the Controller client")
+    if (
+        status != 200
+        or b"createControllerClient" not in body
+        or b"refreshDashboard" not in body
+        or b"Promise.allSettled" not in body
+        or b"fetch(" in body
+        or b"innerHTML" in body
+    ):
+        raise ProbeError("Console application script does not isolate the operational dashboard client")
 
     status, _, body = request(parsed.hostname, port, "/assets/controller-client.js")
     if (
@@ -108,8 +115,14 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"localStorage" in body
         or b"sessionStorage" in body
         or b"WebSocket(" in body
+        or b'path: "/api/v1/projects"' not in body
+        or b'path: "/api/v1/objectives"' not in body
+        or b'path: "/api/v1/reviews"' not in body
+        or b'path: "/api/v1/recoveries"' not in body
+        or b'path: "/api/v1/plans"' not in body
+        or b'path: "/api/v1/reviewer-assignments"' not in body
     ):
-        raise ProbeError("Console Controller client violates the 2Q browser boundary")
+        raise ProbeError("Console Controller client violates the 2R browser boundary")
 
     status, headers, body = request(parsed.hostname, port, "/", method="HEAD")
     if status != 200 or body or int(headers.get("content-length", "0")) <= 0:
@@ -131,13 +144,25 @@ def validate(base_url: str, wait_seconds: float) -> None:
     if not headers.get("x-request-id", "").startswith("req_"):
         raise ProbeError("Controller proxy request ID is invalid")
 
-    status, _, _ = request(parsed.hostname, port, "/api/v1/projects")
+    for path in (
+        "/api/v1/projects",
+        "/api/v1/objectives",
+        "/api/v1/reviews",
+        "/api/v1/recoveries",
+        "/api/v1/plans",
+        "/api/v1/reviewer-assignments",
+    ):
+        status, _, _ = request(parsed.hostname, port, path)
+        if status != 401:
+            raise ProbeError(f"Unauthenticated dashboard proxy returned HTTP {status}: {path}")
+
+    status, _, _ = request(parsed.hostname, port, "/api/v1/tasks")
     if status != 404:
         raise ProbeError("Console exposes an out-of-scope Controller route")
 
     print(
         f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port} "
-        "session_proxy=401"
+        "session_proxy=401 dashboard_proxy=401"
     )
 
 

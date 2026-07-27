@@ -879,7 +879,9 @@ The Controller exposes authenticated list/detail metadata at
 ## Console HermesOps dédiée
 
 Le jalon 2P ajoute la fondation indépendante de la Console HermesOps sur
-`127.0.0.1:8788`. Elle fournit un shell navigable, un build Python déterministe,
-un service systemd utilisateur durci et des probes, sans encore appeler le
-Controller ni exposer de mutation. La WebUI Hermes historique reste sur le port
-8787 pendant la construction de la bêta.
+`127.0.0.1:8788`. Le jalon 2Q relie la session navigateur au Controller via un
+proxy same-origin strict. Le jalon 2R ajoute un tableau de bord opérationnel
+authentifié et en lecture seule pour les projets, objectifs, reviews, recoveries,
+plans et assignations, avec données partielles explicites et sans accès SQLite.
+La WebUI Hermes historique reste sur le port 8787 pendant la construction de la
+bêta.

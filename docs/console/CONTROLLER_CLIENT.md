@@ -1,6 +1,6 @@
 # Console Browser Session and Controller Client
 
-Status: **implemented by milestone 2Q**
+Status: **implemented by milestone 2Q and extended by 2R**
 
 ## Boundary
 
@@ -16,7 +16,10 @@ The Console service exposes a deliberately narrow same-origin gateway for:
 - `POST /api/v1/auth/logout`;
 - `GET /api/v1/system/capabilities`.
 
-All other Controller paths remain unavailable until their owning milestones.
+Milestone 2R additionally exposes six exact query-free GET collections for the
+operational dashboard: projects, objectives, reviews, recoveries, plans, and
+reviewer assignments. All other Controller paths remain unavailable until their
+owning milestones.
 The gateway is not a general reverse proxy.
 
 ## Origin translation
@@ -69,7 +72,6 @@ Milestone 2Q does not add:
 
 - project or Hermesfile lifecycle operations;
 - objective or review commands;
-- operational dashboards;
 - WebSocket events;
 - offline queues or browser persistence;
 - a general-purpose API proxy.

@@ -31,7 +31,7 @@
       </nav>
       <div class="sidebar-foot">
         <span class="status-dot" aria-hidden="true"></span>
-        Session et client 2Q
+        Dashboard opérationnel 2R
       </div>
     </aside>
 
@@ -46,35 +46,17 @@
 
       <section class="hero" aria-labelledby="hero-title">
         <div>
-          <p class="eyebrow">Jalon 2Q</p>
-          <h2 id="hero-title">La Console dialogue avec le Controller.</h2>
+          <p class="eyebrow">Jalon 2R</p>
+          <h2 id="hero-title">L’état opérationnel essentiel, sans accès privilégié.</h2>
           <p id="page-description">
-            Le transport same-origin, la session navigateur et le client HTTP sont actifs.
-            Les données opérationnelles détaillées restent attribuées aux jalons suivants.
+            Le navigateur lit uniquement des projections Controller authentifiées, bornées et expurgées.
+            Aucune donnée n’est lue directement depuis SQLite ou un chemin hôte.
           </p>
         </div>
         <div class="foundation-state" role="status">
           <span class="status-dot" aria-hidden="true"></span>
           <span id="controller-message">Lecture de la session auprès du Controller.</span>
         </div>
-      </section>
-
-      <section class="cards" aria-label="État du client Controller">
-        <article class="card">
-          <span class="card-label">Transport</span>
-          <strong>Proxy same-origin borné</strong>
-          <p>Le navigateur appelle uniquement la Console. Aucun port Controller n’est exposé au code JavaScript.</p>
-        </article>
-        <article class="card">
-          <span class="card-label">Session</span>
-          <strong>Cookie HTTP-only</strong>
-          <p>Le mot de passe et le jeton de session ne sont jamais stockés dans le JavaScript ou le stockage navigateur.</p>
-        </article>
-        <article class="card">
-          <span class="card-label">Dégradation</span>
-          <strong>Aucune file d’attente locale</strong>
-          <p>Quand le Controller est indisponible, la Console reste statique et ne simule aucune mutation.</p>
-        </article>
       </section>
 
       <section id="session-panel" class="session-panel" data-state="checking" aria-labelledby="session-title">
@@ -97,21 +79,87 @@
         <button id="logout-button" class="secondary-button" type="button" hidden>Se déconnecter</button>
       </section>
 
-      <section class="route-panel" aria-live="polite">
+      <section id="dashboard-panel" class="dashboard-panel" aria-labelledby="dashboard-title" hidden>
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow">Vue opérationnelle</p>
+            <h2 id="dashboard-title">Ce qui demande votre attention</h2>
+            <p id="dashboard-status" class="dashboard-status" aria-live="polite">Aucune lecture lancée.</p>
+          </div>
+          <button id="dashboard-refresh" class="secondary-button" type="button">Actualiser</button>
+        </div>
+
+        <section class="metric-grid" aria-label="Indicateurs opérationnels">
+          <article class="metric-card">
+            <span class="card-label">Projets actifs</span>
+            <strong id="metric-projects">—</strong>
+            <p id="metric-projects-detail">En attente d’une session authentifiée.</p>
+          </article>
+          <article class="metric-card">
+            <span class="card-label">Objectifs en cours</span>
+            <strong id="metric-objectives">—</strong>
+            <p id="metric-objectives-detail">Projections Controller uniquement.</p>
+          </article>
+          <article class="metric-card metric-attention">
+            <span class="card-label">Attention requise</span>
+            <strong id="metric-attention">—</strong>
+            <p id="metric-attention-detail">Blocages, échecs et décisions visibles.</p>
+          </article>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="dashboard-card dashboard-card-wide" aria-labelledby="attention-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Priorité</p>
+                <h3 id="attention-title">File d’attention</h3>
+              </div>
+              <span id="attention-count" class="count-badge">0</span>
+            </div>
+            <ul id="attention-list" class="operational-list"></ul>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="active-work-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Activité</p>
+                <h3 id="active-work-title">Travail actif</h3>
+              </div>
+            </div>
+            <ul id="active-work-list" class="operational-list compact-list"></ul>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="portfolio-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Portefeuille</p>
+                <h3 id="portfolio-title">Projets</h3>
+              </div>
+            </div>
+            <ul id="project-list" class="operational-list compact-list"></ul>
+          </section>
+        </div>
+
+        <p id="dashboard-coverage" class="coverage-note">
+          Première page bornée de chaque collection Controller. Aucun résultat n’est inventé.
+        </p>
+      </section>
+
+      <section id="route-panel" class="route-panel" aria-live="polite">
         <div>
           <p class="eyebrow">Espace fonctionnel</p>
           <h2 id="route-title">Tableau de bord</h2>
-          <p id="route-message">Les indicateurs opérationnels seront ajoutés au jalon 2R.</p>
+          <p id="route-message">Connectez-vous pour lire le tableau de bord opérationnel.</p>
         </div>
-        <span class="coming-soon">Préparé pour la suite</span>
+        <span class="coming-soon">Périmètre progressif</span>
       </section>
 
       <footer>
         <span>HermesOps v0.1.0-alpha</span>
-        <span>Client Controller 2Q · aucune donnée sensible persistée</span>
+        <span>Dashboard 2R · lectures Controller bornées · aucune persistance navigateur</span>
       </footer>
     </main>
   </div>
-  <noscript>JavaScript est requis pour la session navigateur et la navigation du shell HermesOps.</noscript>
+  <noscript>JavaScript est requis pour la session navigateur et le tableau de bord HermesOps.</noscript>
 </body>
 </html>

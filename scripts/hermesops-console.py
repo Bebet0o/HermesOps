@@ -51,6 +51,12 @@ CONTROLLER_ROUTES = frozenset(
         ("POST", "/api/v1/auth/csrf"),
         ("POST", "/api/v1/auth/logout"),
         ("GET", "/api/v1/system/capabilities"),
+        ("GET", "/api/v1/projects"),
+        ("GET", "/api/v1/objectives"),
+        ("GET", "/api/v1/reviews"),
+        ("GET", "/api/v1/recoveries"),
+        ("GET", "/api/v1/plans"),
+        ("GET", "/api/v1/reviewer-assignments"),
     }
 )
 REQUEST_HEADER_ALLOWLIST = frozenset(
