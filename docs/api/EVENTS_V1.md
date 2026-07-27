@@ -246,6 +246,7 @@ project.created
 project.updated
 project.enabled
 project.disabled
+project.rescanned
 project.archived
 project.deleted
 project.health_changed

@@ -438,12 +438,17 @@ class ControllerProbeTest(unittest.TestCase):
 
         migration_connection = sqlite3.connect(database)
         try:
-            migration_connection.executescript(
-                (
-                    Path(__file__).resolve().parents[1]
-                    / "migrations/020_sandbox_profile_persistence.sql"
-                ).read_text(encoding="utf-8")
-            )
+            for migration_name in (
+                "020_sandbox_profile_persistence.sql",
+                "021_project_lifecycle.sql",
+            ):
+                migration_connection.executescript(
+                    (
+                        Path(__file__).resolve().parents[1]
+                        / "migrations"
+                        / migration_name
+                    ).read_text(encoding="utf-8")
+                )
             migration_connection.commit()
         finally:
             migration_connection.close()

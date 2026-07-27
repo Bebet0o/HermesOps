@@ -205,3 +205,43 @@ h3 { margin: 0; font-size: 1.05rem; }
   .dashboard-heading, .section-heading { align-items: flex-start; flex-direction: column; }
   .dashboard-heading .secondary-button { width: 100%; }
 }
+
+/* Milestone 2S project lifecycle */
+select, textarea {
+  width: 100%;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: #0b111d;
+  color: #f4f7fc;
+}
+select:focus, textarea:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+.project-panel { margin-top: 1rem; }
+.project-grid { display: grid; grid-template-columns: minmax(17rem, 0.8fr) minmax(19rem, 1fr); gap: 1rem; margin-top: 1rem; align-items: start; }
+.project-detail-card { grid-column: 1 / -1; }
+.project-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem; margin-top: 1rem; }
+.project-form label, .project-command-box label { display: grid; gap: 0.38rem; color: var(--muted); font-size: 0.8rem; }
+.project-form button { align-self: end; min-height: 2.85rem; padding: 0.72rem 0.9rem; border: 1px solid rgba(142, 230, 194, 0.34); background: var(--accent-soft); color: #e9fff6; font-weight: 700; }
+.project-admin-list { display: grid; gap: 0.65rem; margin: 1rem 0 0; padding: 0; list-style: none; }
+.project-admin-list li { min-width: 0; }
+.project-list-button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.35rem 0.7rem; padding: 0.85rem; border: 1px solid rgba(155, 176, 216, 0.13); background: rgba(7, 11, 19, 0.42); color: #f4f7fc; text-align: left; }
+.project-list-button:hover, .project-list-button[aria-current="true"] { border-color: rgba(142, 230, 194, 0.32); background: var(--accent-soft); }
+.project-list-button strong { min-width: 0; overflow-wrap: anywhere; }
+.project-list-button > span:not(.state-badge) { grid-column: 1; color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+.project-list-button .state-badge { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.project-meta { margin: 0.65rem 0 0; color: var(--muted); line-height: 1.55; overflow-wrap: anywhere; }
+.project-command-box { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.project-command-buttons { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-top: 0.8rem; }
+.project-command-buttons button { padding: 0.68rem 0.85rem; border: 1px solid rgba(142, 230, 194, 0.28); background: var(--accent-soft); color: #e9fff6; font-weight: 700; }
+.project-command-buttons .danger-button { border-color: rgba(255, 160, 160, 0.38); color: #ffd4d4; background: rgba(180, 61, 61, 0.12); }
+.state-badge[data-state="enabled"] { border-color: rgba(142, 230, 194, 0.28); color: #dffcef; background: var(--accent-soft); }
+.state-badge[data-state="disabled"] { border-color: rgba(255, 213, 128, 0.30); color: #ffe6b5; background: rgba(180, 126, 61, 0.10); }
+.state-badge[data-state="archived"] { border-color: rgba(255, 160, 160, 0.34); color: #ffd4d4; background: rgba(180, 61, 61, 0.12); }
+@media (max-width: 920px) {
+  .project-grid, .project-form { grid-template-columns: 1fr; }
+  .project-detail-card { grid-column: auto; }
+}
+@media (max-width: 620px) {
+  .project-command-buttons { display: grid; }
+  .project-command-buttons button { width: 100%; }
+}

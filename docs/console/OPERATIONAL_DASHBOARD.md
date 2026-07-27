@@ -49,6 +49,6 @@ retained as authoritative.
 
 ## Deferred work
 
-Project lifecycle remains 2S, Hermesfile lifecycle 2T, objective commands 2U,
+Project lifecycle is implemented by 2S; Hermesfile lifecycle remains 2T, objective commands 2U,
 detailed orchestration/execution views 2V, human review/recovery actions 2W, and
 WebSocket reconciliation 2X.

@@ -94,7 +94,40 @@ default_branch = "main"
                     config_source TEXT NOT NULL,
                     config_hash TEXT NOT NULL,
                     registered_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    default_branch TEXT NOT NULL,
+                    sandbox_profile_id TEXT,
+                    archived INTEGER NOT NULL,
+                    repository_mode TEXT NOT NULL,
+                    resource_revision INTEGER NOT NULL
+                );
+                CREATE TABLE project_locks (
+                    project_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    holder TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL
+                );
+                CREATE TABLE controller_project_operations (
+                    operation_id TEXT PRIMARY KEY, command_kind TEXT NOT NULL,
+                    state TEXT NOT NULL, target_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL, error_code TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT
+                );
+                CREATE TABLE controller_project_idempotency (
+                    session_fingerprint TEXT NOT NULL, key_hash TEXT NOT NULL,
+                    method TEXT NOT NULL, route TEXT NOT NULL, request_hash TEXT NOT NULL,
+                    response_status INTEGER, response_json TEXT, operation_id TEXT,
+                    created_at TEXT NOT NULL, completed_at TEXT,
+                    PRIMARY KEY(session_fingerprint, key_hash)
+                );
+                CREATE TABLE controller_project_command_audit (
+                    audit_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE,
+                    actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                    resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+                    session_fingerprint TEXT NOT NULL, idempotency_key_hash TEXT NOT NULL,
+                    request_hash TEXT NOT NULL, outcome TEXT NOT NULL,
+                    reason_present INTEGER NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE TABLE orchestration_plans (
                     plan_id TEXT PRIMARY KEY,
@@ -263,7 +296,7 @@ default_branch = "main"
                 CREATE INDEX idx_controller_event_journal_correlation
                     ON controller_event_journal(correlation_id, sequence);
 
-                PRAGMA user_version = 15;
+                PRAGMA user_version = 21;
                 CREATE TABLE worker_executions (
                     execution_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
@@ -392,7 +425,12 @@ default_branch = "main"
                     ?,
                     '0123456789abcdef0123456789abcdef',
                     '2026-07-18T00:00:00.000Z',
-                    '2026-07-18T01:00:00.000Z'
+                    '2026-07-18T01:00:00.000Z',
+                    'main',
+                    NULL,
+                    0,
+                    'existing',
+                    1
                 )
                 """,
                 (str(self.project_config),),
@@ -437,6 +475,7 @@ default_branch = "main"
                     / "migrations/020_sandbox_profile_persistence.sql"
                 ).read_text(encoding="utf-8")
             )
+            migration_connection.execute("PRAGMA user_version = 21")
             migration_connection.commit()
 
         self.settings = Settings.from_root(
@@ -624,11 +663,11 @@ class ControllerAPITest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["code"], "invalid_limit")
 
-    def test_write_methods_are_disabled(self) -> None:
+    def test_destructive_write_methods_are_disabled(self) -> None:
         before = self.fixture.database.read_bytes()
         status, headers, payload = self.fixture.request(
-            "POST",
-            "/api/v1/projects",
+            "DELETE",
+            "/api/v1/projects/alpha",
             authenticated=True,
         )
         after = self.fixture.database.read_bytes()
@@ -646,7 +685,12 @@ class ControllerAPITest(unittest.TestCase):
         self.assertEqual(status, 200)
         features = payload["data"]["features"]
         self.assertFalse(features["read_only_controller_api"])
-        self.assertFalse(features["project_writes"])
+        self.assertTrue(features["project_writes"])
+        self.assertEqual(
+            features["project_write_commands"],
+            ["create", "update", "enable", "disable", "rescan", "archive"],
+        )
+        self.assertFalse(features["project_delete"])
         self.assertTrue(features["websocket_events"])
         self.assertFalse(features["hermesfile_builds"])
 
@@ -753,7 +797,7 @@ class ControllerAPITest(unittest.TestCase):
 
     def test_write_method_with_body_closes_connection(self) -> None:
         status, headers, payload = self.fixture.request(
-            "POST",
+            "PUT",
             "/api/v1/projects",
             body=b'{"ignored":true}',
         )

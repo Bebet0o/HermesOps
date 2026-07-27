@@ -99,3 +99,12 @@ Hermesfile v1 sources that pass validation and persistence eligibility checks.
 The Controller exposes redacted authenticated profile reads. Build, image,
 activation, rollback, deletion and HTTP mutation persistence remain future
 deltas.
+
+## Milestone 2S implemented delta
+
+Schema version 21 extends `projects` with an explicit public resource revision,
+default branch, optional sandbox profile, archive state, and repository mode. It
+adds dedicated project operations, actor-bound idempotency, and immutable command
+audit tables. Project create/update/enable/disable/rescan/archive writes emit the
+Controller event journal transactionally and keep the compatibility TOML
+projection synchronized. Delete remains unavailable.

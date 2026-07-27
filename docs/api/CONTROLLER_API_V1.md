@@ -285,17 +285,17 @@ PATCH /projects/{project_id}
 POST /projects/{project_id}/commands/{command}
 ```
 
-Initial project commands:
+Implemented project commands in milestone 2S:
 
 ```text
 enable
 disable
 rescan
 archive
-delete
 ```
 
-`delete` always requires confirmation.
+`delete` remains reserved by the design contract and returns
+`project_command_unavailable`; it is not exposed by the Console.
 
 Project creation body:
 

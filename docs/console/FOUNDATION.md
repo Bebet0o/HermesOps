@@ -1,6 +1,6 @@
 # HermesOps Console Foundation
 
-Status: **2P foundation extended by 2Q session/client and 2R operational dashboard**
+Status: **2P foundation extended through 2S project lifecycle**
 
 ## Purpose
 
@@ -9,6 +9,7 @@ Controller. Milestone 2P installed the deterministic static build, hardened
 loopback HTTP service, navigation shell, and bounded probes. Milestone 2Q adds
 the narrow same-origin browser session and Controller client boundary. Milestone
 2R adds six explicit, query-free, read-only operational collection routes.
+Milestone 2S adds a closed project lifecycle gateway and project page.
 
 The Console remains unprivileged. It never opens SQLite, project workspaces,
 the Hermes Agent endpoint, Docker sockets, or host paths.
@@ -76,7 +77,7 @@ python3 scripts/hermesops-console-probe.py   --base-url http://127.0.0.1:8788
 
 ## Current non-goals
 
-The Console implements the bounded 2R operational dashboard. It does not yet implement project or
+The Console implements the bounded 2R dashboard and 2S project lifecycle. It does not yet implement
 Hermesfile lifecycle, objective commands, execution views, human review actions,
 WebSocket events, browser persistence, service workers, or offline command
 queues.

@@ -99,3 +99,11 @@ All notable changes to HermesOps will be documented in this file.
 - add partial-data, session-expiry, empty-state and manual-refresh handling;
 - keep SQLite, host paths, browser storage, WebSocket and all mutations outside the Console;
 - add deterministic dashboard source, proxy, build and live-probe coverage.
+
+### Milestone 2S — Project Lifecycle
+
+- add schema 21 project revisions, archive state, repository mode, operations, idempotency and immutable audit;
+- add secure create/import, metadata update, enable, disable, rescan and archive Controller commands;
+- preserve compatibility project TOML files while making Controller mutations authoritative;
+- add a bounded same-origin Console project page with ETag/If-Match and fresh CSRF per intent;
+- keep delete, remote/default-branch mutation, automatic push and Hermesfile editing unavailable.
