@@ -112,8 +112,8 @@ def probe_sandbox_profiles(
     expected = {
         "sandbox_profile_reads": True,
         "sandbox_profile_operator_import": True,
-        "sandbox_profile_http_writes": False,
-        "sandbox_profile_http_validation": False,
+        "sandbox_profile_http_writes": True,
+        "sandbox_profile_http_validation": True,
         "hermesfile_builds": False,
     }
     for key, value in expected.items():

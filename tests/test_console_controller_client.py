@@ -77,8 +77,19 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"data": {"features": {"browser_session_lifecycle": True}}})
         elif self.path == "/api/v1/projects/alpha":
             self._send_json(200, {"data": {"id": "alpha", "name": "Alpha", "state": "disabled", "resource_revision": 1}}, etag='"1"')
+        elif self.path == "/api/v1/hermesfiles/template":
+            self._send_json(200, {"data": {"source": "apiVersion: hermesops.dev/v1\n", "source_format": "hermesfile-v1", "canonical_sha256": "a" * 64}})
+        elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32:
+            self._send_json(200, {"data": {"profile": {"id": "sandbox-" + "a" * 32, "profile_name": "python-project", "resource_revision": 1}, "revision": {"source_revision": 1, "source": "apiVersion: hermesops.dev/v1\n"}}}, etag='"1"')
+        elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32 + "/revisions":
+            self._send_json(200, {"data": [{"source_revision": 1}], "meta": {"next_cursor": None}})
+        elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32 + "/revisions/1":
+            self._send_json(200, {"data": {"source_revision": 1, "source": "apiVersion: hermesops.dev/v1\n"}})
+        elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32 + "/diff?from=1&to=2":
+            self._send_json(200, {"data": {"changed": True, "changes": [{"path": "/spec/runtime/cpu", "kind": "modified"}]}})
         elif self.path in {
             "/api/v1/projects",
+            "/api/v1/hermesfiles",
             "/api/v1/objectives",
             "/api/v1/reviews",
             "/api/v1/recoveries",
@@ -111,6 +122,10 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             )
         elif self.path == "/api/v1/projects" or self.path.startswith("/api/v1/projects/alpha/commands/"):
             self._send_json(202, {"data": {"operation_id": "operation-" + "a" * 32, "state": "succeeded"}})
+        elif self.path == "/api/v1/hermesfiles/validate":
+            self._send_json(200, {"data": {"valid": True, "diagnostics": [], "canonical": {}, "runtime_config": {}}})
+        elif self.path == "/api/v1/hermesfiles":
+            self._send_json(202, {"data": {"id": "operation-" + "c" * 32, "state": "succeeded", "result": {"sandbox_id": "sandbox-" + "a" * 32}}})
         else:
             self._send_json(404, {"code": "not_found", "title": "Not found"})
 
@@ -118,6 +133,8 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
         self._record()
         if self.path == "/api/v1/projects/alpha":
             self._send_json(202, {"data": {"operation_id": "operation-" + "b" * 32, "state": "succeeded"}})
+        elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32:
+            self._send_json(202, {"data": {"id": "operation-" + "d" * 32, "state": "succeeded", "result": {"sandbox_id": "sandbox-" + "a" * 32, "resource_revision": 2}}})
         else:
             self._send_json(404, {"code": "not_found", "title": "Not found"})
 
@@ -235,6 +252,7 @@ class ConsoleControllerProxyTest(unittest.TestCase):
     def test_operational_dashboard_gets_are_forwarded(self) -> None:
         for path in (
             "/api/v1/projects",
+            "/api/v1/hermesfiles",
             "/api/v1/objectives",
             "/api/v1/reviews",
             "/api/v1/recoveries",

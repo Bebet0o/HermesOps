@@ -441,6 +441,7 @@ class ControllerProbeTest(unittest.TestCase):
             for migration_name in (
                 "020_sandbox_profile_persistence.sql",
                 "021_project_lifecycle.sql",
+                "022_hermesfile_lifecycle.sql",
             ):
                 migration_connection.executescript(
                     (

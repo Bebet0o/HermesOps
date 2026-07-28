@@ -108,3 +108,13 @@ adds dedicated project operations, actor-bound idempotency, and immutable comman
 audit tables. Project create/update/enable/disable/rescan/archive writes emit the
 Controller event journal transactionally and keep the compatibility TOML
 projection synchronized. Delete remains unavailable.
+
+## Milestone 2T implemented delta
+
+Schema version 22 adds dedicated Hermesfile command operations, session-bound
+idempotency, and immutable command audit. Hermesfile source and canonical bytes
+remain owned by the existing immutable `sandbox_profile_revisions`; the current
+pointer and resource revision remain owned by `sandbox_profiles`. Accepted
+create/update transactions also append redacted sandbox events. No audit,
+idempotency, operation, or event record stores raw source, canonical content,
+secret-like input, or diagnostics containing the rejected value.

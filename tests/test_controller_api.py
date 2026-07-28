@@ -475,7 +475,17 @@ default_branch = "main"
                     / "migrations/020_sandbox_profile_persistence.sql"
                 ).read_text(encoding="utf-8")
             )
+            migration_connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(21, ?)",
+                ("2026-07-27T00:00:00.000Z",),
+            )
             migration_connection.execute("PRAGMA user_version = 21")
+            migration_connection.executescript(
+                (
+                    Path(__file__).resolve().parents[1]
+                    / "migrations/022_hermesfile_lifecycle.sql"
+                ).read_text(encoding="utf-8")
+            )
             migration_connection.commit()
 
         self.settings = Settings.from_root(

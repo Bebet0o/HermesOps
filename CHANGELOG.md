@@ -5,6 +5,12 @@ All notable changes to HermesOps will be documented in this file.
 
 ## [Unreleased]
 
+- Add milestone 2T Hermesfile lifecycle persistence and Controller routes.
+- Add strict non-persisting validation, guided template creation, immutable
+  source revisions, `If-Match` concurrency, path-only canonical comparison,
+  runtime projection, redacted operations/audit/events, and the dedicated
+  Console editor.
+
 - Add authenticated, redacted public reads for orchestration plans, DAG edges, attempts and reviewer assignments.
 - Add executable Hermesfile v1 parsing, semantic validation, canonical JSON and deterministic source/canonical SHA-256 fingerprints.
 

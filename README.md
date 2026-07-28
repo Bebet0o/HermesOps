@@ -316,7 +316,10 @@ identity, resource bounds, network declaration, mandatory security invariants,
 logical mounts and validation commands.
 
 The current development tree can strictly parse, validate, canonicalize and
-fingerprint Hermesfile v1 sources:
+fingerprint Hermesfile v1 sources. The authenticated Console at
+`http://127.0.0.1:8788/hermesfiles` can also load the official template,
+validate without persistence, create a profile, edit it with optimistic
+concurrency, inspect immutable source revisions, and compare canonical paths:
 
 ```bash
 scripts/hermesops-hermesfile.py validate Hermesfile
@@ -332,9 +335,9 @@ Source formatting and comments do not change the canonical digest. The source
 digest and canonical digest are both retained.
 
 Image build, package resolution, validation-container execution, profile
-activation, rollback and the Console editor remain planned for `v0.2.0-beta`.
-A Hermesfile still compiles to an immutable container image internally; it does
-not replace images at runtime.
+activation, rollback, secret binding, and revision deletion remain outside the
+2T lifecycle. A Hermesfile still compiles to an immutable container image
+internally; it does not replace images at runtime.
 
 ## Security model
 
@@ -571,8 +574,8 @@ curl --fail http://127.0.0.1:8788/health
 The preferred 2S workflow is the authenticated HermesOps Console at
 `http://127.0.0.1:8788/projects`. It can create or import a managed repository,
 update bounded metadata, and enable, disable, rescan, or archive the project.
-Project deletion, automatic push, remote/default-branch mutation, and Hermesfile
-editing remain unavailable.
+Project deletion, automatic push, and remote/default-branch mutation remain
+unavailable. Hermesfile editing is provided separately at `/hermesfiles`.
 
 The local registry commands remain a compatibility and recovery interface.
 Create the workspace and data paths:
@@ -768,10 +771,10 @@ Review `./uninstall.sh --help` before requesting destructive removal.
 
 `v0.1.0-alpha` is a foundation release. Important limitations include:
 
-- the dedicated HermesOps Console currently provides only its shell, browser session, and bounded Controller client;
+- the dedicated HermesOps Console development tree provides the dashboard, project lifecycle, and Hermesfile lifecycle;
 - the current WebUI is a temporary upstream compatibility interface;
-- project and objective administration still uses CLI tools;
-- sandbox profiles cannot yet be edited in the WebUI;
+- objective administration still uses CLI tools;
+- sandbox profiles can be edited as Hermesfiles, but image build and activation remain unavailable;
 - Hermesfile v1 validation and canonicalization are implemented, but image build, activation and rollback are not yet available;
 - the default worker image must be imported from a release archive;
 - custom worker images are not yet a supported first-class workflow;
@@ -880,15 +883,17 @@ scripts/hermesops-sandbox-profile.py import Hermesfile
 scripts/hermesops-sandbox-profile.py list
 ```
 
-The Controller exposes authenticated list/detail metadata at
-`/api/v1/sandboxes`. Image builds and HTTP profile writes remain disabled.
+The Controller exposes authenticated redacted metadata at `/api/v1/sandboxes`
+and the dedicated 2T source lifecycle at `/api/v1/hermesfiles`. Create/update
+commands require CSRF, idempotency, and `If-Match`; each update creates an
+immutable revision. Image build and activation remain disabled.
 
 ## Console HermesOps dédiée
 
 Le jalon 2P ajoute la fondation indépendante de la Console HermesOps sur
 `127.0.0.1:8788`. Le jalon 2Q relie la session navigateur au Controller via un
 proxy same-origin strict. Le jalon 2R ajoute un tableau de bord opérationnel
-authentifié et en lecture seule pour les projets, objectifs, reviews, recoveries,
-plans et assignations, avec données partielles explicites et sans accès SQLite.
-La WebUI Hermes historique reste sur le port 8787 pendant la construction de la
-bêta.
+authentifié et en lecture seule. Le jalon 2S ajoute le cycle de vie des projets
+et le jalon 2T ajoute l’éditeur, la validation, l’historique immuable et la
+comparaison des Hermesfiles. La WebUI Hermes historique reste sur le port 8787
+pendant la construction de la bêta.
