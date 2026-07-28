@@ -64,6 +64,7 @@ static_validation() {
   tests/test_controller_browser_auth_adversarial.py \
   controller_api/orchestration_reads.py \
   controller_api/hermesfile.py \
+  controller_api/hermesfile_lifecycle.py \
   controller_api/sandbox_profiles.py \
   controller_api/sandbox_profile_probe.py \
   scripts/hermesops-hermesfile.py \
@@ -101,11 +102,15 @@ static_validation() {
         tests/test-console-operational-dashboard.sh \
         tests/test-controller-project-lifecycle.sh \
         tests/test-console-project-lifecycle.sh \
+        tests/test-controller-hermesfile-lifecycle.sh \
+        tests/test-console-hermesfile-lifecycle.sh \
         tests/test_console_service.py \
         tests/test_console_controller_client.py \
         tests/test_console_operational_dashboard.py \
         tests/test_controller_project_lifecycle.py \
         tests/test_console_project_lifecycle.py \
+        tests/test_controller_hermesfile_lifecycle.py \
+        tests/test_console_hermesfile_lifecycle.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -130,6 +135,7 @@ static_validation() {
   migrations/017_browser_session_lifecycle.sql \
   migrations/020_sandbox_profile_persistence.sql \
   migrations/021_project_lifecycle.sql \
+  migrations/022_hermesfile_lifecycle.sql \
         systemd/user/hermesops-controller-api.service \
         systemd/user/hermesops-console.service \
         docs/milestones/2B_CONTROLLER_API_SKELETON.md \
@@ -145,6 +151,7 @@ static_validation() {
   docs/milestones/2Q_BROWSER_SESSION_CONTROLLER_CLIENT.md \
   docs/milestones/2R_OPERATIONAL_DASHBOARD.md \
   docs/milestones/2S_PROJECT_LIFECYCLE.md \
+  docs/milestones/2T_HERMESFILE_LIFECYCLE.md \
   docs/console/FOUNDATION.md docs/console/CONTROLLER_CLIENT.md \
   docs/console/OPERATIONAL_DASHBOARD.md \
   docs/console/PROJECT_LIFECYCLE.md \
@@ -261,6 +268,8 @@ PY
   "${REPO}/tests/test-console-operational-dashboard.sh"
   "${REPO}/tests/test-controller-project-lifecycle.sh"
   "${REPO}/tests/test-console-project-lifecycle.sh"
+  "${REPO}/tests/test-controller-hermesfile-lifecycle.sh"
+  "${REPO}/tests/test-console-hermesfile-lifecycle.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

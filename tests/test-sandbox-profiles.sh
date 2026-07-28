@@ -55,8 +55,8 @@ core = (root / "controller_api/core.py").read_text(encoding="utf-8")
 for phrase in (
     '"sandbox_profile_reads": True',
     '"sandbox_profile_operator_import": True',
-    '"sandbox_profile_http_writes": False',
-    '"sandbox_profile_http_validation": False',
+    '"sandbox_profile_http_writes": True',
+    '"sandbox_profile_http_validation": True',
     '"hermesfile_builds": False',
 ):
     if phrase not in core:

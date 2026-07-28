@@ -11,6 +11,7 @@ ROUTES = (
     "/",
     "/dashboard",
     "/projects",
+    "/hermesfiles",
     "/objectives",
     "/executions",
     "/reviews",
@@ -105,6 +106,11 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"client.createProject" not in body
         or b"client.updateProject" not in body
         or b"client.commandProject" not in body
+        or b"refreshHermesfiles" not in body
+        or b"client.validateHermesfile" not in body
+        or b"client.createHermesfile" not in body
+        or b"client.updateHermesfile" not in body
+        or b"client.compareHermesfileRevisions" not in body
         or b"fetch(" in body
         or b"innerHTML" in body
     ):
@@ -128,9 +134,15 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"createProject" not in body
         or b"updateProject" not in body
         or b"commandProject" not in body
+        or b"validateHermesfile" not in body
+        or b"createHermesfile" not in body
+        or b"updateHermesfile" not in body
+        or b"compareHermesfileRevisions" not in body
         or b'"delete"' in body
+        or b"buildHermesfile" in body
+        or b"activateHermesfile" in body
     ):
-        raise ProbeError("Console Controller client violates the 2S browser boundary")
+        raise ProbeError("Console Controller client violates the 2T browser boundary")
 
     status, headers, body = request(parsed.hostname, port, "/", method="HEAD")
     if status != 200 or body or int(headers.get("content-length", "0")) <= 0:
@@ -168,6 +180,19 @@ def validate(base_url: str, wait_seconds: float) -> None:
     if status != 401:
         raise ProbeError(f"Unauthenticated project detail returned HTTP {status}")
 
+    probe_sandbox = "sandbox-" + "a" * 32
+    for path in (
+        "/api/v1/hermesfiles",
+        "/api/v1/hermesfiles/template",
+        f"/api/v1/hermesfiles/{probe_sandbox}",
+        f"/api/v1/hermesfiles/{probe_sandbox}/revisions",
+        f"/api/v1/hermesfiles/{probe_sandbox}/revisions/1",
+        f"/api/v1/hermesfiles/{probe_sandbox}/diff?from=1&to=2",
+    ):
+        status, _, _ = request(parsed.hostname, port, path)
+        if status != 401:
+            raise ProbeError(f"Unauthenticated Hermesfile proxy returned HTTP {status}: {path}")
+
     mutation_headers = {
         "Origin": base_url,
         "Content-Type": "application/json",
@@ -179,6 +204,9 @@ def validate(base_url: str, wait_seconds: float) -> None:
         ("POST", "/api/v1/projects"),
         ("PATCH", "/api/v1/projects/probe-project"),
         ("POST", "/api/v1/projects/probe-project/commands/enable"),
+        ("POST", "/api/v1/hermesfiles/validate"),
+        ("POST", "/api/v1/hermesfiles"),
+        ("PATCH", f"/api/v1/hermesfiles/{probe_sandbox}"),
     ):
         status, _, _ = request(
             parsed.hostname,
@@ -194,6 +222,8 @@ def validate(base_url: str, wait_seconds: float) -> None:
     for method, path in (
         ("GET", "/api/v1/tasks"),
         ("POST", "/api/v1/projects/probe-project/commands/delete"),
+        ("POST", f"/api/v1/hermesfiles/{probe_sandbox}/builds"),
+        ("POST", f"/api/v1/hermesfiles/{probe_sandbox}/activate"),
     ):
         status, _, _ = request(
             parsed.hostname,
@@ -208,7 +238,8 @@ def validate(base_url: str, wait_seconds: float) -> None:
 
     print(
         f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port} "
-        "session_proxy=401 dashboard_proxy=401 project_lifecycle_proxy=401"
+        "session_proxy=401 dashboard_proxy=401 project_lifecycle_proxy=401 "
+        "hermesfile_lifecycle_proxy=401"
     )
 
 

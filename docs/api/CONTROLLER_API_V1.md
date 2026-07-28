@@ -524,9 +524,38 @@ diagnostics, and references, never an unreviewed shell command.
 
 Milestone 2O implements authenticated `GET /sandboxes` and
 `GET /sandboxes/{sandbox_id}` reads over validated durable source revisions.
-The public projection excludes raw source and canonical JSON. Profile import is
-operator-local until HTTP mutation idempotency, CSRF, audit, event and
-optimistic-concurrency contracts are implemented for this resource.
+The public projection excludes raw source and canonical JSON.
+
+### Hermesfile lifecycle
+
+Milestone 2T exposes a dedicated source lifecycle rather than enabling the
+broader future sandbox build and activation contract:
+
+```text
+GET /hermesfiles
+POST /hermesfiles
+GET /hermesfiles/template
+POST /hermesfiles/validate
+GET /hermesfiles/{sandbox_id}
+PATCH /hermesfiles/{sandbox_id}
+GET /hermesfiles/{sandbox_id}/revisions
+GET /hermesfiles/{sandbox_id}/revisions/{source_revision}
+GET /hermesfiles/{sandbox_id}/diff
+```
+
+The validation endpoint is non-persisting. Create and update accept exactly one
+bounded `source` string. Update requires the current quoted resource revision in
+`If-Match`; each accepted change creates a new immutable source revision. The
+current and revision-detail reads return source only to an authenticated
+operator so the Console editor can function. Collections remain redacted.
+Canonical previews and runtime projections are deterministic derivatives of the
+persisted source, never separate writable sources of truth. Revision comparison
+returns bounded path/kind records and no value payloads.
+
+Audit, idempotency, operations, and event records contain hashes and bounded
+metadata only. Secret-like material is rejected before persistence and is never
+echoed in diagnostics. Build, image activation, secret binding, revision
+deletion, and generic sandbox commands remain unavailable in milestone 2T.
 
 ### Operations
 

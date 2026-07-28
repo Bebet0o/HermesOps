@@ -461,6 +461,7 @@ class ControllerService:
         from .objective_commands import ObjectiveCommandStore
         from .review_commands import ReviewCommandStore
         from .project_commands import ProjectCommandStore
+        from .hermesfile_lifecycle import HermesfileLifecycleStore
         self.objectives = ObjectiveReadStore(settings)
         self.executions = ExecutionReadStore(settings)
         self.review_recovery = ReviewRecoveryReadStore(settings)
@@ -468,6 +469,7 @@ class ControllerService:
         self.sandbox_profiles = SandboxProfileStore(settings)
         self.commands = ObjectiveCommandStore(settings)
         self.project_commands = ProjectCommandStore(settings)
+        self.hermesfiles = HermesfileLifecycleStore(settings, self.sandbox_profiles)
         self.review_commands = ReviewCommandStore(settings)
         from .browser_auth import BrowserAuthStore
         self.browser_auth = BrowserAuthStore(settings)
@@ -624,6 +626,9 @@ class ControllerService:
         sandbox_ready, sandbox_reason = self.sandbox_profiles.readiness()
         if not sandbox_ready:
             reasons.append(sandbox_reason)
+        hermesfile_ready, hermesfile_reason = self.hermesfiles.readiness()
+        if not hermesfile_ready:
+            reasons.append(hermesfile_reason)
         try:
             self.session_token()
         except ControllerError as error:
@@ -676,8 +681,11 @@ class ControllerService:
                 "operator_login": self.browser_auth.readiness()[0],
                 "sandbox_profile_reads": True,
                 "sandbox_profile_operator_import": True,
-                "sandbox_profile_http_writes": False,
-                "sandbox_profile_http_validation": False,
+                "sandbox_profile_http_writes": True,
+                "sandbox_profile_http_validation": True,
+                "hermesfile_revision_history": True,
+                "hermesfile_revision_comparison": True,
+                "hermesfile_runtime_projection": True,
                 "hermesfile_builds": False,
                 "console": False,
             },
@@ -685,6 +693,9 @@ class ControllerService:
 
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
+        hermesfile_operation = self.hermesfiles.get_operation(operation_id)
+        if hermesfile_operation is not None:
+            return hermesfile_operation
         project_operation = self.project_commands.get_operation(operation_id)
         if project_operation is not None:
             return project_operation

@@ -20,7 +20,7 @@ from typing import BinaryIO
 from urllib.parse import urlsplit
 
 MAX_FILE_SIZE = 512 * 1024
-MAX_PROXY_REQUEST_BODY = 64 * 1024
+MAX_PROXY_REQUEST_BODY = 384 * 1024
 MAX_PROXY_RESPONSE_BODY = 1024 * 1024
 PROXY_TIMEOUT_MIN = 0.25
 PROXY_TIMEOUT_MAX = 30.0
@@ -29,6 +29,7 @@ ROUTES = frozenset(
         "/",
         "/dashboard",
         "/projects",
+        "/hermesfiles",
         "/objectives",
         "/executions",
         "/reviews",
@@ -53,6 +54,10 @@ CONTROLLER_ROUTES = frozenset(
         ("GET", "/api/v1/system/capabilities"),
         ("GET", "/api/v1/projects"),
         ("POST", "/api/v1/projects"),
+        ("GET", "/api/v1/hermesfiles"),
+        ("POST", "/api/v1/hermesfiles"),
+        ("POST", "/api/v1/hermesfiles/validate"),
+        ("GET", "/api/v1/hermesfiles/template"),
         ("GET", "/api/v1/objectives"),
         ("GET", "/api/v1/reviews"),
         ("GET", "/api/v1/recoveries"),
@@ -62,11 +67,39 @@ CONTROLLER_ROUTES = frozenset(
 )
 PROJECT_ID_PATTERN = __import__("re").compile(r"^[a-z][a-z0-9-]{1,62}$")
 PROJECT_COMMANDS = frozenset({"enable", "disable", "rescan", "archive"})
+SANDBOX_ID_PATTERN = __import__("re").compile(r"^sandbox-[0-9a-f]{32}$")
+REVISION_PATTERN = __import__("re").compile(r"^[1-9][0-9]*$")
 
 
 def _controller_route_exposed(method: str, path: str) -> bool:
-    if (method, path) in CONTROLLER_ROUTES:
+    parsed = urlsplit(path)
+    if parsed.fragment or "%" in parsed.path or "\\" in parsed.path:
+        return False
+    route_path = parsed.path
+    query = parsed.query
+    if query and not (
+        method == "GET"
+        and __import__("re").fullmatch(r"from=[1-9][0-9]*&to=[1-9][0-9]*", query)
+        and route_path.startswith("/api/v1/hermesfiles/")
+        and route_path.endswith("/diff")
+    ):
+        return False
+    if (method, route_path) in CONTROLLER_ROUTES and not query:
         return True
+    hermesfile_prefix = "/api/v1/hermesfiles/"
+    if route_path.startswith(hermesfile_prefix):
+        suffix = route_path[len(hermesfile_prefix):]
+        parts = suffix.split("/")
+        if method in {"GET", "PATCH"} and len(parts) == 1:
+            return SANDBOX_ID_PATTERN.fullmatch(parts[0]) is not None
+        if method == "GET" and len(parts) == 2 and parts[1] in {"revisions", "diff"}:
+            return SANDBOX_ID_PATTERN.fullmatch(parts[0]) is not None
+        if method == "GET" and len(parts) == 3 and parts[1] == "revisions":
+            return (
+                SANDBOX_ID_PATTERN.fullmatch(parts[0]) is not None
+                and REVISION_PATTERN.fullmatch(parts[2]) is not None
+            )
+        return False
     prefix = "/api/v1/projects/"
     if not path.startswith(prefix):
         return False
@@ -466,19 +499,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def _read_regular(self, relative: Path) -> bytes:
         return read_safe_file(self.settings.root / relative)
 
-    def _parsed_path(self, request_id: str, *, head_only: bool = False) -> str | None:
+    def _parsed_path(
+        self,
+        request_id: str,
+        *,
+        method: str = "GET",
+        head_only: bool = False,
+    ) -> str | None:
         parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment or "%" in parsed.path or "\\" in parsed.path:
+        target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+        if (
+            parsed.fragment
+            or "%" in parsed.path
+            or "\\" in parsed.path
+            or (parsed.query and not _controller_route_exposed(method, target))
+        ):
             self._problem(400, "invalid_path", "Invalid request path", request_id, head_only=head_only)
             return None
-        return parsed.path
+        return target
 
     def _serve_static(self, *, head_only: bool) -> None:
         request_id = self._request_id()
         if not self._valid_host():
             self._problem(400, "invalid_host", "Invalid Host header", request_id, head_only=head_only)
             return
-        path = self._parsed_path(request_id, head_only=head_only)
+        path = self._parsed_path(request_id, method="GET", head_only=head_only)
         if path is None:
             return
         if path.startswith("/api/"):
@@ -710,7 +755,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._valid_host():
             self._problem(400, "invalid_host", "Invalid Host header", request_id)
             return
-        path = self._parsed_path(request_id)
+        path = self._parsed_path(request_id, method=method)
         if path is None:
             return
         if path.startswith("/api/"):

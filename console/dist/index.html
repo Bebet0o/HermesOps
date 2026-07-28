@@ -23,6 +23,7 @@
       <nav id="primary-navigation">
         <a href="/dashboard" data-route="dashboard">Tableau de bord</a>
         <a href="/projects" data-route="projects">Projets</a>
+        <a href="/hermesfiles" data-route="hermesfiles">Hermesfiles</a>
         <a href="/objectives" data-route="objectives">Objectifs</a>
         <a href="/executions" data-route="executions">Exécutions</a>
         <a href="/reviews" data-route="reviews">Reviews</a>
@@ -237,6 +238,84 @@
         </div>
       </section>
 
+      <section id="hermesfile-panel" class="hermesfile-panel" aria-labelledby="hermesfile-title" hidden>
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow">Jalon 2T</p>
+            <h2 id="hermesfile-title">Cycle de vie Hermesfile</h2>
+            <p id="hermesfile-status" class="dashboard-status" aria-live="polite">Aucune lecture lancée.</p>
+          </div>
+          <button id="hermesfile-refresh" class="secondary-button" type="button">Actualiser</button>
+        </div>
+
+        <div class="hermesfile-grid">
+          <section class="dashboard-card" aria-labelledby="hermesfile-list-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Profils déclaratifs</p>
+                <h3 id="hermesfile-list-title">Hermesfiles</h3>
+              </div>
+              <span id="hermesfile-count" class="count-badge">0</span>
+            </div>
+            <ul id="hermesfile-list" class="project-admin-list"></ul>
+            <button id="hermesfile-new" class="secondary-button" type="button">Nouveau depuis le modèle</button>
+          </section>
+
+          <section class="dashboard-card hermesfile-editor-card" aria-labelledby="hermesfile-editor-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Source déclarative</p>
+                <h3 id="hermesfile-editor-title">Éditeur Hermesfile</h3>
+              </div>
+              <span id="hermesfile-editor-mode" class="state-badge">nouveau</span>
+            </div>
+            <p id="hermesfile-meta" class="project-meta">Chargez le modèle ou sélectionnez un profil.</p>
+            <label class="hermesfile-source-label" for="hermesfile-source">Source YAML</label>
+            <textarea id="hermesfile-source" class="hermesfile-source" rows="24" maxlength="262144" spellcheck="false" autocomplete="off"></textarea>
+            <div class="hermesfile-actions">
+              <button id="hermesfile-validate" type="button">Valider et prévisualiser</button>
+              <button id="hermesfile-save" type="button">Créer</button>
+            </div>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="hermesfile-diagnostics-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Validation stricte</p>
+                <h3 id="hermesfile-diagnostics-title">Diagnostics</h3>
+              </div>
+              <span id="hermesfile-validity" class="state-badge">non validé</span>
+            </div>
+            <ul id="hermesfile-diagnostics" class="operational-list compact-list"></ul>
+            <details>
+              <summary>Configuration canonique et runtime</summary>
+              <pre id="hermesfile-preview" class="hermesfile-preview">Aucune prévisualisation.</pre>
+            </details>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="hermesfile-history-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Historique immuable</p>
+                <h3 id="hermesfile-history-title">Révisions</h3>
+              </div>
+              <span id="hermesfile-revision-count" class="count-badge">0</span>
+            </div>
+            <ul id="hermesfile-revisions" class="project-admin-list"></ul>
+            <div class="hermesfile-compare">
+              <label>De
+                <select id="hermesfile-diff-from"></select>
+              </label>
+              <label>Vers
+                <select id="hermesfile-diff-to"></select>
+              </label>
+              <button id="hermesfile-compare" class="secondary-button" type="button">Comparer</button>
+            </div>
+            <pre id="hermesfile-diff" class="hermesfile-preview">Aucune comparaison.</pre>
+          </section>
+        </div>
+      </section>
+
       <section id="route-panel" class="route-panel" aria-live="polite">
         <div>
           <p class="eyebrow">Espace fonctionnel</p>
@@ -248,7 +327,7 @@
 
       <footer>
         <span>HermesOps v0.1.0-alpha</span>
-        <span>Console 2S · cycle de vie projet borné · aucune persistance navigateur</span>
+        <span>Console 2T · projets et Hermesfiles bornés · aucune persistance navigateur</span>
       </footer>
     </main>
   </div>

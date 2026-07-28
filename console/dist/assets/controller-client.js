@@ -13,6 +13,7 @@ const ALLOWED_ENDPOINTS = Object.freeze({
 });
 
 const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{1,62}$/;
+const SANDBOX_ID_PATTERN = /^sandbox-[0-9a-f]{32}$/;
 const PROJECT_COMMANDS = new Set(["enable", "disable", "rescan", "archive"]);
 const REQUEST_TIMEOUT_MS = 7000;
 const MAX_ERROR_TEXT = 160;
@@ -50,6 +51,36 @@ function projectId(value) {
     throw new ControllerClientError("Identifiant projet invalide.", {
       status: 400,
       code: "invalid_project_id",
+    });
+  }
+  return value;
+}
+
+function sandboxId(value) {
+  if (typeof value !== "string" || !SANDBOX_ID_PATTERN.test(value)) {
+    throw new ControllerClientError("Identifiant Hermesfile invalide.", {
+      status: 400,
+      code: "invalid_sandbox_id",
+    });
+  }
+  return value;
+}
+
+function revisionNumber(value) {
+  if (!Number.isInteger(value) || value < 1 || value > Number.MAX_SAFE_INTEGER) {
+    throw new ControllerClientError("Révision Hermesfile invalide.", {
+      status: 400,
+      code: "invalid_hermesfile_revision",
+    });
+  }
+  return value;
+}
+
+function hermesfileSource(value) {
+  if (typeof value !== "string" || value.length === 0 || new TextEncoder().encode(value).length > 256 * 1024) {
+    throw new ControllerClientError("Source Hermesfile invalide ou trop volumineuse.", {
+      status: 400,
+      code: "invalid_hermesfile_source",
     });
   }
   return value;
@@ -208,6 +239,68 @@ export function createControllerClient() {
     },
     async capabilities() {
       return dataObject(await request("capabilities"));
+    },
+
+    async hermesfiles() {
+      return collection(await request({ method: "GET", path: "/api/v1/hermesfiles" }));
+    },
+    async hermesfileTemplate() {
+      return dataObject(await request({ method: "GET", path: "/api/v1/hermesfiles/template" }));
+    },
+    async hermesfile(identifier) {
+      const result = await request({
+        method: "GET",
+        path: `/api/v1/hermesfiles/${sandboxId(identifier)}`,
+      }, { includeEtag: true });
+      return Object.freeze({ hermesfile: dataObject(result.payload), etag: result.etag });
+    },
+    async hermesfileRevisions(identifier) {
+      return collection(await request({
+        method: "GET",
+        path: `/api/v1/hermesfiles/${sandboxId(identifier)}/revisions`,
+      }));
+    },
+    async hermesfileRevision(identifier, revision) {
+      return dataObject(await request({
+        method: "GET",
+        path: `/api/v1/hermesfiles/${sandboxId(identifier)}/revisions/${revisionNumber(revision)}`,
+      }));
+    },
+    async compareHermesfileRevisions(identifier, fromRevision, toRevision) {
+      const from = revisionNumber(fromRevision);
+      const to = revisionNumber(toRevision);
+      return dataObject(await request({
+        method: "GET",
+        path: `/api/v1/hermesfiles/${sandboxId(identifier)}/diff?from=${from}&to=${to}`,
+      }));
+    },
+    async validateHermesfile(source) {
+      const csrf = await csrfToken();
+      return dataObject(await request({ method: "POST", path: "/api/v1/hermesfiles/validate" }, {
+        body: { source: hermesfileSource(source) },
+        csrfToken: csrf,
+        idempotencyLabel: "hermesfile-validate",
+      }));
+    },
+    async createHermesfile(source) {
+      const csrf = await csrfToken();
+      return dataObject(await request({ method: "POST", path: "/api/v1/hermesfiles" }, {
+        body: { source: hermesfileSource(source) },
+        csrfToken: csrf,
+        idempotencyLabel: "hermesfile-create",
+      }));
+    },
+    async updateHermesfile(identifier, etag, source) {
+      const csrf = await csrfToken();
+      return dataObject(await request({
+        method: "PATCH",
+        path: `/api/v1/hermesfiles/${sandboxId(identifier)}`,
+      }, {
+        body: { source: hermesfileSource(source) },
+        csrfToken: csrf,
+        ifMatch: etag,
+        idempotencyLabel: "hermesfile-update",
+      }));
     },
     async projects() {
       return collection(await request("projects"));

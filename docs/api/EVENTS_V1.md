@@ -540,3 +540,13 @@ review.assignment_failed
 These events contain bounded identifiers, status, assignment number, role and
 failure code metadata only. They never contain prompts, logs, paths, raw error
 messages or credentials.
+
+
+### Hermesfile source lifecycle
+
+Milestone 2T reuses the known `sandbox.created` and `sandbox.updated` events for
+Hermesfile-backed profile creation and immutable source revision changes. Their
+redacted data is limited to profile name, source/resource revision numbers, and
+canonical SHA-256. Raw source, canonical JSON, diagnostics, idempotency keys,
+CSRF values, and secret-like rejected input are never stored in the event
+journal.

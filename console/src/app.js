@@ -16,6 +16,11 @@ const routes = Object.freeze({
     title: "Projets",
     message: "Connectez-vous pour créer, importer et administrer les projets via le Controller.",
   },
+  "/hermesfiles": {
+    key: "hermesfiles",
+    title: "Hermesfiles",
+    message: "Connectez-vous pour créer, valider, modifier et versionner les Hermesfiles.",
+  },
   "/objectives": {
     key: "objectives",
     title: "Objectifs",
@@ -77,6 +82,27 @@ const projectUpdateForm = document.getElementById("project-update-form");
 const projectUpdateSubmit = document.getElementById("project-update-submit");
 const projectCommandReason = document.getElementById("project-command-reason");
 const projectCommandButtons = document.getElementById("project-command-buttons");
+const hermesfilePanel = document.getElementById("hermesfile-panel");
+const hermesfileRefresh = document.getElementById("hermesfile-refresh");
+const hermesfileStatus = document.getElementById("hermesfile-status");
+const hermesfileCount = document.getElementById("hermesfile-count");
+const hermesfileList = document.getElementById("hermesfile-list");
+const hermesfileNew = document.getElementById("hermesfile-new");
+const hermesfileEditorTitle = document.getElementById("hermesfile-editor-title");
+const hermesfileEditorMode = document.getElementById("hermesfile-editor-mode");
+const hermesfileMeta = document.getElementById("hermesfile-meta");
+const hermesfileSource = document.getElementById("hermesfile-source");
+const hermesfileValidate = document.getElementById("hermesfile-validate");
+const hermesfileSave = document.getElementById("hermesfile-save");
+const hermesfileValidity = document.getElementById("hermesfile-validity");
+const hermesfileDiagnostics = document.getElementById("hermesfile-diagnostics");
+const hermesfilePreview = document.getElementById("hermesfile-preview");
+const hermesfileRevisionCount = document.getElementById("hermesfile-revision-count");
+const hermesfileRevisions = document.getElementById("hermesfile-revisions");
+const hermesfileDiffFrom = document.getElementById("hermesfile-diff-from");
+const hermesfileDiffTo = document.getElementById("hermesfile-diff-to");
+const hermesfileCompare = document.getElementById("hermesfile-compare");
+const hermesfileDiff = document.getElementById("hermesfile-diff");
 
 const dashboardResources = Object.freeze([
   Object.freeze({ key: "projects", load: () => client.projects() }),
@@ -104,6 +130,13 @@ let projectsLoaded = false;
 let selectedProjectId = "";
 let selectedProjectEtag = "";
 let selectedProject = null;
+let hermesfileLoading = false;
+let hermesfileGeneration = 0;
+let hermesfilesLoaded = false;
+let selectedHermesfileId = "";
+let selectedHermesfileEtag = "";
+let selectedHermesfileRevision = 0;
+let hermesfileValidated = false;
 
 function canonicalPath(pathname) {
   if (pathname.length > 1 && pathname.endsWith("/")) {
@@ -140,9 +173,11 @@ function displayFunctionalPanel() {
   const key = currentRoute().key;
   const dashboardRoute = key === "dashboard";
   const projectsRoute = key === "projects";
+  const hermesfilesRoute = key === "hermesfiles";
   dashboardPanel.hidden = !dashboardRoute || !authenticated;
   projectPanel.hidden = !projectsRoute || !authenticated;
-  routePanel.hidden = authenticated && (dashboardRoute || projectsRoute);
+  hermesfilePanel.hidden = !hermesfilesRoute || !authenticated;
+  routePanel.hidden = authenticated && (dashboardRoute || projectsRoute || hermesfilesRoute);
 }
 
 function render(pathname, focusMain = false) {
@@ -167,6 +202,9 @@ function render(pathname, focusMain = false) {
   if (route.key === "projects" && authenticated && !projectsLoaded) {
     void refreshProjects();
   }
+  if (route.key === "hermesfiles" && authenticated && !hermesfilesLoaded) {
+    void refreshHermesfiles();
+  }
 
   if (focusMain) {
     document.getElementById("main-content").focus({ preventScroll: true });
@@ -186,6 +224,7 @@ function showSignedOut(message = "Authentification requise pour accéder aux don
   dashboardLoaded = false;
   dashboardRefresh.disabled = false;
   clearProjectState();
+  clearHermesfileState();
   sessionPanel.dataset.state = "signed-out";
   sessionStatus.textContent = "Session fermée";
   sessionDetail.textContent = message;
@@ -218,6 +257,9 @@ function showAuthenticated(session, capabilities) {
   if (currentRoute().key === "projects") {
     void refreshProjects();
   }
+  if (currentRoute().key === "hermesfiles") {
+    void refreshHermesfiles();
+  }
 }
 
 function showUnavailable(error) {
@@ -227,6 +269,7 @@ function showUnavailable(error) {
   dashboardLoaded = false;
   dashboardRefresh.disabled = false;
   clearProjectState();
+  clearHermesfileState();
   sessionPanel.dataset.state = "unavailable";
   sessionStatus.textContent = "Controller indisponible";
   const requestSuffix = error instanceof ControllerClientError && error.requestId
@@ -665,6 +708,356 @@ async function submitProjectCreate() {
   }
 }
 
+function clearHermesfileState() {
+  hermesfileGeneration += 1;
+  hermesfileLoading = false;
+  hermesfilesLoaded = false;
+  selectedHermesfileId = "";
+  selectedHermesfileEtag = "";
+  selectedHermesfileRevision = 0;
+  hermesfileValidated = false;
+  hermesfileRefresh.disabled = false;
+  hermesfileValidate.disabled = false;
+  hermesfileSave.disabled = false;
+  hermesfileCount.textContent = "0";
+  hermesfileRevisionCount.textContent = "0";
+  hermesfileList.replaceChildren();
+  hermesfileRevisions.replaceChildren();
+  hermesfileDiagnostics.replaceChildren();
+  hermesfileDiffFrom.replaceChildren();
+  hermesfileDiffTo.replaceChildren();
+  hermesfileSource.value = "";
+  hermesfilePreview.textContent = "Aucune prévisualisation.";
+  hermesfileDiff.textContent = "Aucune comparaison.";
+  hermesfileValidity.textContent = "non validé";
+  hermesfileValidity.dataset.state = "unknown";
+  hermesfileEditorMode.textContent = "nouveau";
+  hermesfileEditorMode.dataset.state = "draft";
+  hermesfileEditorTitle.textContent = "Éditeur Hermesfile";
+  hermesfileMeta.textContent = "Chargez le modèle ou sélectionnez un profil.";
+  hermesfileSave.textContent = "Créer";
+}
+
+function setHermesfileBusy(busy) {
+  hermesfileLoading = busy;
+  hermesfileRefresh.disabled = busy;
+  hermesfileNew.disabled = busy;
+  hermesfileValidate.disabled = busy;
+  hermesfileSave.disabled = busy;
+  hermesfileCompare.disabled = busy;
+  hermesfileSource.disabled = busy;
+}
+
+function renderHermesfileList(collection) {
+  hermesfileList.replaceChildren();
+  hermesfileCount.textContent = String(collection.items.length);
+  if (collection.items.length === 0) {
+    appendEmpty(hermesfileList, "Aucun Hermesfile enregistré.");
+    return;
+  }
+  for (const profile of collection.items) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const heading = document.createElement("strong");
+    const detail = document.createElement("span");
+    const state = document.createElement("span");
+    const identifier = safeId(profile, "");
+    button.type = "button";
+    button.dataset.hermesfileId = identifier;
+    button.className = "project-list-button";
+    if (identifier === selectedHermesfileId) {
+      button.setAttribute("aria-current", "true");
+    }
+    heading.textContent = safeText(profile.name, safeText(profile.profile_name, identifier, 63), 120);
+    detail.textContent = `${safeText(profile.profile_name, "profil", 63)} · révision ${Number.isInteger(profile.source_revision) ? profile.source_revision : "?"}`;
+    state.className = "state-badge";
+    state.dataset.state = safeState(profile);
+    state.textContent = safeState(profile);
+    button.append(heading, detail, state);
+    item.append(button);
+    hermesfileList.append(item);
+  }
+}
+
+function renderHermesfileDiagnostics(preview) {
+  hermesfileDiagnostics.replaceChildren();
+  const diagnostics = Array.isArray(preview && preview.diagnostics) ? preview.diagnostics.slice(0, 100) : [];
+  const valid = preview && preview.valid === true;
+  hermesfileValidated = valid;
+  hermesfileValidity.textContent = valid ? "valide" : "invalide";
+  hermesfileValidity.dataset.state = valid ? "ready" : "failed";
+  if (diagnostics.length === 0) {
+    appendEmpty(hermesfileDiagnostics, valid ? "Aucun diagnostic bloquant." : "Aucun diagnostic disponible.");
+  } else {
+    for (const diagnostic of diagnostics) {
+      appendOperationalItem(hermesfileDiagnostics, {
+        label: safeText(diagnostic.severity, "diagnostic", 16),
+        title: safeText(diagnostic.code, "validation", 128),
+        state: safeText(diagnostic.severity, "unknown", 16).toLowerCase(),
+        detail: `${safeText(diagnostic.path, "/", 256)} · ${safeText(diagnostic.message, "Diagnostic borné", 500)}`,
+      });
+    }
+  }
+  const projection = {
+    canonical: preview && preview.canonical ? preview.canonical : null,
+    runtime_config: preview && preview.runtime_config ? preview.runtime_config : null,
+    source_sha256: preview && typeof preview.source_sha256 === "string" ? preview.source_sha256 : null,
+    canonical_sha256: preview && typeof preview.canonical_sha256 === "string" ? preview.canonical_sha256 : null,
+  };
+  hermesfilePreview.textContent = JSON.stringify(projection, null, 2);
+}
+
+function renderHermesfileRevisions(collection) {
+  const revisions = collection.items;
+  hermesfileRevisions.replaceChildren();
+  hermesfileDiffFrom.replaceChildren();
+  hermesfileDiffTo.replaceChildren();
+  hermesfileRevisionCount.textContent = String(revisions.length);
+  if (revisions.length === 0) {
+    appendEmpty(hermesfileRevisions, "Aucune révision disponible.");
+    return;
+  }
+  for (const revision of revisions) {
+    const number = Number(revision.source_revision);
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const heading = document.createElement("strong");
+    const detail = document.createElement("span");
+    button.type = "button";
+    button.dataset.hermesfileRevision = String(number);
+    button.className = "project-list-button";
+    heading.textContent = `Révision ${number}`;
+    detail.textContent = `${safeText(revision.canonical_sha256, "empreinte inconnue", 64).slice(0, 16)}… · ${safeText(revision.created_at, "date inconnue", 40)}`;
+    button.append(heading, detail);
+    item.append(button);
+    hermesfileRevisions.append(item);
+    for (const select of [hermesfileDiffFrom, hermesfileDiffTo]) {
+      const option = document.createElement("option");
+      option.value = String(number);
+      option.textContent = `Révision ${number}`;
+      select.append(option);
+    }
+  }
+  if (revisions.length > 1) {
+    hermesfileDiffFrom.value = String(revisions[revisions.length - 1].source_revision);
+    hermesfileDiffTo.value = String(revisions[0].source_revision);
+  }
+}
+
+async function loadHermesfile(identifier) {
+  if (!authenticated || hermesfileLoading) {
+    return;
+  }
+  setHermesfileBusy(true);
+  hermesfileStatus.textContent = "Lecture du Hermesfile sélectionné…";
+  try {
+    const result = await client.hermesfile(identifier);
+    const current = result.hermesfile;
+    const profile = current.profile || {};
+    const revision = current.revision || {};
+    selectedHermesfileId = safeId(profile, "");
+    selectedHermesfileEtag = result.etag;
+    selectedHermesfileRevision = Number.isInteger(profile.source_revision) ? profile.source_revision : 0;
+    hermesfileSource.value = typeof revision.source === "string" ? revision.source : "";
+    hermesfileEditorTitle.textContent = safeText(profile.name, safeText(profile.profile_name, "Hermesfile", 63), 120);
+    hermesfileEditorMode.textContent = "édition";
+    hermesfileEditorMode.dataset.state = safeState(profile);
+    hermesfileMeta.textContent = `${selectedHermesfileId} · révision source ${selectedHermesfileRevision} · révision ressource ${Number.isInteger(profile.resource_revision) ? profile.resource_revision : "?"}`;
+    hermesfileSave.textContent = "Créer une nouvelle révision";
+    renderHermesfileDiagnostics({
+      valid: true,
+      diagnostics: revision.diagnostics || [],
+      canonical: revision.canonical || null,
+      runtime_config: revision.runtime_config || null,
+      source_sha256: revision.source_sha256 || null,
+      canonical_sha256: revision.canonical_sha256 || null,
+    });
+    const revisions = await client.hermesfileRevisions(selectedHermesfileId);
+    renderHermesfileRevisions(revisions);
+    const collection = await client.hermesfiles();
+    renderHermesfileList(collection);
+    hermesfileStatus.textContent = "Hermesfile et historique chargés depuis le Controller.";
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les Hermesfiles.");
+      return;
+    }
+    hermesfileStatus.textContent = projectErrorMessage(error, "Lecture du Hermesfile impossible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
+async function refreshHermesfiles() {
+  if (!authenticated || hermesfileLoading) {
+    return;
+  }
+  const generation = ++hermesfileGeneration;
+  setHermesfileBusy(true);
+  hermesfileStatus.textContent = "Lecture des Hermesfiles…";
+  try {
+    const collection = await client.hermesfiles();
+    if (generation !== hermesfileGeneration || !authenticated) {
+      return;
+    }
+    renderHermesfileList(collection);
+    hermesfilesLoaded = true;
+    hermesfileStatus.textContent = `${collection.items.length} Hermesfile(s) reçu(s) du Controller.`;
+    if (selectedHermesfileId && collection.items.some((item) => safeId(item, "") === selectedHermesfileId)) {
+      setHermesfileBusy(false);
+      await loadHermesfile(selectedHermesfileId);
+    }
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les Hermesfiles.");
+      return;
+    }
+    hermesfileStatus.textContent = projectErrorMessage(error, "Registre Hermesfile indisponible.");
+  } finally {
+    if (generation === hermesfileGeneration) {
+      setHermesfileBusy(false);
+    }
+  }
+}
+
+async function loadHermesfileTemplate() {
+  if (!authenticated || hermesfileLoading) {
+    return;
+  }
+  setHermesfileBusy(true);
+  try {
+    const template = await client.hermesfileTemplate();
+    selectedHermesfileId = "";
+    selectedHermesfileEtag = "";
+    selectedHermesfileRevision = 0;
+    hermesfileSource.value = typeof template.source === "string" ? template.source : "";
+    hermesfileEditorTitle.textContent = "Nouveau Hermesfile";
+    hermesfileEditorMode.textContent = "nouveau";
+    hermesfileEditorMode.dataset.state = "draft";
+    hermesfileMeta.textContent = "Modèle officiel chargé. La création reste séparée de la validation.";
+    hermesfileSave.textContent = "Créer";
+    hermesfileDiagnostics.replaceChildren();
+    appendEmpty(hermesfileDiagnostics, "Validez la source avant de la créer.");
+    hermesfilePreview.textContent = "Aucune prévisualisation.";
+    hermesfileRevisions.replaceChildren();
+    hermesfileDiffFrom.replaceChildren();
+    hermesfileDiffTo.replaceChildren();
+    hermesfileRevisionCount.textContent = "0";
+    hermesfileDiff.textContent = "Aucune comparaison.";
+    hermesfileValidated = false;
+    hermesfileValidity.textContent = "non validé";
+    hermesfileValidity.dataset.state = "unknown";
+    hermesfileStatus.textContent = "Modèle Hermesfile chargé depuis le Controller.";
+  } catch (error) {
+    hermesfileStatus.textContent = projectErrorMessage(error, "Modèle Hermesfile indisponible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
+async function validateHermesfileEditor() {
+  if (!authenticated || hermesfileLoading) {
+    return;
+  }
+  setHermesfileBusy(true);
+  hermesfileStatus.textContent = "Validation stricte du Hermesfile…";
+  try {
+    const preview = await client.validateHermesfile(hermesfileSource.value);
+    renderHermesfileDiagnostics(preview);
+    hermesfileStatus.textContent = preview.valid
+      ? "Hermesfile valide. La configuration canonique et runtime est prévisualisée."
+      : "Hermesfile invalide. Corrigez les diagnostics avant persistance.";
+  } catch (error) {
+    hermesfileValidated = false;
+    hermesfileStatus.textContent = projectErrorMessage(error, "Validation Hermesfile impossible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
+async function saveHermesfileEditor() {
+  if (!authenticated || hermesfileLoading) {
+    return;
+  }
+  if (!hermesfileValidated) {
+    hermesfileStatus.textContent = "Validez la source avant de la persister.";
+    return;
+  }
+  setHermesfileBusy(true);
+  hermesfileStatus.textContent = selectedHermesfileId ? "Création d’une nouvelle révision…" : "Création du Hermesfile…";
+  try {
+    const operation = selectedHermesfileId
+      ? await client.updateHermesfile(selectedHermesfileId, selectedHermesfileEtag, hermesfileSource.value)
+      : await client.createHermesfile(hermesfileSource.value);
+    const target = operation && operation.result && typeof operation.result.sandbox_id === "string"
+      ? operation.result.sandbox_id
+      : selectedHermesfileId;
+    hermesfileStatus.textContent = `Opération ${safeText(operation.id, "acceptée", 96)} terminée.`;
+    hermesfilesLoaded = false;
+    setHermesfileBusy(false);
+    if (target) {
+      await loadHermesfile(target);
+    } else {
+      await refreshHermesfiles();
+    }
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous avant toute persistance Hermesfile.");
+      return;
+    }
+    hermesfileStatus.textContent = projectErrorMessage(error, "Persistance Hermesfile impossible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
+async function loadHistoricalRevision(revision) {
+  if (!selectedHermesfileId || hermesfileLoading) {
+    return;
+  }
+  setHermesfileBusy(true);
+  try {
+    const historical = await client.hermesfileRevision(selectedHermesfileId, revision);
+    hermesfileSource.value = typeof historical.source === "string" ? historical.source : "";
+    renderHermesfileDiagnostics({
+      valid: true,
+      diagnostics: historical.diagnostics || [],
+      canonical: historical.canonical || null,
+      runtime_config: historical.runtime_config || null,
+      source_sha256: historical.source_sha256 || null,
+      canonical_sha256: historical.canonical_sha256 || null,
+    });
+    hermesfileMeta.textContent = `Révision historique ${revision} chargée en lecture. Enregistrer créera une nouvelle révision depuis l’ETag courant.`;
+    hermesfileStatus.textContent = `Révision ${revision} chargée.`;
+  } catch (error) {
+    hermesfileStatus.textContent = projectErrorMessage(error, "Révision Hermesfile indisponible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
+async function compareHermesfileHistory() {
+  if (!selectedHermesfileId || hermesfileLoading) {
+    return;
+  }
+  const fromRevision = Number(hermesfileDiffFrom.value);
+  const toRevision = Number(hermesfileDiffTo.value);
+  if (!Number.isInteger(fromRevision) || !Number.isInteger(toRevision) || fromRevision === toRevision) {
+    hermesfileStatus.textContent = "Choisissez deux révisions différentes.";
+    return;
+  }
+  setHermesfileBusy(true);
+  try {
+    const comparison = await client.compareHermesfileRevisions(selectedHermesfileId, fromRevision, toRevision);
+    hermesfileDiff.textContent = JSON.stringify(comparison, null, 2);
+    hermesfileStatus.textContent = `${Array.isArray(comparison.changes) ? comparison.changes.length : 0} chemin(s) canonique(s) modifié(s).`;
+  } catch (error) {
+    hermesfileStatus.textContent = projectErrorMessage(error, "Comparaison Hermesfile impossible.");
+  } finally {
+    setHermesfileBusy(false);
+  }
+}
+
 async function refreshSession() {
   setConnection("checking", "Vérification…", "Lecture de la session auprès du Controller.");
   try {
@@ -807,6 +1200,47 @@ projectCommandButtons.addEventListener("click", (event) => {
     labels[command] || "Commande projet",
     () => client.commandProject(selectedProjectId, command, selectedProjectEtag, reason),
   );
+});
+
+hermesfileRefresh.addEventListener("click", () => {
+  hermesfilesLoaded = false;
+  void refreshHermesfiles();
+});
+
+hermesfileNew.addEventListener("click", () => {
+  void loadHermesfileTemplate();
+});
+
+hermesfileList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-hermesfile-id]");
+  if (button) {
+    void loadHermesfile(button.dataset.hermesfileId || "");
+  }
+});
+
+hermesfileRevisions.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-hermesfile-revision]");
+  if (button) {
+    void loadHistoricalRevision(Number(button.dataset.hermesfileRevision));
+  }
+});
+
+hermesfileValidate.addEventListener("click", () => {
+  void validateHermesfileEditor();
+});
+
+hermesfileSave.addEventListener("click", () => {
+  void saveHermesfileEditor();
+});
+
+hermesfileCompare.addEventListener("click", () => {
+  void compareHermesfileHistory();
+});
+
+hermesfileSource.addEventListener("input", () => {
+  hermesfileValidated = false;
+  hermesfileValidity.textContent = "à revalider";
+  hermesfileValidity.dataset.state = "unknown";
 });
 
 window.addEventListener("popstate", () => render(window.location.pathname));
