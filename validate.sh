@@ -104,6 +104,7 @@ static_validation() {
         tests/test-console-project-lifecycle.sh \
         tests/test-controller-hermesfile-lifecycle.sh \
         tests/test-console-hermesfile-lifecycle.sh \
+        tests/test-console-objective-lifecycle.sh \
         tests/test_console_service.py \
         tests/test_console_controller_client.py \
         tests/test_console_operational_dashboard.py \
@@ -111,6 +112,7 @@ static_validation() {
         tests/test_console_project_lifecycle.py \
         tests/test_controller_hermesfile_lifecycle.py \
         tests/test_console_hermesfile_lifecycle.py \
+        tests/test_console_objective_lifecycle.py \
         controller_api/__init__.py controller_api/core.py \
         controller_api/server.py controller_api/service_support.py \
         controller_api/objective_reads.py controller_api/objective_probe.py \
@@ -152,9 +154,11 @@ static_validation() {
   docs/milestones/2R_OPERATIONAL_DASHBOARD.md \
   docs/milestones/2S_PROJECT_LIFECYCLE.md \
   docs/milestones/2T_HERMESFILE_LIFECYCLE.md \
+  docs/milestones/2U_OBJECTIVE_LIFECYCLE.md \
   docs/console/FOUNDATION.md docs/console/CONTROLLER_CLIENT.md \
   docs/console/OPERATIONAL_DASHBOARD.md \
   docs/console/PROJECT_LIFECYCLE.md \
+  docs/console/OBJECTIVE_LIFECYCLE.md \
   console/src/index.html console/src/app.js \
   console/src/controller-client.js console/src/styles.css \
   console/dist/index.html console/dist/assets/app.js \
@@ -270,6 +274,7 @@ PY
   "${REPO}/tests/test-console-project-lifecycle.sh"
   "${REPO}/tests/test-controller-hermesfile-lifecycle.sh"
   "${REPO}/tests/test-console-hermesfile-lifecycle.sh"
+  "${REPO}/tests/test-console-objective-lifecycle.sh"
   "${REPO}/tests/test-reviewer-assignments.sh"
     "${REPO}/tests/test-controller-service-contract.sh"
 

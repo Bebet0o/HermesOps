@@ -111,6 +111,10 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"client.createHermesfile" not in body
         or b"client.updateHermesfile" not in body
         or b"client.compareHermesfileRevisions" not in body
+        or b"refreshObjectives" not in body
+        or b"client.createObjective" not in body
+        or b"client.commandObjective" not in body
+        or b"client.operation" not in body
         or b"fetch(" in body
         or b"innerHTML" in body
     ):
@@ -138,11 +142,14 @@ def validate(base_url: str, wait_seconds: float) -> None:
         or b"createHermesfile" not in body
         or b"updateHermesfile" not in body
         or b"compareHermesfileRevisions" not in body
+        or b"createObjective" not in body
+        or b"commandObjective" not in body
+        or b"async operation" not in body
         or b'"delete"' in body
         or b"buildHermesfile" in body
         or b"activateHermesfile" in body
     ):
-        raise ProbeError("Console Controller client violates the 2T browser boundary")
+        raise ProbeError("Console Controller client violates the 2U browser boundary")
 
     status, headers, body = request(parsed.hostname, port, "/", method="HEAD")
     if status != 200 or body or int(headers.get("content-length", "0")) <= 0:
@@ -180,6 +187,16 @@ def validate(base_url: str, wait_seconds: float) -> None:
     if status != 401:
         raise ProbeError(f"Unauthenticated project detail returned HTTP {status}")
 
+    probe_objective = "objective-" + "a" * 32
+    probe_operation = "operation-" + "a" * 32
+    for path in (
+        f"/api/v1/objectives/{probe_objective}",
+        f"/api/v1/operations/{probe_operation}",
+    ):
+        status, _, _ = request(parsed.hostname, port, path)
+        if status != 401:
+            raise ProbeError(f"Unauthenticated objective proxy returned HTTP {status}: {path}")
+
     probe_sandbox = "sandbox-" + "a" * 32
     for path in (
         "/api/v1/hermesfiles",
@@ -207,6 +224,10 @@ def validate(base_url: str, wait_seconds: float) -> None:
         ("POST", "/api/v1/hermesfiles/validate"),
         ("POST", "/api/v1/hermesfiles"),
         ("PATCH", f"/api/v1/hermesfiles/{probe_sandbox}"),
+        ("POST", "/api/v1/objectives"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/pause"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/resume"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/cancel"),
     ):
         status, _, _ = request(
             parsed.hostname,
@@ -224,6 +245,10 @@ def validate(base_url: str, wait_seconds: float) -> None:
         ("POST", "/api/v1/projects/probe-project/commands/delete"),
         ("POST", f"/api/v1/hermesfiles/{probe_sandbox}/builds"),
         ("POST", f"/api/v1/hermesfiles/{probe_sandbox}/activate"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/start"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/replan"),
+        ("POST", f"/api/v1/objectives/{probe_objective}/commands/archive"),
+        ("GET", f"/api/v1/objectives/{probe_objective}/tasks"),
     ):
         status, _, _ = request(
             parsed.hostname,
@@ -239,7 +264,7 @@ def validate(base_url: str, wait_seconds: float) -> None:
     print(
         f"HermesOps Console probe: PASS routes={len(ROUTES)} port={port} "
         "session_proxy=401 dashboard_proxy=401 project_lifecycle_proxy=401 "
-        "hermesfile_lifecycle_proxy=401"
+        "hermesfile_lifecycle_proxy=401 objective_lifecycle_proxy=401"
     )
 
 

@@ -59,6 +59,7 @@ CONTROLLER_ROUTES = frozenset(
         ("POST", "/api/v1/hermesfiles/validate"),
         ("GET", "/api/v1/hermesfiles/template"),
         ("GET", "/api/v1/objectives"),
+        ("POST", "/api/v1/objectives"),
         ("GET", "/api/v1/reviews"),
         ("GET", "/api/v1/recoveries"),
         ("GET", "/api/v1/plans"),
@@ -67,6 +68,9 @@ CONTROLLER_ROUTES = frozenset(
 )
 PROJECT_ID_PATTERN = __import__("re").compile(r"^[a-z][a-z0-9-]{1,62}$")
 PROJECT_COMMANDS = frozenset({"enable", "disable", "rescan", "archive"})
+OBJECTIVE_COMMANDS = frozenset({"pause", "resume", "cancel"})
+OBJECTIVE_ID_PATTERN = __import__("re").compile(r"^objective-[0-9a-f]{32}$")
+OPERATION_ID_PATTERN = __import__("re").compile(r"^operation-[0-9a-f]{32}$")
 SANDBOX_ID_PATTERN = __import__("re").compile(r"^sandbox-[0-9a-f]{32}$")
 REVISION_PATTERN = __import__("re").compile(r"^[1-9][0-9]*$")
 
@@ -100,10 +104,31 @@ def _controller_route_exposed(method: str, path: str) -> bool:
                 and REVISION_PATTERN.fullmatch(parts[2]) is not None
             )
         return False
-    prefix = "/api/v1/projects/"
-    if not path.startswith(prefix):
+    operation_prefix = "/api/v1/operations/"
+    if route_path.startswith(operation_prefix):
+        operation_id = route_path[len(operation_prefix):]
+        return (
+            method == "GET"
+            and not query
+            and OPERATION_ID_PATTERN.fullmatch(operation_id) is not None
+        )
+    objective_prefix = "/api/v1/objectives/"
+    if route_path.startswith(objective_prefix):
+        suffix = route_path[len(objective_prefix):]
+        if method == "GET" and not query:
+            return OBJECTIVE_ID_PATTERN.fullmatch(suffix) is not None
+        marker = "/commands/"
+        if method == "POST" and not query and marker in suffix:
+            objective_id, command = suffix.split(marker, 1)
+            return (
+                OBJECTIVE_ID_PATTERN.fullmatch(objective_id) is not None
+                and command in OBJECTIVE_COMMANDS
+            )
         return False
-    suffix = path[len(prefix):]
+    prefix = "/api/v1/projects/"
+    if not route_path.startswith(prefix):
+        return False
+    suffix = route_path[len(prefix):]
     if method in {"GET", "PATCH"}:
         return PROJECT_ID_PATTERN.fullmatch(suffix) is not None
     marker = "/commands/"

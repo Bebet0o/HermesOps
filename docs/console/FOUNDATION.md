@@ -1,6 +1,6 @@
 # HermesOps Console Foundation
 
-Status: **2P foundation extended through 2T Hermesfile lifecycle**
+Status: **2P foundation extended through 2U objective lifecycle**
 
 ## Purpose
 
@@ -79,8 +79,14 @@ python3 scripts/hermesops-console-probe.py   --base-url http://127.0.0.1:8788
 
 ## Current non-goals
 
-The Console implements the bounded 2R dashboard, 2S project lifecycle, and 2T
-Hermesfile lifecycle. It does not build or activate images, bind secrets, delete
-revisions, implement objective commands, execution views, human review actions,
-WebSocket events, browser persistence, service workers, or offline command
-queues.
+The Console implements the bounded 2R dashboard, 2S project lifecycle, 2T
+Hermesfile lifecycle, and 2U objective lifecycle. It does not build or activate
+images, bind secrets, delete revisions, expose objective task details or
+unsupported objective commands, implement execution views, human review
+actions, WebSocket events, browser persistence, service workers, or offline
+command queues.
+
+
+Milestone 2U replaces the objective placeholder with a bounded lifecycle page.
+It reuses the secure Controller command foundation, adds no migration, and does
+not expand into task/run detail or realtime reconciliation.

@@ -87,6 +87,10 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"data": {"source_revision": 1, "source": "apiVersion: hermesops.dev/v1\n"}})
         elif self.path == "/api/v1/hermesfiles/sandbox-" + "a" * 32 + "/diff?from=1&to=2":
             self._send_json(200, {"data": {"changed": True, "changes": [{"path": "/spec/runtime/cpu", "kind": "modified"}]}})
+        elif self.path == "/api/v1/objectives/objective-" + "a" * 32:
+            self._send_json(200, {"data": {"id": "objective-" + "a" * 32, "title": "Objective Alpha", "description": "Bounded objective", "state": "paused", "raw_state": "PAUSED", "project_ids": ["alpha"], "priority": 100, "resource_revision": 3, "requested_transition": None, "planning_attempt_count": 1, "attempt_count": 1, "event_count": 2, "plan_id": None, "not_before": "2026-07-29T00:00:00.000Z", "max_parallel_tasks": 1, "has_error": False, "latest_operation_id": "operation-" + "a" * 32}})
+        elif self.path == "/api/v1/operations/operation-" + "a" * 32:
+            self._send_json(200, {"data": {"id": "operation-" + "a" * 32, "kind": "objective.pause", "state": "succeeded", "created_at": "2026-07-29T00:00:00.000Z", "finished_at": "2026-07-29T00:00:00.000Z", "target": {"type": "objective", "id": "objective-" + "a" * 32}, "result": {"state": "paused"}}})
         elif self.path in {
             "/api/v1/projects",
             "/api/v1/hermesfiles",
@@ -122,6 +126,11 @@ class FakeControllerHandler(http.server.BaseHTTPRequestHandler):
             )
         elif self.path == "/api/v1/projects" or self.path.startswith("/api/v1/projects/alpha/commands/"):
             self._send_json(202, {"data": {"operation_id": "operation-" + "a" * 32, "state": "succeeded"}})
+        elif self.path == "/api/v1/objectives":
+            self._send_json(202, {"data": {"id": "operation-" + "a" * 32, "kind": "objective.create", "state": "succeeded", "target": {"type": "objective", "id": "objective-" + "a" * 32}, "result": {"objective_id": "objective-" + "a" * 32, "state": "queued"}}})
+        elif self.path.startswith("/api/v1/objectives/objective-" + "a" * 32 + "/commands/"):
+            command = self.path.rsplit("/", 1)[-1]
+            self._send_json(202, {"data": {"id": "operation-" + "a" * 32, "kind": "objective." + command, "state": "succeeded", "target": {"type": "objective", "id": "objective-" + "a" * 32}, "result": {"state": command}}})
         elif self.path == "/api/v1/hermesfiles/validate":
             self._send_json(200, {"data": {"valid": True, "diagnostics": [], "canonical": {}, "runtime_config": {}}})
         elif self.path == "/api/v1/hermesfiles":

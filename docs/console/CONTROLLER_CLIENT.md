@@ -1,6 +1,6 @@
 # Console Browser Session and Controller Client
 
-Status: **implemented by milestone 2Q and extended through 2T**
+Status: **implemented by milestone 2Q and extended through 2U**
 
 ## Boundary
 
@@ -76,7 +76,14 @@ Milestone 2Q does not add:
 
 - Hermesfile build, activation, secret binding, or revision deletion;
 - project deletion or repository/default-branch mutation;
-- objective or review commands;
+- review commands;
+- objective start, replan, archive or delete commands;
 - WebSocket events;
 - offline queues or browser persistence;
 - a general-purpose API proxy.
+
+
+Milestone 2U adds only the objective collection/create route, exact objective
+detail, `pause|resume|cancel` command paths, and exact Controller operation
+reads. Objective task routes, unsupported commands, query strings and arbitrary
+operation resources remain closed before upstream.

@@ -24,7 +24,7 @@ const routes = Object.freeze({
   "/objectives": {
     key: "objectives",
     title: "Objectifs",
-    message: "Le cycle de vie des objectifs sera relié à la Console au jalon 2U.",
+    message: "Connectez-vous pour créer et contrôler les objectifs via le Controller.",
   },
   "/executions": {
     key: "executions",
@@ -103,6 +103,24 @@ const hermesfileDiffFrom = document.getElementById("hermesfile-diff-from");
 const hermesfileDiffTo = document.getElementById("hermesfile-diff-to");
 const hermesfileCompare = document.getElementById("hermesfile-compare");
 const hermesfileDiff = document.getElementById("hermesfile-diff");
+const objectivePanel = document.getElementById("objective-panel");
+const objectiveRefresh = document.getElementById("objective-refresh");
+const objectiveStatus = document.getElementById("objective-status");
+const objectiveCoverage = document.getElementById("objective-coverage");
+const objectiveCount = document.getElementById("objective-count");
+const objectiveList = document.getElementById("objective-list");
+const objectiveCreateForm = document.getElementById("objective-create-form");
+const objectiveCreateProject = document.getElementById("objective-create-project");
+const objectiveCreateSubmit = document.getElementById("objective-create-submit");
+const objectiveDetailCard = document.getElementById("objective-detail-card");
+const objectiveDetailTitle = document.getElementById("objective-detail-title");
+const objectiveDetailState = document.getElementById("objective-detail-state");
+const objectiveDetailMeta = document.getElementById("objective-detail-meta");
+const objectiveDetailDescription = document.getElementById("objective-detail-description");
+const objectiveDetailFacts = document.getElementById("objective-detail-facts");
+const objectiveOperation = document.getElementById("objective-operation");
+const objectiveCommandReason = document.getElementById("objective-command-reason");
+const objectiveCommandButtons = document.getElementById("objective-command-buttons");
 
 const dashboardResources = Object.freeze([
   Object.freeze({ key: "projects", load: () => client.projects() }),
@@ -137,6 +155,11 @@ let selectedHermesfileId = "";
 let selectedHermesfileEtag = "";
 let selectedHermesfileRevision = 0;
 let hermesfileValidated = false;
+let objectiveLoading = false;
+let objectiveGeneration = 0;
+let objectivesLoaded = false;
+let selectedObjectiveId = "";
+let selectedObjective = null;
 
 function canonicalPath(pathname) {
   if (pathname.length > 1 && pathname.endsWith("/")) {
@@ -174,10 +197,12 @@ function displayFunctionalPanel() {
   const dashboardRoute = key === "dashboard";
   const projectsRoute = key === "projects";
   const hermesfilesRoute = key === "hermesfiles";
+  const objectivesRoute = key === "objectives";
   dashboardPanel.hidden = !dashboardRoute || !authenticated;
   projectPanel.hidden = !projectsRoute || !authenticated;
   hermesfilePanel.hidden = !hermesfilesRoute || !authenticated;
-  routePanel.hidden = authenticated && (dashboardRoute || projectsRoute || hermesfilesRoute);
+  objectivePanel.hidden = !objectivesRoute || !authenticated;
+  routePanel.hidden = authenticated && (dashboardRoute || projectsRoute || hermesfilesRoute || objectivesRoute);
 }
 
 function render(pathname, focusMain = false) {
@@ -205,6 +230,9 @@ function render(pathname, focusMain = false) {
   if (route.key === "hermesfiles" && authenticated && !hermesfilesLoaded) {
     void refreshHermesfiles();
   }
+  if (route.key === "objectives" && authenticated && !objectivesLoaded) {
+    void refreshObjectives();
+  }
 
   if (focusMain) {
     document.getElementById("main-content").focus({ preventScroll: true });
@@ -225,6 +253,7 @@ function showSignedOut(message = "Authentification requise pour accéder aux don
   dashboardRefresh.disabled = false;
   clearProjectState();
   clearHermesfileState();
+  clearObjectiveState();
   sessionPanel.dataset.state = "signed-out";
   sessionStatus.textContent = "Session fermée";
   sessionDetail.textContent = message;
@@ -260,6 +289,9 @@ function showAuthenticated(session, capabilities) {
   if (currentRoute().key === "hermesfiles") {
     void refreshHermesfiles();
   }
+  if (currentRoute().key === "objectives") {
+    void refreshObjectives();
+  }
 }
 
 function showUnavailable(error) {
@@ -270,6 +302,7 @@ function showUnavailable(error) {
   dashboardRefresh.disabled = false;
   clearProjectState();
   clearHermesfileState();
+  clearObjectiveState();
   sessionPanel.dataset.state = "unavailable";
   sessionStatus.textContent = "Controller indisponible";
   const requestSuffix = error instanceof ControllerClientError && error.requestId
@@ -1058,6 +1091,341 @@ async function compareHermesfileHistory() {
   }
 }
 
+function clearObjectiveState() {
+  objectiveGeneration += 1;
+  objectiveLoading = false;
+  objectivesLoaded = false;
+  selectedObjectiveId = "";
+  selectedObjective = null;
+  objectiveRefresh.disabled = false;
+  objectiveCreateSubmit.disabled = false;
+  objectiveCount.textContent = "0";
+  objectiveList.replaceChildren();
+  objectiveCreateProject.replaceChildren();
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = "Sélectionnez un projet actif";
+  objectiveCreateProject.append(option);
+  objectiveDetailCard.hidden = true;
+  objectiveCommandReason.value = "";
+  objectiveOperation.textContent = "Aucune opération chargée.";
+}
+
+function setObjectiveBusy(busy) {
+  objectiveLoading = busy;
+  objectiveRefresh.disabled = busy;
+  objectiveCreateSubmit.disabled = busy;
+  objectiveCreateForm.querySelectorAll("input, select, textarea, button").forEach((control) => {
+    control.disabled = busy;
+  });
+  objectiveCommandButtons.querySelectorAll("button").forEach((button) => {
+    button.disabled = busy;
+  });
+}
+
+function renderObjectiveProjectOptions(collection) {
+  const previous = objectiveCreateProject.value;
+  objectiveCreateProject.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Sélectionnez un projet actif";
+  objectiveCreateProject.append(placeholder);
+  for (const project of collection.items) {
+    if (safeState(project) !== "enabled") {
+      continue;
+    }
+    const identifier = safeId(project, "");
+    if (!identifier) {
+      continue;
+    }
+    const option = document.createElement("option");
+    option.value = identifier;
+    option.textContent = `${safeText(project.name, identifier, 120)} · ${identifier}`;
+    objectiveCreateProject.append(option);
+  }
+  if ([...objectiveCreateProject.options].some((option) => option.value === previous)) {
+    objectiveCreateProject.value = previous;
+  }
+}
+
+function renderObjectiveList(collection) {
+  objectiveList.replaceChildren();
+  objectiveCount.textContent = String(collection.items.length);
+  objectiveCoverage.textContent = collection.truncated
+    ? "Une page suivante existe : la liste reste volontairement bornée."
+    : "La première page reçue est complète selon les métadonnées Controller.";
+  if (collection.items.length === 0) {
+    appendEmpty(objectiveList, "Aucun objectif visible.");
+    return;
+  }
+  for (const objective of collection.items) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    const heading = document.createElement("strong");
+    const detail = document.createElement("span");
+    const state = document.createElement("span");
+    const identifier = safeId(objective, "objectif");
+    const projects = Array.isArray(objective.project_ids)
+      ? objective.project_ids.map((value) => safeText(value, "", 63)).filter(Boolean).join(", ")
+      : "projet inconnu";
+    button.type = "button";
+    button.dataset.objectiveId = identifier;
+    button.className = "objective-list-button";
+    if (identifier === selectedObjectiveId) {
+      button.setAttribute("aria-current", "true");
+    }
+    heading.textContent = safeText(objective.title, identifier, 200);
+    detail.textContent = `${projects || "projet inconnu"} · priorité ${Number.isInteger(objective.priority) ? objective.priority : "?"}`;
+    state.className = "state-badge";
+    state.dataset.state = safeState(objective);
+    state.textContent = safeState(objective);
+    button.append(heading, detail, state);
+    item.append(button);
+    objectiveList.append(item);
+  }
+}
+
+function appendObjectiveFact(label, value) {
+  const wrapper = document.createElement("div");
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  term.textContent = label;
+  description.textContent = value;
+  wrapper.append(term, description);
+  objectiveDetailFacts.append(wrapper);
+}
+
+function renderObjectiveOperation(operation) {
+  if (!operation || typeof operation !== "object" || Array.isArray(operation)) {
+    objectiveOperation.textContent = "Aucune opération chargée.";
+    return;
+  }
+  const target = operation.target && typeof operation.target === "object" ? operation.target : {};
+  const summary = {
+    id: safeText(operation.id, "inconnue", 96),
+    kind: safeText(operation.kind, "inconnu", 80),
+    state: safeText(operation.state, "inconnu", 40),
+    target: {
+      type: safeText(target.type, "inconnu", 40),
+      id: safeText(target.id, "inconnu", 96),
+    },
+    created_at: safeText(operation.created_at, "non renseigné", 64),
+    finished_at: operation.finished_at ? safeText(operation.finished_at, "non renseigné", 64) : null,
+    result: operation.result && typeof operation.result === "object" ? operation.result : {},
+  };
+  objectiveOperation.textContent = JSON.stringify(summary, null, 2);
+}
+
+function renderObjectiveDetail(objective) {
+  selectedObjective = objective;
+  selectedObjectiveId = safeId(objective, "");
+  objectiveDetailCard.hidden = false;
+  objectiveDetailTitle.textContent = safeText(objective.title, selectedObjectiveId, 200);
+  const state = safeState(objective);
+  const rawState = safeText(objective.raw_state, "UNKNOWN", 40).toUpperCase();
+  objectiveDetailState.dataset.state = state;
+  objectiveDetailState.textContent = state;
+  const projects = Array.isArray(objective.project_ids)
+    ? objective.project_ids.map((value) => safeText(value, "", 63)).filter(Boolean).join(", ")
+    : "non renseigné";
+  objectiveDetailMeta.textContent = [
+    selectedObjectiveId,
+    `projet(s) ${projects || "non renseigné"}`,
+    `priorité ${Number.isInteger(objective.priority) ? objective.priority : "?"}`,
+    `révision ${Number.isInteger(objective.resource_revision) ? objective.resource_revision : "?"}`,
+  ].join(" · ");
+  objectiveDetailDescription.textContent = safeText(objective.description, "Description indisponible.", 16_384);
+  objectiveDetailFacts.replaceChildren();
+  appendObjectiveFact("État Controller", rawState.toLowerCase());
+  appendObjectiveFact("Transition demandée", safeText(objective.requested_transition, "aucune", 64));
+  appendObjectiveFact("Plan", safeText(objective.plan_id, "aucun", 96));
+  appendObjectiveFact("Tentatives planning", String(Number.isInteger(objective.planning_attempt_count) ? objective.planning_attempt_count : 0));
+  appendObjectiveFact("Tentatives totales", String(Number.isInteger(objective.attempt_count) ? objective.attempt_count : 0));
+  appendObjectiveFact("Événements", String(Number.isInteger(objective.event_count) ? objective.event_count : 0));
+  appendObjectiveFact("Pas avant", safeText(objective.not_before, "immédiat", 64));
+  appendObjectiveFact("Parallélisme", String(Number.isInteger(objective.max_parallel_tasks) ? objective.max_parallel_tasks : 1));
+  appendObjectiveFact("Erreur signalée", objective.has_error ? "oui" : "non");
+  objectiveCommandReason.value = "";
+  const allowed = {
+    pause: ["QUEUED", "PLANNING", "RUNNING"].includes(rawState),
+    resume: rawState === "PAUSED",
+    cancel: ["QUEUED", "PLANNING", "RUNNING", "PAUSE_REQUESTED", "PAUSED"].includes(rawState),
+  };
+  objectiveCommandButtons.querySelectorAll("button[data-objective-command]").forEach((button) => {
+    button.hidden = !allowed[button.dataset.objectiveCommand];
+  });
+}
+
+async function followObjectiveOperation(operation) {
+  renderObjectiveOperation(operation);
+  const identifier = safeText(operation && operation.id, "", 96);
+  if (!identifier) {
+    return operation;
+  }
+  let current = await client.operation(identifier);
+  renderObjectiveOperation(current);
+  for (let attempt = 1; attempt < 3; attempt += 1) {
+    const state = safeText(current && current.state, "", 40).toLowerCase();
+    if (["succeeded", "failed", "cancelled"].includes(state)) {
+      break;
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 250));
+    current = await client.operation(identifier);
+    renderObjectiveOperation(current);
+  }
+  return current;
+}
+
+async function selectObjective(identifier) {
+  if (!authenticated || objectiveLoading) {
+    return;
+  }
+  setObjectiveBusy(true);
+  objectiveStatus.textContent = `Lecture de l’objectif ${safeText(identifier, "sélectionné", 96)}…`;
+  try {
+    const objective = await client.objective(identifier);
+    renderObjectiveDetail(objective);
+    if (typeof objective.latest_operation_id === "string" && objective.latest_operation_id) {
+      renderObjectiveOperation(await client.operation(objective.latest_operation_id));
+    } else {
+      renderObjectiveOperation(null);
+    }
+    const collection = await client.objectives();
+    renderObjectiveList(collection);
+    objectiveStatus.textContent = "Détail objectif chargé depuis le Controller.";
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les objectifs.");
+      return;
+    }
+    objectiveStatus.textContent = projectErrorMessage(error, "Lecture de l’objectif impossible.");
+  } finally {
+    setObjectiveBusy(false);
+  }
+}
+
+async function refreshObjectives() {
+  if (!authenticated || objectiveLoading) {
+    return;
+  }
+  const generation = ++objectiveGeneration;
+  setObjectiveBusy(true);
+  objectiveStatus.textContent = "Lecture des objectifs et projets actifs…";
+  try {
+    const [objectiveResult, projectResult] = await Promise.allSettled([
+      client.objectives(),
+      client.projects(),
+    ]);
+    if (generation !== objectiveGeneration || !authenticated) {
+      return;
+    }
+    if (objectiveResult.status !== "fulfilled") {
+      throw objectiveResult.reason;
+    }
+    renderObjectiveList(objectiveResult.value);
+    if (projectResult.status === "fulfilled") {
+      renderObjectiveProjectOptions(projectResult.value);
+    } else {
+      renderObjectiveProjectOptions({ items: [], truncated: false });
+    }
+    objectivesLoaded = true;
+    objectiveStatus.textContent = projectResult.status === "fulfilled"
+      ? `${objectiveResult.value.items.length} objectif(s) reçu(s) du Controller.`
+      : `${objectiveResult.value.items.length} objectif(s) reçu(s), mais la création est indisponible sans registre projet.`;
+    if (selectedObjectiveId && objectiveResult.value.items.some((item) => safeId(item, "") === selectedObjectiveId)) {
+      const objective = await client.objective(selectedObjectiveId);
+      if (generation === objectiveGeneration && authenticated) {
+        renderObjectiveDetail(objective);
+      }
+    } else {
+      selectedObjectiveId = "";
+      selectedObjective = null;
+      objectiveDetailCard.hidden = true;
+    }
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous pour administrer les objectifs.");
+      return;
+    }
+    objectiveStatus.textContent = projectErrorMessage(error, "Registre objectif indisponible.");
+  } finally {
+    if (generation === objectiveGeneration) {
+      setObjectiveBusy(false);
+    }
+  }
+}
+
+async function runObjectiveMutation(label, operation) {
+  if (!authenticated || objectiveLoading) {
+    return;
+  }
+  setObjectiveBusy(true);
+  objectiveStatus.textContent = `${label}…`;
+  try {
+    const accepted = await operation();
+    const completed = await followObjectiveOperation(accepted);
+    const state = safeText(completed && completed.state, "acceptée", 40);
+    objectiveStatus.textContent = `${label} ${state} par le Controller.`;
+    const target = completed && completed.target && typeof completed.target === "object"
+      ? safeText(completed.target.id, "", 96)
+      : "";
+    objectivesLoaded = false;
+    setObjectiveBusy(false);
+    await refreshObjectives();
+    if (target) {
+      await selectObjective(target);
+    }
+  } catch (error) {
+    if (error instanceof ControllerClientError && error.status === 401) {
+      showSignedOut("Session expirée. Reconnectez-vous avant toute nouvelle commande.");
+      return;
+    }
+    objectiveStatus.textContent = projectErrorMessage(error, `${label} impossible.`);
+  } finally {
+    setObjectiveBusy(false);
+  }
+}
+
+function objectiveNotBefore(value) {
+  if (!value) {
+    return null;
+  }
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) {
+    throw new ControllerClientError("Date de lancement invalide.", {
+      status: 400,
+      code: "invalid_not_before",
+    });
+  }
+  return timestamp.toISOString();
+}
+
+async function submitObjectiveCreate() {
+  const constraints = document.getElementById("objective-create-constraints").value
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value, index, values) => value && values.indexOf(value) === index);
+  const intent = {
+    project_ids: [objectiveCreateProject.value],
+    title: document.getElementById("objective-create-title-input").value.trim(),
+    description: document.getElementById("objective-create-description").value.trim(),
+    constraints,
+    priority: Number(document.getElementById("objective-create-priority").value),
+    not_before: objectiveNotBefore(document.getElementById("objective-create-not-before").value),
+    max_parallel_tasks: Number(document.getElementById("objective-create-parallel").value),
+    planning_max_attempts: Number(document.getElementById("objective-create-planning-attempts").value),
+  };
+  await runObjectiveMutation("Création de l’objectif", () => client.createObjective(intent));
+  if (!objectiveLoading) {
+    const project = objectiveCreateProject.value;
+    objectiveCreateForm.reset();
+    objectiveCreateProject.value = project;
+    document.getElementById("objective-create-priority").value = "100";
+    document.getElementById("objective-create-parallel").value = "1";
+    document.getElementById("objective-create-planning-attempts").value = "3";
+  }
+}
+
 async function refreshSession() {
   setConnection("checking", "Vérification…", "Lecture de la session auprès du Controller.");
   try {
@@ -1241,6 +1609,50 @@ hermesfileSource.addEventListener("input", () => {
   hermesfileValidated = false;
   hermesfileValidity.textContent = "à revalider";
   hermesfileValidity.dataset.state = "unknown";
+});
+
+objectiveRefresh.addEventListener("click", () => {
+  objectivesLoaded = false;
+  void refreshObjectives();
+});
+
+objectiveCreateForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitObjectiveCreate();
+});
+
+objectiveList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-objective-id]");
+  if (button) {
+    void selectObjective(button.dataset.objectiveId || "");
+  }
+});
+
+objectiveCommandButtons.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-objective-command]");
+  if (!button || !selectedObjectiveId) {
+    return;
+  }
+  const command = button.dataset.objectiveCommand || "";
+  if (command === "cancel") {
+    const accepted = globalThis.confirm(
+      `Annuler ${selectedObjectiveId} arrête sa progression et annule les tâches non démarrées. Continuer ?`,
+    );
+    if (!accepted) {
+      objectiveStatus.textContent = "Annulation abandonnée avant envoi au Controller.";
+      return;
+    }
+  }
+  const labels = {
+    pause: "Mise en pause de l’objectif",
+    resume: "Reprise de l’objectif",
+    cancel: "Annulation de l’objectif",
+  };
+  const reason = objectiveCommandReason.value.trim() || null;
+  void runObjectiveMutation(
+    labels[command] || "Commande objectif",
+    () => client.commandObjective(selectedObjectiveId, command, reason),
+  );
 });
 
 window.addEventListener("popstate", () => render(window.location.pathname));

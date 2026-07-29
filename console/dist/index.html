@@ -316,6 +316,92 @@
         </div>
       </section>
 
+      <section id="objective-panel" class="objective-panel" aria-labelledby="objective-lifecycle-title" hidden>
+        <div class="dashboard-heading">
+          <div>
+            <p class="eyebrow">Jalon 2U</p>
+            <h2 id="objective-lifecycle-title">Cycle de vie des objectifs</h2>
+            <p id="objective-status" class="dashboard-status" aria-live="polite">Aucune lecture lancée.</p>
+          </div>
+          <button id="objective-refresh" class="secondary-button" type="button">Actualiser</button>
+        </div>
+
+        <div class="objective-grid">
+          <section class="dashboard-card" aria-labelledby="objective-list-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">File Controller</p>
+                <h3 id="objective-list-title">Objectifs</h3>
+              </div>
+              <span id="objective-count" class="count-badge">0</span>
+            </div>
+            <ul id="objective-list" class="project-admin-list"></ul>
+            <p id="objective-coverage" class="coverage-note">Première page bornée du registre.</p>
+          </section>
+
+          <section class="dashboard-card" aria-labelledby="objective-create-title">
+            <p class="eyebrow">Nouvelle intention</p>
+            <h3 id="objective-create-title">Créer un objectif</h3>
+            <form id="objective-create-form" class="objective-form" autocomplete="off">
+              <label>Projet
+                <select id="objective-create-project" name="project_id" required>
+                  <option value="">Sélectionnez un projet actif</option>
+                </select>
+              </label>
+              <label>Titre
+                <input id="objective-create-title-input" name="title" required maxlength="200">
+              </label>
+              <label class="objective-form-wide">Résultat attendu
+                <textarea id="objective-create-description" name="description" required maxlength="16384" rows="7"></textarea>
+              </label>
+              <label class="objective-form-wide">Contraintes, une par ligne
+                <textarea id="objective-create-constraints" name="constraints" maxlength="16384" rows="4"></textarea>
+              </label>
+              <label>Priorité
+                <input id="objective-create-priority" name="priority" type="number" min="-1000" max="1000" value="100" required>
+              </label>
+              <label>Pas avant
+                <input id="objective-create-not-before" name="not_before" type="datetime-local">
+              </label>
+              <label>Tâches parallèles
+                <input id="objective-create-parallel" name="max_parallel_tasks" type="number" min="1" max="16" value="1" required>
+              </label>
+              <label>Tentatives de planification
+                <input id="objective-create-planning-attempts" name="planning_max_attempts" type="number" min="1" max="5" value="3" required>
+              </label>
+              <button id="objective-create-submit" class="objective-form-wide" type="submit">Créer et mettre en file</button>
+            </form>
+          </section>
+
+          <section id="objective-detail-card" class="dashboard-card objective-detail-card" aria-labelledby="objective-detail-title" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Ressource sélectionnée</p>
+                <h3 id="objective-detail-title">Détail objectif</h3>
+              </div>
+              <span id="objective-detail-state" class="state-badge">inconnu</span>
+            </div>
+            <p id="objective-detail-meta" class="project-meta"></p>
+            <p id="objective-detail-description" class="objective-description"></p>
+            <dl id="objective-detail-facts" class="objective-facts"></dl>
+            <div class="objective-operation-box">
+              <p class="eyebrow">Dernière opération Controller</p>
+              <pre id="objective-operation" class="hermesfile-preview">Aucune opération chargée.</pre>
+            </div>
+            <div class="project-command-box">
+              <label>Motif facultatif
+                <textarea id="objective-command-reason" maxlength="1000" rows="3"></textarea>
+              </label>
+              <div id="objective-command-buttons" class="project-command-buttons">
+                <button type="button" data-objective-command="pause">Mettre en pause</button>
+                <button type="button" data-objective-command="resume">Reprendre</button>
+                <button type="button" data-objective-command="cancel" class="danger-button">Annuler</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
       <section id="route-panel" class="route-panel" aria-live="polite">
         <div>
           <p class="eyebrow">Espace fonctionnel</p>
@@ -327,7 +413,7 @@
 
       <footer>
         <span>HermesOps v0.1.0-alpha</span>
-        <span>Console 2T · projets et Hermesfiles bornés · aucune persistance navigateur</span>
+        <span>Console 2U · projets, Hermesfiles et objectifs bornés · aucune persistance navigateur</span>
       </footer>
     </main>
   </div>

@@ -895,5 +895,7 @@ Le jalon 2P ajoute la fondation indépendante de la Console HermesOps sur
 proxy same-origin strict. Le jalon 2R ajoute un tableau de bord opérationnel
 authentifié et en lecture seule. Le jalon 2S ajoute le cycle de vie des projets
 et le jalon 2T ajoute l’éditeur, la validation, l’historique immuable et la
-comparaison des Hermesfiles. La WebUI Hermes historique reste sur le port 8787
+comparaison des Hermesfiles. Le jalon 2U ajoute la création, le détail, la mise
+en pause, la reprise, l’annulation et le suivi borné des opérations objectif.
+La WebUI Hermes historique reste sur le port 8787
 pendant la construction de la bêta.
