@@ -277,3 +277,29 @@ summary { cursor: pointer; color: var(--accent); font-weight: 700; }
   .hermesfile-actions button, .hermesfile-compare .secondary-button { width: 100%; }
   .hermesfile-source { min-height: 26rem; }
 }
+
+
+/* Milestone 2U objective lifecycle */
+.objective-panel { margin-top: 1rem; }
+.objective-grid { display: grid; grid-template-columns: minmax(17rem, 0.75fr) minmax(22rem, 1.25fr); gap: 1rem; margin-top: 1rem; align-items: start; }
+.objective-detail-card { grid-column: 1 / -1; }
+.objective-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.85rem; margin-top: 1rem; }
+.objective-form label { display: grid; gap: 0.38rem; color: var(--muted); font-size: 0.8rem; }
+.objective-form-wide { grid-column: 1 / -1; }
+.objective-form button { min-height: 2.85rem; padding: 0.72rem 0.9rem; border: 1px solid rgba(142, 230, 194, 0.34); background: var(--accent-soft); color: #e9fff6; font-weight: 700; }
+.objective-list-button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.35rem 0.7rem; padding: 0.85rem; border: 1px solid rgba(155, 176, 216, 0.13); background: rgba(7, 11, 19, 0.42); color: #f4f7fc; text-align: left; }
+.objective-list-button:hover, .objective-list-button[aria-current="true"] { border-color: rgba(142, 230, 194, 0.32); background: var(--accent-soft); }
+.objective-list-button strong { min-width: 0; overflow-wrap: anywhere; }
+.objective-list-button > span:not(.state-badge) { grid-column: 1; color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
+.objective-list-button .state-badge { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.objective-description { margin-top: 0.85rem; color: #dfe8f7; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+.objective-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; margin: 1rem 0 0; }
+.objective-facts div { min-width: 0; padding: 0.75rem; border: 1px solid rgba(155, 176, 216, 0.13); border-radius: 0.7rem; background: rgba(7, 11, 19, 0.42); }
+.objective-facts dt { color: var(--muted); font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.objective-facts dd { margin: 0.32rem 0 0; color: #f4f7fc; overflow-wrap: anywhere; }
+.objective-operation-box { margin-top: 1rem; }
+@media (max-width: 900px) {
+  .objective-grid, .objective-form { grid-template-columns: 1fr; }
+  .objective-detail-card, .objective-form-wide { grid-column: auto; }
+  .objective-facts { grid-template-columns: 1fr; }
+}

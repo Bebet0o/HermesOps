@@ -14,7 +14,10 @@ const ALLOWED_ENDPOINTS = Object.freeze({
 
 const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{1,62}$/;
 const SANDBOX_ID_PATTERN = /^sandbox-[0-9a-f]{32}$/;
+const OBJECTIVE_ID_PATTERN = /^objective-[0-9a-f]{32}$/;
+const OPERATION_ID_PATTERN = /^operation-[0-9a-f]{32}$/;
 const PROJECT_COMMANDS = new Set(["enable", "disable", "rescan", "archive"]);
+const OBJECTIVE_COMMANDS = new Set(["pause", "resume", "cancel"]);
 const REQUEST_TIMEOUT_MS = 7000;
 const MAX_ERROR_TEXT = 160;
 const MAX_COLLECTION_ITEMS = 200;
@@ -61,6 +64,36 @@ function sandboxId(value) {
     throw new ControllerClientError("Identifiant Hermesfile invalide.", {
       status: 400,
       code: "invalid_sandbox_id",
+    });
+  }
+  return value;
+}
+
+function objectiveId(value) {
+  if (typeof value !== "string" || !OBJECTIVE_ID_PATTERN.test(value)) {
+    throw new ControllerClientError("Identifiant objectif invalide.", {
+      status: 400,
+      code: "invalid_objective_id",
+    });
+  }
+  return value;
+}
+
+function operationId(value) {
+  if (typeof value !== "string" || !OPERATION_ID_PATTERN.test(value)) {
+    throw new ControllerClientError("Identifiant opération invalide.", {
+      status: 400,
+      code: "invalid_operation_id",
+    });
+  }
+  return value;
+}
+
+function objectiveIntent(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ControllerClientError("Intention objectif invalide.", {
+      status: 400,
+      code: "invalid_objective",
     });
   }
   return value;
@@ -352,6 +385,43 @@ export function createControllerClient() {
     },
     async objectives() {
       return collection(await request("objectives"));
+    },
+    async objective(identifier) {
+      return dataObject(await request({
+        method: "GET",
+        path: `/api/v1/objectives/${objectiveId(identifier)}`,
+      }));
+    },
+    async operation(identifier) {
+      return dataObject(await request({
+        method: "GET",
+        path: `/api/v1/operations/${operationId(identifier)}`,
+      }));
+    },
+    async createObjective(intent) {
+      const csrf = await csrfToken();
+      return dataObject(await request({ method: "POST", path: "/api/v1/objectives" }, {
+        body: objectiveIntent(intent),
+        csrfToken: csrf,
+        idempotencyLabel: "objective-create",
+      }));
+    },
+    async commandObjective(identifier, command, reason = null) {
+      if (!OBJECTIVE_COMMANDS.has(command)) {
+        throw new ControllerClientError("Commande objectif non autorisée.", {
+          status: 400,
+          code: "unsupported_objective_command",
+        });
+      }
+      const csrf = await csrfToken();
+      return dataObject(await request({
+        method: "POST",
+        path: `/api/v1/objectives/${objectiveId(identifier)}/commands/${command}`,
+      }, {
+        body: { reason },
+        csrfToken: csrf,
+        idempotencyLabel: `objective-${command}`,
+      }));
     },
     async reviews() {
       return collection(await request("reviews"));

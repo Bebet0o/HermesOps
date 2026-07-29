@@ -5,6 +5,9 @@ All notable changes to HermesOps will be documented in this file.
 
 ## [Unreleased]
 
+- Add milestone 2U bounded Objective Lifecycle Console integration.
+- Reuse the existing secure objective creation, pause, resume, cancel and operation read contracts without a schema migration.
+
 - Add milestone 2T Hermesfile lifecycle persistence and Controller routes.
 - Add strict non-persisting validation, guided template creation, immutable
   source revisions, `If-Match` concurrency, path-only canonical comparison,
