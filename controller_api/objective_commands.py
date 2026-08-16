@@ -443,8 +443,44 @@ class ObjectiveCommandStore:
                       ON task.orchestration_task_id = attempt.orchestration_task_id
                     JOIN runs AS run ON run.run_id = attempt.run_id
                     WHERE task.plan_id = ?
-                      AND run.status IN ('COMMITTING', 'COMPLETED')
+                      AND (
+                            run.status IN ('COMMITTING', 'COMPLETED')
+                            OR EXISTS (
+                                SELECT 1
+                                FROM integration_executions AS integration
+                                WHERE integration.run_id = run.run_id
+                                  AND integration.decision = 'APPROVE'
+                                  AND integration.status IN (
+                                      'PREPARED', 'COMPLETED', 'FAILED'
+                                  )
+                            )
+                      )
                 )
+                """,
+                (plan_id,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _active_run_count(
+        connection: sqlite3.Connection,
+        plan_id: str | None,
+    ) -> int:
+        if plan_id is None:
+            return 0
+        return int(
+            connection.execute(
+                """
+                SELECT COUNT(DISTINCT run.run_id)
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id = attempt.orchestration_task_id
+                JOIN runs AS run ON run.run_id = attempt.run_id
+                WHERE task.plan_id = ?
+                  AND run.status IN (
+                      'SNAPSHOTTING', 'RUNNING', 'REVIEWING',
+                      'WAITING_HUMAN', 'COMMITTING', 'RECOVERING'
+                  )
                 """,
                 (plan_id,),
             ).fetchone()[0]
@@ -975,8 +1011,14 @@ class ObjectiveCommandStore:
                             "Objective passed the integration point of no return",
                         )
                     running = self._running_task_count(connection, row["plan_id"])
-                    new = "CANCEL_REQUESTED" if old == "PLANNING" or running else "CANCELLED"
-                    self._cancel_plan(connection, row["plan_id"], now)
+                    active_runs = self._active_run_count(connection, row["plan_id"])
+                    new = (
+                        "CANCEL_REQUESTED"
+                        if old == "PLANNING" or running or active_runs
+                        else "CANCELLED"
+                    )
+                    if new == "CANCELLED":
+                        self._cancel_plan(connection, row["plan_id"], now)
                     connection.execute(
                         """
                         UPDATE objective_queue SET status=?, heartbeat_at=?,

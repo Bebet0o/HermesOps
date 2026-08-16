@@ -360,7 +360,10 @@ default_branch = "main"
                     execution_id TEXT PRIMARY KEY
                 );
                 CREATE TABLE integration_executions (
-                    integration_id TEXT PRIMARY KEY
+                    integration_id TEXT PRIMARY KEY,
+                    run_id TEXT,
+                    decision TEXT,
+                    status TEXT
                 );
                 CREATE TABLE recovery_executions (
                     recovery_id TEXT PRIMARY KEY

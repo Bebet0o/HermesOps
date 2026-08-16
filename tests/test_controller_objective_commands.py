@@ -106,6 +106,76 @@ class ObjectiveCommandTest(unittest.TestCase):
         self.assertEqual(status, 202)
         return token, headers, payload
 
+    def seed_linked_run(
+        self,
+        objective_id: str,
+        *,
+        suffix: str,
+        plan_status: str,
+        task_status: str,
+        run_status: str,
+    ) -> tuple[str, str, str]:
+        plan_id = f"plan-{suffix}"
+        task_id = f"task-{suffix}"
+        run_id = f"run-{suffix}"
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "INSERT INTO orchestration_plans(plan_id,status) VALUES (?,?)",
+                (plan_id, plan_status),
+            )
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING', plan_id=? "
+                "WHERE objective_id=?",
+                (plan_id, objective_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO orchestration_tasks (
+                    orchestration_task_id, plan_id, task_key, kind, project_id,
+                    role_id, status, priority, instruction, acceptance_json,
+                    marker, max_attempts, attempt_count, result_json,
+                    failure_reason, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, 'pipeline', 'PIPELINE', 'alpha', NULL, ?, 100,
+                          'test', '[]', 'DONE', 1, 1, '{}', NULL,
+                          '2026-08-16T00:00:00.000Z',
+                          '2026-08-16T00:00:00.000Z',
+                          '2026-08-16T00:00:00.000Z', NULL)
+                """,
+                (task_id, plan_id, task_status),
+            )
+            connection.execute(
+                """
+                INSERT INTO runs (
+                    run_id, project_id, status, created_at, started_at,
+                    finished_at, heartbeat_at
+                ) VALUES (?, 'alpha', ?, '2026-08-16T00:00:00.000Z',
+                          '2026-08-16T00:00:00.000Z', NULL,
+                          '2026-08-16T00:00:00.000Z')
+                """,
+                (run_id, run_status),
+            )
+            connection.execute(
+                """
+                INSERT INTO orchestration_attempts (
+                    attempt_id, orchestration_task_id, attempt_number, status,
+                    executor_instance_id, run_id, worker_execution_id,
+                    review_execution_id, integration_id, result_json,
+                    failure_reason, started_at, heartbeat_at, finished_at
+                ) VALUES (?, ?, 1, 'RUNNING', NULL, ?, NULL, NULL, NULL, '{}',
+                          NULL, '2026-08-16T00:00:00.000Z',
+                          '2026-08-16T00:00:00.000Z', NULL)
+                """,
+                (f"attempt-{suffix}", task_id, run_id),
+            )
+            connection.execute(
+                "INSERT INTO project_locks(project_id,run_id,holder,acquired_at,heartbeat_at) "
+                "VALUES ('alpha',?,'controller-test','2026-08-16T00:00:00.000Z',"
+                "'2026-08-16T00:00:00.000Z')",
+                (run_id,),
+            )
+            connection.commit()
+        return plan_id, task_id, run_id
+
     def test_installed_service_probe_is_safe_and_self_cancels(self) -> None:
         self.fixture.session_file.parent.chmod(0o700)
         result = probe_objective_commands(
@@ -648,6 +718,103 @@ class ObjectiveCommandTest(unittest.TestCase):
                     (objective_id,),
                 ).fetchone()[0],
                 "RUNNING",
+            )
+
+    def test_cancel_waiting_human_requests_cleanup_without_false_terminal(self) -> None:
+        token, _, payload = self.create(key="create-api-waiting-human-cancel")
+        objective_id = payload["data"]["target"]["id"]
+        plan_id, task_id, run_id = self.seed_linked_run(
+            objective_id,
+            suffix="api-waiting-human-cancel",
+            plan_status="BLOCKED",
+            task_status="BLOCKED",
+            run_status="WAITING_HUMAN",
+        )
+
+        status, _, operation = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/cancel",
+            {},
+            key="cancel-api-waiting-human",
+            csrf=token,
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(operation["data"]["result"]["raw_state"], "CANCEL_REQUESTED")
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT objective.status, plan.status, task.status, run.status, "
+                    "EXISTS(SELECT 1 FROM project_locks AS lock "
+                    "WHERE lock.run_id=run.run_id) "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=? AND plan.plan_id=? "
+                    "AND task.orchestration_task_id=? AND run.run_id=?",
+                    (objective_id, plan_id, task_id, run_id),
+                ).fetchone(),
+                ("CANCEL_REQUESTED", "BLOCKED", "BLOCKED", "WAITING_HUMAN", 1),
+            )
+
+    def test_cancel_rejects_recovering_integration_after_ponr(self) -> None:
+        token, _, payload = self.create(key="create-api-recovering-post-ponr")
+        objective_id = payload["data"]["target"]["id"]
+        _, _, run_id = self.seed_linked_run(
+            objective_id,
+            suffix="api-recovering-post-ponr",
+            plan_status="RUNNING",
+            task_status="RUNNING",
+            run_status="RECOVERING",
+        )
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "INSERT INTO integration_executions(integration_id,run_id,decision,status) "
+                "VALUES ('integration-api-recovering-post-ponr',?,'APPROVE','FAILED')",
+                (run_id,),
+            )
+            connection.commit()
+
+        status, _, problem = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/cancel",
+            {},
+            key="cancel-api-recovering-post-ponr",
+            csrf=token,
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(problem["code"], "objective_integration_committed")
+
+    def test_cancel_accepts_recovering_run_before_ponr(self) -> None:
+        token, _, payload = self.create(key="create-api-recovering-pre-ponr")
+        objective_id = payload["data"]["target"]["id"]
+        plan_id, _, _ = self.seed_linked_run(
+            objective_id,
+            suffix="api-recovering-pre-ponr",
+            plan_status="RUNNING",
+            task_status="BLOCKED",
+            run_status="RECOVERING",
+        )
+
+        status, _, operation = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/cancel",
+            {},
+            key="cancel-api-recovering-pre-ponr",
+            csrf=token,
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(operation["data"]["result"]["raw_state"], "CANCEL_REQUESTED")
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                ).fetchone()[0],
+                "RUNNING",
+                "an active pre-PONR Recovery run must not be terminalized before cleanup",
             )
 
     def test_unknown_persisted_state_fails_closed(self) -> None:

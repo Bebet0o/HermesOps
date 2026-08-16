@@ -68,6 +68,12 @@ ACTIVE_RUN_STATUSES = {
     "COMMITTING",
     "RECOVERING",
 }
+HUMAN_GATE_ERROR = "waiting for human decision"
+HUMAN_GATE_DEFERRED_ERROR = (
+    "waiting for in-flight integration before human decision"
+)
+CANCELLATION_RECOVERY_ERROR = "cancellation cleanup requires recovery"
+CANCELLATION_PENDING_ERROR = "objective cancellation cleanup pending"
 
 
 class OrchestratorError(RuntimeError):
@@ -981,11 +987,41 @@ def refresh_plan_states(plan_id: str) -> None:
                 severity="INFO",
                 payload={},
             )
+        elif plan["last_error"] == HUMAN_GATE_DEFERRED_ERROR:
+            if plan_has_authorized_integration_in_flight(connection, plan_id):
+                connection.execute(
+                    """
+                    UPDATE orchestration_plans
+                    SET heartbeat_at = ?
+                    WHERE plan_id = ?
+                    """,
+                    (now, plan_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE orchestration_plans
+                    SET status = 'BLOCKED',
+                        heartbeat_at = ?,
+                        last_error = ?
+                    WHERE plan_id = ?
+                    """,
+                    (now, HUMAN_GATE_ERROR, plan_id),
+                )
+                add_event(
+                    connection,
+                    plan_id=plan_id,
+                    task_id=None,
+                    event_type="ORCHESTRATION_PLAN_BLOCKED_HUMAN",
+                    severity="WARNING",
+                    payload={"deferred": True},
+                )
         elif (
             plan["status"] == "BLOCKED"
             and plan["last_error"] in {
-                "waiting for human decision",
-                "cancellation cleanup requires recovery",
+                HUMAN_GATE_ERROR,
+                CANCELLATION_RECOVERY_ERROR,
+                CANCELLATION_PENDING_ERROR,
             }
         ):
             connection.execute(
@@ -1228,7 +1264,53 @@ def plan_is_waiting_human(
     return bool(
         row is not None
         and row["status"] == "BLOCKED"
-        and row["last_error"] == "waiting for human decision"
+        and row["last_error"] == HUMAN_GATE_ERROR
+    )
+
+
+def plan_has_pending_human_gate(
+    connection: sqlite3.Connection,
+    plan_id: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT last_error FROM orchestration_plans WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    return bool(
+        row is not None
+        and row["last_error"] == HUMAN_GATE_DEFERRED_ERROR
+    )
+
+
+def plan_has_authorized_integration_in_flight(
+    connection: sqlite3.Connection,
+    plan_id: str,
+) -> bool:
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM orchestration_tasks AS task
+                JOIN orchestration_attempts AS attempt
+                  ON attempt.orchestration_task_id=task.orchestration_task_id
+                JOIN runs AS run ON run.run_id=attempt.run_id
+                JOIN integration_executions AS integration
+                  ON integration.run_id=run.run_id
+                WHERE task.plan_id=?
+                  AND (
+                        run.status IN ('COMMITTING', 'RECOVERING')
+                        OR (
+                            run.status='COMPLETED'
+                            AND task.status='RUNNING'
+                        )
+                  )
+                  AND integration.decision='APPROVE'
+                  AND integration.status IN ('PREPARED', 'COMPLETED', 'FAILED')
+            )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
     )
 
 
@@ -1304,7 +1386,15 @@ def finish_task_success(
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         result_json = canonical_json(result)
-        if plan_is_waiting_human(connection, task["plan_id"]):
+        human_gate = plan_is_waiting_human(
+            connection,
+            task["plan_id"],
+        ) or plan_has_pending_human_gate(connection, task["plan_id"])
+        authorized_integration = bool(
+            result.get("kind") == "PIPELINE"
+            and result.get("integration", {}).get("integrated")
+        )
+        if human_gate and not authorized_integration:
             finish_running_task_blocked_by_human_gate(
                 connection,
                 task,
@@ -1367,6 +1457,82 @@ def finish_task_waiting_human(
 
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        cancellation_requested = bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM objective_queue
+                    WHERE plan_id=?
+                      AND status IN ('CANCEL_REQUESTED', 'CANCELLED')
+                )
+                """,
+                (task["plan_id"],),
+            ).fetchone()[0]
+        )
+        if cancellation_requested:
+            connection.execute(
+                """
+                UPDATE orchestration_attempts
+                SET status='COMPLETED', result_json=?, heartbeat_at=?, finished_at=?
+                WHERE attempt_id=? AND status='RUNNING'
+                """,
+                (result_json, now, now, attempt_id),
+            )
+            connection.execute(
+                """
+                UPDATE orchestration_tasks
+                SET status='BLOCKED',
+                    result_json=?,
+                    failure_reason=CASE
+                        WHEN failure_reason=? THEN failure_reason
+                        ELSE ?
+                    END,
+                    heartbeat_at=?, finished_at=?
+                WHERE orchestration_task_id=?
+                  AND status IN ('RUNNING', 'BLOCKED')
+                """,
+                (
+                    result_json,
+                    CANCELLATION_RECOVERY_ERROR,
+                    CANCELLATION_PENDING_ERROR,
+                    now,
+                    now,
+                    task["orchestration_task_id"],
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status='BLOCKED',
+                    heartbeat_at=?,
+                    last_error=CASE
+                        WHEN last_error=? THEN last_error
+                        ELSE ?
+                    END
+                WHERE plan_id=?
+                  AND status IN ('READY', 'RUNNING', 'BLOCKED')
+                """,
+                (
+                    now,
+                    CANCELLATION_RECOVERY_ERROR,
+                    CANCELLATION_PENDING_ERROR,
+                    task["plan_id"],
+                ),
+            )
+            add_event(
+                connection,
+                plan_id=task["plan_id"],
+                task_id=task["orchestration_task_id"],
+                event_type="ORCHESTRATION_HUMAN_GATE_SUPERSEDED_BY_CANCELLATION",
+                severity="WARNING",
+                payload={"attempt_id": attempt_id},
+            )
+            connection.commit()
+            return
+        deferred = plan_has_authorized_integration_in_flight(
+            connection,
+            task["plan_id"],
+        )
         connection.execute(
             """
             UPDATE orchestration_attempts
@@ -1387,7 +1553,7 @@ def finish_task_waiting_human(
                     WHEN orchestration_task_id = ? THEN ?
                     ELSE result_json
                 END,
-                failure_reason = 'waiting for human decision',
+                failure_reason = ?,
                 heartbeat_at = ?,
                 finished_at = ?
             WHERE plan_id = ?
@@ -1402,30 +1568,43 @@ def finish_task_waiting_human(
             (
                 task["orchestration_task_id"],
                 result_json,
+                HUMAN_GATE_ERROR,
                 now,
                 now,
                 task["plan_id"],
                 task["orchestration_task_id"],
             ),
         )
-        connection.execute(
-            """
-            UPDATE orchestration_plans
-            SET status = 'BLOCKED',
-                heartbeat_at = ?,
-                last_error = 'waiting for human decision'
-            WHERE plan_id = ?
-              AND status IN ('READY', 'RUNNING', 'BLOCKED')
-            """,
-            (now, task["plan_id"]),
-        )
+        if deferred:
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET heartbeat_at = ?,
+                    last_error = ?
+                WHERE plan_id = ?
+                  AND status IN ('READY', 'RUNNING')
+                """,
+                (now, HUMAN_GATE_DEFERRED_ERROR, task["plan_id"]),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'BLOCKED',
+                    heartbeat_at = ?,
+                    last_error = ?
+                WHERE plan_id = ?
+                  AND status IN ('READY', 'RUNNING', 'BLOCKED')
+                """,
+                (now, HUMAN_GATE_ERROR, task["plan_id"]),
+            )
         add_event(
             connection,
             plan_id=task["plan_id"],
             task_id=task["orchestration_task_id"],
             event_type="ORCHESTRATION_TASK_BLOCKED_HUMAN",
             severity="WARNING",
-            payload={"attempt_id": attempt_id},
+            payload={"attempt_id": attempt_id, "deferred": deferred},
         )
         connection.commit()
 
@@ -1532,6 +1711,42 @@ def mark_cancellation_cleanup_recovery(run_id: str, reason: str) -> bool:
             """,
             (now, run_id),
         )
+        connection.execute(
+            """
+            UPDATE approvals
+            SET status='CANCELLED', resolved_at=COALESCE(resolved_at, ?)
+            WHERE run_id=? AND status='PENDING'
+            """,
+            (now, run_id),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status='BLOCKED', failure_reason=?, heartbeat_at=?, finished_at=?
+            WHERE orchestration_task_id IN (
+                SELECT orchestration_task_id
+                FROM orchestration_attempts
+                WHERE run_id=?
+            )
+              AND status IN ('PENDING', 'READY', 'RUNNING', 'BLOCKED')
+            """,
+            (CANCELLATION_RECOVERY_ERROR, now, now, run_id),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_plans
+            SET status='BLOCKED', heartbeat_at=?, last_error=?
+            WHERE plan_id IN (
+                SELECT task.plan_id
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id=attempt.orchestration_task_id
+                WHERE attempt.run_id=?
+            )
+              AND status IN ('READY', 'RUNNING', 'BLOCKED')
+            """,
+            (now, CANCELLATION_RECOVERY_ERROR, run_id),
+        )
         attempt = connection.execute(
             """
             SELECT task.plan_id, task.orchestration_task_id
@@ -1608,6 +1823,30 @@ def rollback_run_best_effort(run_id: str | None, timeout: int) -> bool:
         return mark_cancellation_cleanup_recovery(run_id, str(error))
 
 
+def cleanup_cancel_requested_human_runs(timeout: int) -> None:
+    with connect() as connection:
+        run_ids = [
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT DISTINCT run.run_id
+                FROM objective_queue AS objective
+                JOIN orchestration_tasks AS task
+                  ON task.plan_id=objective.plan_id
+                JOIN orchestration_attempts AS attempt
+                  ON attempt.orchestration_task_id=task.orchestration_task_id
+                JOIN runs AS run ON run.run_id=attempt.run_id
+                WHERE objective.status='CANCEL_REQUESTED'
+                  AND run.status='WAITING_HUMAN'
+                ORDER BY run.run_id
+                """
+            ).fetchall()
+        ]
+
+    for run_id in run_ids:
+        rollback_run_best_effort(run_id, timeout)
+
+
 def finish_task_failure(
     task: sqlite3.Row,
     attempt_id: str,
@@ -1630,7 +1869,10 @@ def finish_task_failure(
             connection.rollback()
             return
 
-        if plan_is_waiting_human(connection, task["plan_id"]):
+        if (
+            plan_is_waiting_human(connection, task["plan_id"])
+            or plan_has_pending_human_gate(connection, task["plan_id"])
+        ):
             finish_running_task_blocked_by_human_gate(
                 connection,
                 task,
@@ -3546,6 +3788,9 @@ def daemon_loop(arguments: argparse.Namespace) -> None:
 
         while not stop_event.is_set():
             update_instance(instance_id)
+            cleanup_cancel_requested_human_runs(
+                config["command_timeout_seconds"]
+            )
             synchronize_objective_states()
 
             completed_planning = [
