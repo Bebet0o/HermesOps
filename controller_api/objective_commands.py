@@ -427,6 +427,30 @@ class ObjectiveCommandStore:
         )
 
     @staticmethod
+    def _integration_point_of_no_return(
+        connection: sqlite3.Connection,
+        plan_id: str | None,
+    ) -> bool:
+        if plan_id is None:
+            return False
+        return bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM orchestration_attempts AS attempt
+                    JOIN orchestration_tasks AS task
+                      ON task.orchestration_task_id = attempt.orchestration_task_id
+                    JOIN runs AS run ON run.run_id = attempt.run_id
+                    WHERE task.plan_id = ?
+                      AND run.status IN ('COMMITTING', 'COMPLETED')
+                )
+                """,
+                (plan_id,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
     def _cancel_plan(connection: sqlite3.Connection, plan_id: str | None, now: str) -> None:
         if plan_id is None:
             return
@@ -901,6 +925,15 @@ class ObjectiveCommandStore:
                 else:
                     if old in TERMINAL_STATUSES:
                         raise ControllerError(409, "objective_terminal", "Objective is terminal")
+                    if self._integration_point_of_no_return(
+                        connection,
+                        row["plan_id"],
+                    ):
+                        raise ControllerError(
+                            409,
+                            "objective_integration_committed",
+                            "Objective passed the integration point of no return",
+                        )
                     running = self._running_task_count(connection, row["plan_id"])
                     new = "CANCEL_REQUESTED" if old == "PLANNING" or running else "CANCELLED"
                     self._cancel_plan(connection, row["plan_id"], now)

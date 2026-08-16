@@ -590,6 +590,38 @@ def validate_owner(
         fail("Project lock does not belong to the run project")
 
 
+def objective_status_for_run(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> str | None:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT objective.objective_id, objective.status
+        FROM orchestration_attempts AS attempt
+        JOIN orchestration_tasks AS task
+          ON task.orchestration_task_id = attempt.orchestration_task_id
+        JOIN objective_queue AS objective
+          ON objective.plan_id = task.plan_id
+        WHERE attempt.run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    if len(rows) > 1:
+        fail("Run is linked to multiple objectives")
+    return str(rows[0]["status"]) if rows else None
+
+
+def cancelled_integration_result(run_id: str) -> dict[str, Any]:
+    return {
+        "integration_id": None,
+        "run_id": run_id,
+        "action": "CANCEL",
+        "status": "CANCELLED",
+        "integrated": False,
+        "reason_code": "objective_cancel_requested",
+    }
+
+
 def record_non_integration(
     *,
     run: sqlite3.Row,
@@ -865,6 +897,16 @@ def integrate_approved(
         if current_run["status"] != "REVIEWING":
             connection.rollback()
             fail(f"Run is no longer REVIEWING: {current_run['status']}")
+
+        # This BEGIN IMMEDIATE transaction serializes cancellation with the
+        # authoritative transition from REVIEWING to COMMITTING. A cancelled
+        # objective never receives a PREPARED integration record.
+        if objective_status_for_run(connection, run["run_id"]) in {
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+        }:
+            connection.rollback()
+            return cancelled_integration_result(run["run_id"])
 
         duplicate = connection.execute(
             """

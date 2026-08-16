@@ -981,6 +981,18 @@ def refresh_plan_states(plan_id: str) -> None:
                 severity="INFO",
                 payload={},
             )
+        elif (
+            plan["status"] == "BLOCKED"
+            and plan["last_error"] == "waiting for human decision"
+        ):
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET heartbeat_at = ?
+                WHERE plan_id = ?
+                """,
+                (now, plan_id),
+            )
         elif any(
             status in {"FAILED", "BLOCKED", "CANCELLED"}
             for status in statuses
@@ -1247,6 +1259,79 @@ def finish_task_success(
             task_id=task["orchestration_task_id"],
             event_type="ORCHESTRATION_TASK_COMPLETED",
             severity="INFO",
+            payload={"attempt_id": attempt_id},
+        )
+        connection.commit()
+
+
+def finish_task_waiting_human(
+    task: sqlite3.Row,
+    attempt_id: str,
+    result: dict[str, Any],
+) -> None:
+    now = utc_now()
+    result_json = canonical_json(result)
+
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            UPDATE orchestration_attempts
+            SET status = 'COMPLETED',
+                result_json = ?,
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE attempt_id = ?
+              AND status = 'RUNNING'
+            """,
+            (result_json, now, now, attempt_id),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status = 'BLOCKED',
+                result_json = CASE
+                    WHEN orchestration_task_id = ? THEN ?
+                    ELSE result_json
+                END,
+                failure_reason = 'waiting for human decision',
+                heartbeat_at = ?,
+                finished_at = ?
+            WHERE plan_id = ?
+              AND (
+                    status IN ('PENDING', 'READY')
+                    OR (
+                        orchestration_task_id = ?
+                        AND status = 'RUNNING'
+                    )
+              )
+            """,
+            (
+                task["orchestration_task_id"],
+                result_json,
+                now,
+                now,
+                task["plan_id"],
+                task["orchestration_task_id"],
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_plans
+            SET status = 'BLOCKED',
+                heartbeat_at = ?,
+                last_error = 'waiting for human decision'
+            WHERE plan_id = ?
+              AND status IN ('READY', 'RUNNING', 'BLOCKED')
+            """,
+            (now, task["plan_id"]),
+        )
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task["orchestration_task_id"],
+            event_type="ORCHESTRATION_TASK_BLOCKED_HUMAN",
+            severity="WARNING",
             payload={"attempt_id": attempt_id},
         )
         connection.commit()
@@ -1811,6 +1896,33 @@ def execute_pipeline(
             review_execution_id=reviewer["execution_id"],
         )
 
+        # Avoid review-to-integration work after cancellation. The integrator
+        # repeats this check transactionally; this early barrier is not the
+        # authoritative race protection.
+        if objective_cancellation_requested(task["plan_id"]):
+            integration = {
+                "integration_id": None,
+                "run_id": run_id,
+                "action": "CANCEL",
+                "status": "CANCELLED",
+                "integrated": False,
+                "reason_code": "objective_cancel_requested",
+            }
+            rollback_run_best_effort(
+                run_id,
+                config["command_timeout_seconds"],
+            )
+            return {
+                "kind": "PIPELINE",
+                "run_id": run_id,
+                "worker": worker,
+                "submitted": submitted,
+                "reviewer": reviewer,
+                "review_transport_failures": review_transport_failures,
+                "reviewer_cleanup": reviewer_cleanup,
+                "integration": integration,
+            }
+
         integration = run_json(
             [
                 str(INTEGRATOR),
@@ -1822,10 +1934,49 @@ def execute_pipeline(
             ],
             timeout=config["command_timeout_seconds"],
         )
-        set_attempt_links(
-            attempt_id,
-            integration_id=integration["integration_id"],
-        )
+        if integration.get("integration_id") is not None:
+            set_attempt_links(
+                attempt_id,
+                integration_id=integration["integration_id"],
+            )
+
+        if (
+            integration.get("action") == "CANCEL"
+            and integration.get("status") == "CANCELLED"
+            and not integration.get("integrated")
+        ):
+            rollback_run_best_effort(
+                run_id,
+                config["command_timeout_seconds"],
+            )
+            return {
+                "kind": "PIPELINE",
+                "run_id": run_id,
+                "worker": worker,
+                "submitted": submitted,
+                "reviewer": reviewer,
+                "review_transport_failures": review_transport_failures,
+                "reviewer_cleanup": reviewer_cleanup,
+                "integration": integration,
+            }
+
+        # A human gate is a stable operational outcome, not a technical
+        # pipeline failure. Returning it bypasses the exception rollback path.
+        if (
+            integration.get("action") == "BLOCK_HUMAN"
+            and integration.get("status") == "BLOCKED"
+            and not integration.get("integrated")
+        ):
+            return {
+                "kind": "PIPELINE",
+                "run_id": run_id,
+                "worker": worker,
+                "submitted": submitted,
+                "reviewer": reviewer,
+                "review_transport_failures": review_transport_failures,
+                "reviewer_cleanup": reviewer_cleanup,
+                "integration": integration,
+            }
 
         if integration.get("status") != "COMPLETED" or not integration.get("integrated"):
             fail(
@@ -1908,7 +2059,13 @@ def execute_task(
         else:
             fail(f"Unhandled task kind: {kind}")
 
-        finish_task_success(task, attempt_id, result)
+        if (
+            result.get("kind") == "PIPELINE"
+            and result.get("integration", {}).get("action") == "BLOCK_HUMAN"
+        ):
+            finish_task_waiting_human(task, attempt_id, result)
+        else:
+            finish_task_success(task, attempt_id, result)
     except Exception as error:
         finish_task_failure(task, attempt_id, str(error))
     finally:
@@ -2350,7 +2507,7 @@ def next_queued_objective() -> dict[str, Any] | None:
     with connect() as connection:
         row = connection.execute(
             """
-            SELECT objective_id, source, priority, created_at
+            SELECT objective_id, source, priority, created_at, plan_id
             FROM objective_queue
             WHERE status = 'QUEUED'
               AND not_before <= ?
@@ -2362,7 +2519,7 @@ def next_queued_objective() -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def promote_declarative_objective(objective_id: str) -> str | None:
+def promote_planned_objective(objective_id: str) -> str | None:
     now = utc_now()
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -2374,7 +2531,7 @@ def promote_declarative_objective(objective_id: str) -> str | None:
               ON plan.plan_id = objective.plan_id
             WHERE objective.objective_id = ?
               AND objective.status = 'QUEUED'
-              AND objective.source IN ('DECLARATIVE', 'TEST')
+              AND objective.source IN ('AI', 'DECLARATIVE', 'TEST')
               AND objective.not_before <= ?
             """,
             (objective_id, now),
@@ -2527,6 +2684,22 @@ def reserve_ai_objective(
         )
         connection.commit()
         return dict(row), attempt_id
+
+
+def objective_cancellation_requested(plan_id: str) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT status
+            FROM objective_queue
+            WHERE plan_id = ?
+            """,
+            (plan_id,),
+        ).fetchone()
+    return row is not None and row["status"] in {
+        "CANCEL_REQUESTED",
+        "CANCELLED",
+    }
 
 
 def finish_objective_planning_success(
@@ -3047,7 +3220,10 @@ def daemon_loop(arguments: argparse.Namespace) -> None:
                 if queued is None:
                     break
 
-                if queued["source"] == "AI":
+                # Only plan AI objectives that do not already own a plan.
+                # Resumed planned AI objectives follow the same promotion path
+                # as declarative plans and preserve plan identity/history.
+                if queued["source"] == "AI" and queued["plan_id"] is None:
                     # Preserve global priority: a high-priority AI objective
                     # is never overtaken by a lower-priority declarative one.
                     if planning_futures:
@@ -3069,7 +3245,7 @@ def daemon_loop(arguments: argparse.Namespace) -> None:
                     planning_futures[future] = objective["objective_id"]
                     continue
 
-                plan_id = promote_declarative_objective(
+                plan_id = promote_planned_objective(
                     queued["objective_id"]
                 )
                 if plan_id is None:

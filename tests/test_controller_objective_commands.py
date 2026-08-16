@@ -541,6 +541,82 @@ class ObjectiveCommandTest(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(state, "CANCEL_REQUESTED")
 
+    def test_cancel_rejects_committing_integration(self) -> None:
+        token, _, payload = self.create(key="create-committing-cancel")
+        objective_id = payload["data"]["target"]["id"]
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "INSERT INTO orchestration_plans(plan_id,status) "
+                "VALUES ('plan-committing','RUNNING')"
+            )
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING', plan_id='plan-committing' "
+                "WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO orchestration_tasks (
+                    orchestration_task_id, plan_id, task_key, kind, project_id,
+                    role_id, status, priority, instruction, acceptance_json,
+                    marker, max_attempts, attempt_count, result_json,
+                    failure_reason, created_at, started_at, heartbeat_at, finished_at
+                ) VALUES (
+                    'task-committing', 'plan-committing', 'pipeline', 'PIPELINE',
+                    'alpha', NULL, 'RUNNING', 100, 'test', '[]', 'DONE',
+                    1, 1, '{}', NULL, '2026-08-16T00:00:00.000Z',
+                    '2026-08-16T00:00:00.000Z',
+                    '2026-08-16T00:00:00.000Z', NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO runs (
+                    run_id, project_id, status, created_at, started_at,
+                    finished_at, heartbeat_at
+                ) VALUES (
+                    'run-committing', 'alpha', 'COMMITTING',
+                    '2026-08-16T00:00:00.000Z',
+                    '2026-08-16T00:00:00.000Z', NULL,
+                    '2026-08-16T00:00:00.000Z'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO orchestration_attempts (
+                    attempt_id, orchestration_task_id, attempt_number, status,
+                    executor_instance_id, run_id, worker_execution_id,
+                    review_execution_id, integration_id, result_json,
+                    failure_reason, started_at, heartbeat_at, finished_at
+                ) VALUES (
+                    'attempt-committing', 'task-committing', 1, 'RUNNING',
+                    NULL, 'run-committing', NULL, NULL, NULL, '{}', NULL,
+                    '2026-08-16T00:00:00.000Z',
+                    '2026-08-16T00:00:00.000Z', NULL
+                )
+                """
+            )
+            connection.commit()
+
+        status, _, problem = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/cancel",
+            {},
+            key="cancel-committing-integration",
+            csrf=token,
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(problem["code"], "objective_integration_committed")
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM objective_queue WHERE objective_id=?",
+                    (objective_id,),
+                ).fetchone()[0],
+                "RUNNING",
+            )
+
     def test_unknown_persisted_state_fails_closed(self) -> None:
         token, _, payload = self.create(key="create-invalid-state")
         objective_id = payload["data"]["target"]["id"]

@@ -267,6 +267,31 @@ def running_task_count(
     )
 
 
+def integration_point_of_no_return(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+) -> bool:
+    if plan_id is None:
+        return False
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id = attempt.orchestration_task_id
+                JOIN runs AS run
+                  ON run.run_id = attempt.run_id
+                WHERE task.plan_id = ?
+                  AND run.status IN ('COMMITTING', 'COMPLETED')
+            )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
+    )
+
+
 def cancel_plan_in_transaction(
     connection: sqlite3.Connection,
     plan_id: str | None,
@@ -525,6 +550,9 @@ def command_cancel(arguments: argparse.Namespace) -> None:
         if old in TERMINAL_STATUSES:
             connection.rollback()
             fail(f"Objective is terminal: {old}")
+        if integration_point_of_no_return(connection, row["plan_id"]):
+            connection.rollback()
+            fail("Objective passed the integration point of no return")
         running = running_task_count(connection, row["plan_id"])
         if old == "PLANNING" or running:
             new = "CANCEL_REQUESTED"
