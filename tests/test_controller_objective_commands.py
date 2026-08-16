@@ -517,6 +517,39 @@ class ObjectiveCommandTest(unittest.TestCase):
         self.assertEqual(state, "QUEUED")
         self.assertEqual(not_before, "2099-01-01T00:00:00.000Z")
 
+    def test_resume_completed_plan_converges_objective_to_completed(self) -> None:
+        token, _, payload = self.create(key="create-completed-resume")
+        objective_id = payload["data"]["target"]["id"]
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute(
+                "INSERT INTO orchestration_plans(plan_id,status) "
+                "VALUES ('plan-completed-resume','COMPLETED')"
+            )
+            connection.execute(
+                "UPDATE objective_queue SET status='PAUSED', "
+                "plan_id='plan-completed-resume' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+
+        status, _, operation = self.post(
+            f"/api/v1/objectives/{objective_id}/commands/resume",
+            {},
+            key="resume-completed-plan",
+            csrf=token,
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(operation["data"]["result"]["raw_state"], "COMPLETED")
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT status FROM objective_queue WHERE objective_id=?",
+                    (objective_id,),
+                ).fetchone()[0],
+                "COMPLETED",
+            )
+
     def test_pause_cannot_override_pending_cancellation(self) -> None:
         token, _, payload = self.create(key="create-cancel-pending")
         objective_id = payload["data"]["target"]["id"]

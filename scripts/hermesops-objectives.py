@@ -292,6 +292,16 @@ def integration_point_of_no_return(
     )
 
 
+def resumed_status_for_plan(plan_status: str | None) -> str:
+    if plan_status in {None, "DRAFT", "READY", "RUNNING"}:
+        return "QUEUED"
+    if plan_status == "BLOCKED":
+        return "RUNNING"
+    if plan_status in TERMINAL_STATUSES:
+        return plan_status
+    fail(f"Unsupported orchestration plan status during resume: {plan_status}")
+
+
 def cancel_plan_in_transaction(
     connection: sqlite3.Connection,
     plan_id: str | None,
@@ -502,7 +512,13 @@ def command_resume(arguments: argparse.Namespace) -> None:
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT status FROM objective_queue WHERE objective_id = ?",
+            """
+            SELECT objective.*, plan.status AS plan_status
+            FROM objective_queue AS objective
+            LEFT JOIN orchestration_plans AS plan
+              ON plan.plan_id = objective.plan_id
+            WHERE objective.objective_id = ?
+            """,
             (arguments.objective,),
         ).fetchone()
         if row is None:
@@ -511,25 +527,42 @@ def command_resume(arguments: argparse.Namespace) -> None:
         if row["status"] != "PAUSED":
             connection.rollback()
             fail("Objective can only resume from PAUSED")
+        if row["plan_id"] is not None and row["plan_status"] is None:
+            connection.rollback()
+            fail("Objective plan disappeared during resume")
+        new = resumed_status_for_plan(row["plan_status"])
+        terminal = new in TERMINAL_STATUSES
+        error = {
+            "FAILED": "linked orchestration plan failed",
+            "CANCELLED": "linked orchestration plan cancelled",
+        }.get(new)
         connection.execute(
             """
             UPDATE objective_queue
-            SET status = 'QUEUED',
+            SET status = ?,
                 not_before = ?,
                 heartbeat_at = ?,
                 paused_at = NULL,
-                finished_at = NULL,
-                last_error = NULL
+                finished_at = CASE WHEN ? THEN ? ELSE NULL END,
+                last_error = ?
             WHERE objective_id = ?
             """,
-            (now, now, arguments.objective),
+            (
+                new,
+                now,
+                now,
+                1 if terminal else 0,
+                now,
+                error,
+                arguments.objective,
+            ),
         )
         add_event(
             connection,
             objective_id=arguments.objective,
             event_type="OBJECTIVE_RESUMED",
             old_status="PAUSED",
-            new_status="QUEUED",
+            new_status=new,
         )
         connection.commit()
     print(json.dumps(objective_payload(arguments.objective), indent=2, sort_keys=True))

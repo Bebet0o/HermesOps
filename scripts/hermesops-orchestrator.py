@@ -983,7 +983,10 @@ def refresh_plan_states(plan_id: str) -> None:
             )
         elif (
             plan["status"] == "BLOCKED"
-            and plan["last_error"] == "waiting for human decision"
+            and plan["last_error"] in {
+                "waiting for human decision",
+                "cancellation cleanup requires recovery",
+            }
         ):
             connection.execute(
                 """
@@ -1214,6 +1217,83 @@ def set_attempt_links(
         connection.commit()
 
 
+def plan_is_waiting_human(
+    connection: sqlite3.Connection,
+    plan_id: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+        (plan_id,),
+    ).fetchone()
+    return bool(
+        row is not None
+        and row["status"] == "BLOCKED"
+        and row["last_error"] == "waiting for human decision"
+    )
+
+
+def finish_running_task_blocked_by_human_gate(
+    connection: sqlite3.Connection,
+    task: sqlite3.Row,
+    attempt_id: str,
+    *,
+    attempt_status: str,
+    result_json: str | None,
+    failure_reason: str | None,
+    now: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE orchestration_attempts
+        SET status = ?,
+            result_json = COALESCE(?, result_json),
+            failure_reason = ?,
+            heartbeat_at = ?,
+            finished_at = ?
+        WHERE attempt_id = ?
+          AND status = 'RUNNING'
+        """,
+        (
+            attempt_status,
+            result_json,
+            failure_reason,
+            now,
+            now,
+            attempt_id,
+        ),
+    )
+    connection.execute(
+        """
+        UPDATE orchestration_tasks
+        SET status = 'BLOCKED',
+            result_json = COALESCE(?, result_json),
+            failure_reason = 'waiting for human decision',
+            heartbeat_at = ?,
+            finished_at = ?
+        WHERE orchestration_task_id = ?
+          AND status = 'RUNNING'
+        """,
+        (
+            result_json,
+            now,
+            now,
+            task["orchestration_task_id"],
+        ),
+    )
+    add_event(
+        connection,
+        plan_id=task["plan_id"],
+        task_id=task["orchestration_task_id"],
+        event_type="ORCHESTRATION_TASK_BLOCKED_HUMAN",
+        severity="WARNING",
+        payload={
+            "attempt_id": attempt_id,
+            "parallel_gate": True,
+            "attempt_status": attempt_status,
+        },
+    )
+
+
 def finish_task_success(
     task: sqlite3.Row,
     attempt_id: str,
@@ -1223,6 +1303,19 @@ def finish_task_success(
 
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        result_json = canonical_json(result)
+        if plan_is_waiting_human(connection, task["plan_id"]):
+            finish_running_task_blocked_by_human_gate(
+                connection,
+                task,
+                attempt_id,
+                attempt_status="COMPLETED",
+                result_json=result_json,
+                failure_reason=None,
+                now=now,
+            )
+            connection.commit()
+            return
         connection.execute(
             """
             UPDATE orchestration_attempts
@@ -1233,7 +1326,7 @@ def finish_task_success(
             WHERE attempt_id = ?
               AND status = 'RUNNING'
             """,
-            (canonical_json(result), now, now, attempt_id),
+            (result_json, now, now, attempt_id),
         )
         connection.execute(
             """
@@ -1247,7 +1340,7 @@ def finish_task_success(
               AND status = 'RUNNING'
             """,
             (
-                canonical_json(result),
+                result_json,
                 now,
                 now,
                 task["orchestration_task_id"],
@@ -1337,9 +1430,135 @@ def finish_task_waiting_human(
         connection.commit()
 
 
-def rollback_run_best_effort(run_id: str | None, timeout: int) -> None:
+def finish_task_cancellation_recovery(
+    task: sqlite3.Row,
+    attempt_id: str,
+    result: dict[str, Any],
+) -> None:
+    now = utc_now()
+    result_json = canonical_json(result)
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            UPDATE orchestration_attempts
+            SET status='COMPLETED', result_json=?, heartbeat_at=?, finished_at=?
+            WHERE attempt_id=? AND status='RUNNING'
+            """,
+            (result_json, now, now, attempt_id),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_tasks
+            SET status='BLOCKED',
+                result_json=CASE WHEN orchestration_task_id=? THEN ? ELSE result_json END,
+                failure_reason='cancellation cleanup requires recovery',
+                heartbeat_at=?, finished_at=?
+            WHERE plan_id=?
+              AND (
+                    status IN ('PENDING', 'READY')
+                    OR (orchestration_task_id=? AND status='RUNNING')
+              )
+            """,
+            (
+                task["orchestration_task_id"],
+                result_json,
+                now,
+                now,
+                task["plan_id"],
+                task["orchestration_task_id"],
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE orchestration_plans
+            SET status='BLOCKED', heartbeat_at=?,
+                last_error='cancellation cleanup requires recovery'
+            WHERE plan_id=? AND status IN ('READY', 'RUNNING', 'BLOCKED')
+            """,
+            (now, task["plan_id"]),
+        )
+        add_event(
+            connection,
+            plan_id=task["plan_id"],
+            task_id=task["orchestration_task_id"],
+            event_type="ORCHESTRATION_CANCELLATION_RECOVERY_REQUIRED",
+            severity="ERROR",
+            payload={"attempt_id": attempt_id, "run_id": result.get("run_id")},
+        )
+        connection.commit()
+
+
+def mark_cancellation_cleanup_recovery(run_id: str, reason: str) -> bool:
+    now = utc_now()
+    with connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        run = connection.execute(
+            """
+            SELECT run.status,
+                   EXISTS (
+                       SELECT 1 FROM project_locks AS lock
+                       WHERE lock.run_id=run.run_id
+                   ) AS lock_present
+            FROM runs AS run
+            WHERE run.run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run is None:
+            connection.rollback()
+            return False
+        if run["status"] == "CANCELLED" and not run["lock_present"]:
+            connection.rollback()
+            return True
+        if run["status"] == "COMPLETED":
+            connection.rollback()
+            return False
+        connection.execute(
+            """
+            UPDATE integration_executions
+            SET status='FAILED', failure_reason=COALESCE(failure_reason, ?),
+                finished_at=COALESCE(finished_at, ?)
+            WHERE run_id=? AND status='PREPARED'
+            """,
+            (reason, now, run_id),
+        )
+        connection.execute(
+            """
+            UPDATE runs
+            SET status='RECOVERING', recovery_decision='ROLLBACK_SAFE',
+                heartbeat_at=?
+            WHERE run_id=?
+            """,
+            (now, run_id),
+        )
+        attempt = connection.execute(
+            """
+            SELECT task.plan_id, task.orchestration_task_id
+            FROM orchestration_attempts AS attempt
+            JOIN orchestration_tasks AS task
+              ON task.orchestration_task_id=attempt.orchestration_task_id
+            WHERE attempt.run_id=?
+            LIMIT 1
+            """,
+            (run_id,),
+        ).fetchone()
+        if attempt is not None:
+            add_event(
+                connection,
+                plan_id=attempt["plan_id"],
+                task_id=attempt["orchestration_task_id"],
+                event_type="ORCHESTRATION_CANCELLATION_ROLLBACK_FAILED",
+                severity="ERROR",
+                payload={"run_id": run_id, "reason": reason},
+            )
+        connection.commit()
+    return False
+
+
+def rollback_run_best_effort(run_id: str | None, timeout: int) -> bool:
     if not run_id:
-        return
+        return True
 
     try:
         with connect() as connection:
@@ -1348,14 +1567,45 @@ def rollback_run_best_effort(run_id: str | None, timeout: int) -> None:
                 (run_id,),
             ).fetchone()
 
-        if run is not None and run["status"] in ACTIVE_RUN_STATUSES | {"FAILED"}:
-            run_command(
-                [str(TRANSACTION), "rollback", "--run", run_id],
-                timeout=timeout,
-                check=False,
+        if run is None or run["status"] not in ACTIVE_RUN_STATUSES | {"FAILED"}:
+            return True
+        result = run_command(
+            [str(TRANSACTION), "rollback", "--run", run_id],
+            timeout=timeout,
+            check=False,
+        )
+        if result is None:
+            return True
+        if result.returncode == 0:
+            with connect() as connection:
+                final = connection.execute(
+                    """
+                    SELECT run.status,
+                           EXISTS (
+                               SELECT 1 FROM project_locks AS lock
+                               WHERE lock.run_id=run.run_id
+                           ) AS lock_present
+                    FROM runs AS run
+                    WHERE run.run_id=?
+                    """,
+                    (run_id,),
+                ).fetchone()
+            if (
+                final is not None
+                and final["status"] == "CANCELLED"
+                and not final["lock_present"]
+            ):
+                return True
+            return mark_cancellation_cleanup_recovery(
+                run_id,
+                "rollback reported success without terminal cleanup",
             )
-    except Exception:
-        return
+        return mark_cancellation_cleanup_recovery(
+            run_id,
+            f"rollback exited with status {result.returncode}",
+        )
+    except Exception as error:
+        return mark_cancellation_cleanup_recovery(run_id, str(error))
 
 
 def finish_task_failure(
@@ -1378,6 +1628,19 @@ def finish_task_failure(
 
         if current is None:
             connection.rollback()
+            return
+
+        if plan_is_waiting_human(connection, task["plan_id"]):
+            finish_running_task_blocked_by_human_gate(
+                connection,
+                task,
+                attempt_id,
+                attempt_status="FAILED",
+                result_json=None,
+                failure_reason=error,
+                now=now,
+            )
+            connection.commit()
             return
 
         connection.execute(
@@ -1908,10 +2171,38 @@ def execute_pipeline(
                 "integrated": False,
                 "reason_code": "objective_cancel_requested",
             }
-            rollback_run_best_effort(
+            cleanup_complete = rollback_run_best_effort(
                 run_id,
                 config["command_timeout_seconds"],
             )
+            if cleanup_complete is False:
+                integration["status"] = "RECOVERING"
+                integration["cleanup_completed"] = False
+            return {
+                "kind": "PIPELINE",
+                "run_id": run_id,
+                "worker": worker,
+                "submitted": submitted,
+                "reviewer": reviewer,
+                "review_transport_failures": review_transport_failures,
+                "reviewer_cleanup": reviewer_cleanup,
+                "integration": integration,
+            }
+
+        if plan_waiting_human_requested(task["plan_id"]):
+            integration = {
+                "integration_id": None,
+                "run_id": run_id,
+                "action": "BLOCK_HUMAN",
+                "status": "BLOCKED",
+                "integrated": False,
+                "reason_code": "plan_waiting_human",
+            }
+            cleanup_complete = rollback_run_best_effort(
+                run_id,
+                config["command_timeout_seconds"],
+            )
+            integration["cleanup_completed"] = cleanup_complete is not False
             return {
                 "kind": "PIPELINE",
                 "run_id": run_id,
@@ -1945,10 +2236,14 @@ def execute_pipeline(
             and integration.get("status") == "CANCELLED"
             and not integration.get("integrated")
         ):
-            rollback_run_best_effort(
+            cleanup_complete = rollback_run_best_effort(
                 run_id,
                 config["command_timeout_seconds"],
             )
+            if cleanup_complete is False:
+                integration = dict(integration)
+                integration["status"] = "RECOVERING"
+                integration["cleanup_completed"] = False
             return {
                 "kind": "PIPELINE",
                 "run_id": run_id,
@@ -1967,6 +2262,13 @@ def execute_pipeline(
             and integration.get("status") == "BLOCKED"
             and not integration.get("integrated")
         ):
+            if integration.get("reason_code") == "plan_waiting_human":
+                cleanup_complete = rollback_run_best_effort(
+                    run_id,
+                    config["command_timeout_seconds"],
+                )
+                integration = dict(integration)
+                integration["cleanup_completed"] = cleanup_complete is not False
             return {
                 "kind": "PIPELINE",
                 "run_id": run_id,
@@ -2060,6 +2362,12 @@ def execute_task(
             fail(f"Unhandled task kind: {kind}")
 
         if (
+            result.get("kind") == "PIPELINE"
+            and result.get("integration", {}).get("action") == "CANCEL"
+            and result.get("integration", {}).get("status") == "RECOVERING"
+        ):
+            finish_task_cancellation_recovery(task, attempt_id, result)
+        elif (
             result.get("kind") == "PIPELINE"
             and result.get("integration", {}).get("action") == "BLOCK_HUMAN"
         ):
@@ -2370,6 +2678,30 @@ def objective_running_tasks(
     )
 
 
+def cancellation_cleanup_pending(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+) -> bool:
+    if plan_id is None:
+        return False
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id=attempt.orchestration_task_id
+                JOIN runs AS run ON run.run_id=attempt.run_id
+                WHERE task.plan_id=?
+                  AND run.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+            )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
+    )
+
+
 def cancel_objective_plan(
     connection: sqlite3.Connection,
     plan_id: str | None,
@@ -2443,12 +2775,16 @@ def synchronize_objective_states() -> None:
             new: str | None = None
             error: str | None = None
 
-            if old == "PAUSE_REQUESTED" and running == 0:
+            if old == "CANCEL_REQUESTED":
+                if running == 0 and not cancellation_cleanup_pending(
+                    connection,
+                    plan_id,
+                ):
+                    cancel_objective_plan(connection, plan_id, now)
+                    new = "CANCELLED"
+                    error = "cancelled by operator"
+            elif old == "PAUSE_REQUESTED" and running == 0:
                 new = "PAUSED"
-            elif old == "CANCEL_REQUESTED" and running == 0:
-                cancel_objective_plan(connection, plan_id, now)
-                new = "CANCELLED"
-                error = "cancelled by operator"
             elif row["plan_status"] == "COMPLETED":
                 new = "COMPLETED"
             elif row["plan_status"] == "FAILED":
@@ -2540,7 +2876,8 @@ def promote_planned_objective(objective_id: str) -> str | None:
             connection.rollback()
             return None
 
-        if row["plan_status"] == "DRAFT":
+        plan_status = str(row["plan_status"])
+        if plan_status == "DRAFT":
             connection.execute(
                 """
                 UPDATE orchestration_plans
@@ -2551,22 +2888,36 @@ def promote_planned_objective(objective_id: str) -> str | None:
                 """,
                 (now, row["plan_id"]),
             )
-        elif row["plan_status"] not in {"READY", "RUNNING"}:
+            new = "RUNNING"
+            error = None
+        elif plan_status in {"READY", "RUNNING", "BLOCKED"}:
+            new = "RUNNING"
+            error = None
+        elif plan_status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            new = plan_status
+            error = {
+                "FAILED": "linked orchestration plan failed",
+                "CANCELLED": "linked orchestration plan cancelled",
+            }.get(new)
+        else:
             connection.rollback()
             return None
 
         updated = connection.execute(
             """
             UPDATE objective_queue
-            SET status = 'RUNNING',
+            SET status = ?,
                 started_at = COALESCE(started_at, ?),
                 heartbeat_at = ?,
-                finished_at = NULL,
+                finished_at = CASE
+                    WHEN ? IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN ?
+                    ELSE NULL
+                END,
                 paused_at = NULL,
-                last_error = NULL
+                last_error = ?
             WHERE objective_id = ? AND status = 'QUEUED'
             """,
-            (now, now, objective_id),
+            (new, now, now, new, now, error, objective_id),
         ).rowcount
         if updated != 1:
             connection.rollback()
@@ -2574,9 +2925,13 @@ def promote_planned_objective(objective_id: str) -> str | None:
         add_objective_event(
             connection,
             objective_id=objective_id,
-            event_type="OBJECTIVE_DISPATCHED",
+            event_type=(
+                "OBJECTIVE_DISPATCHED"
+                if new == "RUNNING"
+                else f"OBJECTIVE_{new}"
+            ),
             old_status="QUEUED",
-            new_status="RUNNING",
+            new_status=new,
             payload={"plan_id": row["plan_id"]},
         )
         connection.commit()
@@ -2700,6 +3055,11 @@ def objective_cancellation_requested(plan_id: str) -> bool:
         "CANCEL_REQUESTED",
         "CANCELLED",
     }
+
+
+def plan_waiting_human_requested(plan_id: str) -> bool:
+    with connect() as connection:
+        return plan_is_waiting_human(connection, plan_id)
 
 
 def finish_objective_planning_success(

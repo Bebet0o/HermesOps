@@ -611,6 +611,30 @@ def objective_status_for_run(
     return str(rows[0]["status"]) if rows else None
 
 
+def run_plan_is_waiting_human(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> bool:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT plan.plan_id, plan.status, plan.last_error
+        FROM orchestration_attempts AS attempt
+        JOIN orchestration_tasks AS task
+          ON task.orchestration_task_id = attempt.orchestration_task_id
+        JOIN orchestration_plans AS plan ON plan.plan_id = task.plan_id
+        WHERE attempt.run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    if len(rows) > 1:
+        fail("Run is linked to multiple orchestration plans")
+    return bool(
+        rows
+        and rows[0]["status"] == "BLOCKED"
+        and rows[0]["last_error"] == "waiting for human decision"
+    )
+
+
 def cancelled_integration_result(run_id: str) -> dict[str, Any]:
     return {
         "integration_id": None,
@@ -619,6 +643,17 @@ def cancelled_integration_result(run_id: str) -> dict[str, Any]:
         "status": "CANCELLED",
         "integrated": False,
         "reason_code": "objective_cancel_requested",
+    }
+
+
+def blocked_human_integration_result(run_id: str) -> dict[str, Any]:
+    return {
+        "integration_id": None,
+        "run_id": run_id,
+        "action": "BLOCK_HUMAN",
+        "status": "BLOCKED",
+        "integrated": False,
+        "reason_code": "plan_waiting_human",
     }
 
 
@@ -645,6 +680,17 @@ def record_non_integration(
         if current_run["status"] != "REVIEWING":
             connection.rollback()
             fail(f"Run is no longer REVIEWING: {current_run['status']}")
+
+        if objective_status_for_run(connection, run["run_id"]) in {
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+        }:
+            connection.rollback()
+            return cancelled_integration_result(run["run_id"])
+
+        if run_plan_is_waiting_human(connection, run["run_id"]):
+            connection.rollback()
+            return blocked_human_integration_result(run["run_id"])
 
         if action == "REJECT":
             status = "REJECTED"
@@ -907,6 +953,10 @@ def integrate_approved(
         }:
             connection.rollback()
             return cancelled_integration_result(run["run_id"])
+
+        if run_plan_is_waiting_human(connection, run["run_id"]):
+            connection.rollback()
+            return blocked_human_integration_result(run["run_id"])
 
         duplicate = connection.execute(
             """

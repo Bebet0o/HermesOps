@@ -403,6 +403,138 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             "READY",
         )
 
+    def test_resume_of_completed_ai_plan_converges_without_starving_queue(self) -> None:
+        plan_id = ORCHESTRATOR.insert_plan(
+            self._plan(self._task("last_task")),
+            source="AI",
+            initial_status="READY",
+        )
+        objective_id = self._insert_objective(source="AI", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks WHERE plan_id=?",
+                (plan_id,),
+            )[0]
+        )
+        attempt_id, _, task = ORCHESTRATOR.reserve_attempt(
+            task_id,
+            instance_id="test-instance",
+        )
+
+        self._command(OBJECTIVES.command_pause, objective_id)
+        ORCHESTRATOR.finish_task_success(task, attempt_id, {"kind": "NOOP"})
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        ORCHESTRATOR.synchronize_objective_states()
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "WHERE objective.objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            ("PAUSED", "COMPLETED"),
+        )
+
+        following_id = self._insert_objective(source="AI")
+        self._command(OBJECTIVES.command_resume, objective_id)
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, plan_id, planning_attempt_count "
+                    "FROM objective_queue WHERE objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            ("COMPLETED", plan_id, 0),
+            "a completed plan must converge instead of returning to QUEUED",
+        )
+        self.assertEqual(
+            ORCHESTRATOR.next_queued_objective()["objective_id"],
+            following_id,
+            "a non-promotable resumed objective must not starve later work",
+        )
+
+    def test_resume_has_deterministic_semantics_for_every_plan_status(self) -> None:
+        expected_objective_status = {
+            "DRAFT": "QUEUED",
+            "READY": "QUEUED",
+            "RUNNING": "QUEUED",
+            "BLOCKED": "RUNNING",
+            "COMPLETED": "COMPLETED",
+            "FAILED": "FAILED",
+            "CANCELLED": "CANCELLED",
+        }
+        for plan_status, expected in expected_objective_status.items():
+            with self.subTest(plan_status=plan_status):
+                plan_id = ORCHESTRATOR.insert_plan(
+                    self._plan(self._task(f"task_{plan_status.lower()}")),
+                    source="TEST",
+                    initial_status="DRAFT",
+                )
+                objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE orchestration_plans SET status=? WHERE plan_id=?",
+                        (plan_status, plan_id),
+                    )
+                    connection.execute(
+                        "UPDATE objective_queue SET status='PAUSED' WHERE objective_id=?",
+                        (objective_id,),
+                    )
+                    connection.commit()
+
+                self._command(OBJECTIVES.command_resume, objective_id)
+
+                self.assertEqual(
+                    self._row(
+                        "SELECT status FROM objective_queue WHERE objective_id=?",
+                        (objective_id,),
+                    )[0],
+                    expected,
+                )
+
+    def test_legacy_queued_terminal_plan_is_healed_before_next_objective(self) -> None:
+        plan_id = ORCHESTRATOR.insert_plan(
+            self._plan(self._task("legacy_completed")),
+            source="AI",
+            initial_status="DRAFT",
+        )
+        objective_id = self._insert_objective(source="AI", plan_id=plan_id)
+        following_id = self._insert_objective(source="AI")
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status='COMPLETED' WHERE plan_id=?",
+                (plan_id,),
+            )
+            connection.commit()
+
+        self.assertEqual(
+            ORCHESTRATOR.promote_planned_objective(objective_id),
+            plan_id,
+        )
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "COMPLETED",
+        )
+        self.assertEqual(
+            ORCHESTRATOR.next_queued_objective()["objective_id"],
+            following_id,
+        )
+
     def test_cancelled_objective_cannot_reserve_new_tasks_or_attempts(self) -> None:
         objective_id, plan_id, _, _ = self._create_running_plan()
         attempts_before = int(
@@ -437,6 +569,12 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             connection.commit()
 
         self._command(OBJECTIVES.command_cancel, objective_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE runs SET status='CANCELLED', finished_at=? WHERE run_id=?",
+                (NOW, "run-cancellation"),
+            )
+            connection.commit()
         ORCHESTRATOR.finish_task_success(task, attempt_id, {"kind": "PIPELINE"})
         ORCHESTRATOR.synchronize_objective_states()
 
@@ -620,9 +758,17 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             [],
             {},
         )
-        ORCHESTRATOR.rollback_run_best_effort = lambda called_run_id, timeout: (
+        def successful_rollback(called_run_id: str, timeout: int) -> bool:
             rollback_calls.append(called_run_id)
-        )
+            with contextlib.closing(self.connect()) as connection:
+                connection.execute(
+                    "UPDATE runs SET status='CANCELLED', finished_at=? WHERE run_id=?",
+                    (NOW, called_run_id),
+                )
+                connection.commit()
+            return True
+
+        ORCHESTRATOR.rollback_run_best_effort = successful_rollback
         try:
             result = ORCHESTRATOR.execute_pipeline(
                 task,
@@ -699,6 +845,12 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         self.assertIsNone(
             self._row("SELECT recovery_decision FROM runs WHERE run_id=?", (run_id,))[0]
         )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE runs SET status='CANCELLED', finished_at=? WHERE run_id=?",
+                (NOW, run_id),
+            )
+            connection.commit()
         ORCHESTRATOR.finish_task_success(task, attempt_id, result)
         ORCHESTRATOR.synchronize_objective_states()
         self.assertEqual(
@@ -761,6 +913,405 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         self.assertEqual(
             int(self._row("SELECT COUNT(*) FROM integration_executions")[0]),
             0,
+        )
+
+    def test_block_human_freezes_already_running_sibling_outcomes(self) -> None:
+        for sibling_outcome in ("success", "failure"):
+            with self.subTest(sibling_outcome=sibling_outcome):
+                _, plan_id, gate_attempt_id, gate_task = self._create_running_plan()
+                sibling_id = str(
+                    self._row(
+                        "SELECT orchestration_task_id FROM orchestration_tasks "
+                        "WHERE plan_id=? AND task_key='after_cancel'",
+                        (plan_id,),
+                    )[0]
+                )
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE orchestration_tasks SET max_attempts=2 "
+                        "WHERE orchestration_task_id=?",
+                        (sibling_id,),
+                    )
+                    connection.commit()
+                sibling_attempt_id, _, sibling_task = ORCHESTRATOR.reserve_attempt(
+                    sibling_id,
+                    instance_id="test-instance",
+                )
+
+                ORCHESTRATOR.finish_task_waiting_human(
+                    gate_task,
+                    gate_attempt_id,
+                    {
+                        "kind": "PIPELINE",
+                        "integration": {
+                            "action": "BLOCK_HUMAN",
+                            "status": "BLOCKED",
+                            "integrated": False,
+                        },
+                    },
+                )
+                if sibling_outcome == "success":
+                    ORCHESTRATOR.finish_task_success(
+                        sibling_task,
+                        sibling_attempt_id,
+                        {"kind": "NOOP"},
+                    )
+                else:
+                    ORCHESTRATOR.finish_task_failure(
+                        sibling_task,
+                        sibling_attempt_id,
+                        "parallel task failed after human gate",
+                    )
+
+                self.assertEqual(
+                    tuple(
+                        self._row(
+                            "SELECT plan.status, task.status "
+                            "FROM orchestration_plans AS plan "
+                            "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                            "WHERE plan.plan_id=? AND task.orchestration_task_id=?",
+                            (plan_id, sibling_id),
+                        )
+                    ),
+                    ("BLOCKED", "BLOCKED"),
+                    "an already-running sibling must not finish or retry past the gate",
+                )
+
+    def test_block_human_plan_rejects_direct_parallel_integration(self) -> None:
+        _, plan_id, gate_attempt_id, gate_task = self._create_running_plan()
+        sibling_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        sibling_attempt_id, _, _ = ORCHESTRATOR.reserve_attempt(
+            sibling_id,
+            instance_id="test-instance",
+        )
+        run_id = "run-parallel-after-human-gate"
+        self._insert_run(run_id, status="REVIEWING")
+        self._seed_human_review(run_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                (run_id, sibling_attempt_id),
+            )
+            connection.commit()
+            run = INTEGRATOR.get_run(connection, run_id)
+            review = connection.execute(
+                """
+                SELECT review.*, execution.execution_id AS review_execution_id
+                FROM review_results AS review
+                JOIN reviewer_executions AS execution
+                  ON execution.review_id=review.review_id
+                WHERE review.run_id=?
+                """,
+                (run_id,),
+            ).fetchone()
+
+        ORCHESTRATOR.finish_task_waiting_human(
+            gate_task,
+            gate_attempt_id,
+            {
+                "kind": "PIPELINE",
+                "integration": {
+                    "action": "BLOCK_HUMAN",
+                    "status": "BLOCKED",
+                    "integrated": False,
+                },
+            },
+        )
+        result = INTEGRATOR.integrate_approved(
+            run=run,
+            review=review,
+            owner=OWNER,
+            decision="APPROVE",
+            verdict="PASS",
+            evidence={
+                "repository": str(self.root / "repository"),
+                "worktree": str(self.root / "worktree"),
+                "main_before": "a" * 40,
+            },
+            transaction=None,
+        )
+
+        self.assertEqual(result["action"], "BLOCK_HUMAN")
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertFalse(result["integrated"])
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM integration_executions "
+                    "WHERE run_id=? AND status='PREPARED'",
+                    (run_id,),
+                )[0]
+            ),
+            0,
+        )
+        review_result = INTEGRATOR.record_non_integration(
+            run=run,
+            review=review,
+            owner=OWNER,
+            decision="REJECT",
+            verdict="FIX",
+            action="REJECT",
+            evidence={"main_before": "a" * 40},
+        )
+        self.assertEqual(review_result["action"], "BLOCK_HUMAN")
+        self.assertEqual(review_result["reason_code"], "plan_waiting_human")
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM integration_executions WHERE run_id=?",
+                    (run_id,),
+                )[0]
+            ),
+            0,
+            "a parallel review outcome must not create a new integration record",
+        )
+
+    def test_block_human_stops_parallel_pipeline_after_review(self) -> None:
+        _, plan_id, gate_attempt_id, gate_task = self._create_running_plan()
+        sibling_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        sibling_attempt_id, _, sibling_task = ORCHESTRATOR.reserve_attempt(
+            sibling_id,
+            instance_id="test-instance",
+        )
+        run_id = "run-parallel-review-gate"
+        self._insert_run(run_id, status="REVIEWING")
+        integration_calls: list[list[str]] = []
+        original_run_json = ORCHESTRATOR.run_json
+        original_reviewer = ORCHESTRATOR.launch_reviewer_with_transport_retry
+        original_rollback = ORCHESTRATOR.rollback_run_best_effort
+
+        def fake_run_json(arguments: list[str], *, timeout: int) -> dict[str, Any]:
+            command = Path(arguments[0]).name
+            action = arguments[1]
+            if command == "hermesops-transaction.py" and action == "begin":
+                return {"run_id": run_id}
+            if command == "hermesops-worker.py":
+                return {"execution_id": "worker-parallel-review", "exit_code": 0}
+            if command == "hermesops-transaction.py" and action == "submit":
+                return {"run_id": run_id, "status": "REVIEWING"}
+            if command == "hermesops-integrator.py":
+                integration_calls.append(arguments)
+                return {"status": "COMPLETED", "integrated": True}
+            raise AssertionError(arguments)
+
+        def reviewer_then_gate(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
+            ORCHESTRATOR.finish_task_waiting_human(
+                gate_task,
+                gate_attempt_id,
+                {
+                    "kind": "PIPELINE",
+                    "integration": {
+                        "action": "BLOCK_HUMAN",
+                        "status": "BLOCKED",
+                        "integrated": False,
+                    },
+                },
+            )
+            return (
+                {"execution_id": "review-parallel-gate", "decision": "APPROVE"},
+                [],
+                {},
+            )
+
+        def successful_rollback(called_run_id: str, timeout: int) -> bool:
+            with contextlib.closing(self.connect()) as connection:
+                connection.execute(
+                    "DELETE FROM project_locks WHERE run_id=?",
+                    (called_run_id,),
+                )
+                connection.execute(
+                    "UPDATE runs SET status='CANCELLED', finished_at=? WHERE run_id=?",
+                    (NOW, called_run_id),
+                )
+                connection.commit()
+            return True
+
+        ORCHESTRATOR.run_json = fake_run_json
+        ORCHESTRATOR.launch_reviewer_with_transport_retry = reviewer_then_gate
+        ORCHESTRATOR.rollback_run_best_effort = successful_rollback
+        try:
+            result = ORCHESTRATOR.execute_pipeline(
+                sibling_task,
+                sibling_attempt_id,
+                "test-instance",
+                {
+                    "command_timeout_seconds": 5,
+                    "worker_timeout_seconds": 5,
+                },
+            )
+        finally:
+            ORCHESTRATOR.run_json = original_run_json
+            ORCHESTRATOR.launch_reviewer_with_transport_retry = original_reviewer
+            ORCHESTRATOR.rollback_run_best_effort = original_rollback
+
+        self.assertEqual(integration_calls, [])
+        self.assertEqual(result["integration"]["action"], "BLOCK_HUMAN")
+        self.assertEqual(
+            result["integration"]["reason_code"],
+            "plan_waiting_human",
+        )
+        self.assertTrue(result["integration"]["cleanup_completed"])
+
+    def test_cancellation_rollback_failures_enter_durable_recovery(self) -> None:
+        original_run_command = ORCHESTRATOR.run_command
+        try:
+            for failure_kind in ("nonzero", "exception"):
+                with self.subTest(failure_kind=failure_kind):
+                    with contextlib.closing(self.connect()) as connection:
+                        connection.execute(
+                            "DELETE FROM project_locks WHERE project_id=?",
+                            (PROJECT_ID,),
+                        )
+                        connection.commit()
+                    run_id = f"run-cancel-cleanup-{failure_kind}"
+                    self._insert_run(run_id, status="REVIEWING")
+
+                    if failure_kind == "nonzero":
+                        ORCHESTRATOR.run_command = lambda *args, **kwargs: (
+                            subprocess.CompletedProcess(args[0], 17, "", "rollback failed")
+                        )
+                    else:
+                        def raise_rollback(*args: Any, **kwargs: Any) -> Any:
+                            raise OSError("rollback transport failed")
+
+                        ORCHESTRATOR.run_command = raise_rollback
+
+                    cleanup_complete = ORCHESTRATOR.rollback_run_best_effort(
+                        run_id,
+                        timeout=5,
+                    )
+                    self.assertIs(cleanup_complete, False)
+                    self.assertEqual(
+                        tuple(
+                            self._row(
+                                "SELECT status, recovery_decision FROM runs WHERE run_id=?",
+                                (run_id,),
+                            )
+                        ),
+                        ("RECOVERING", "ROLLBACK_SAFE"),
+                    )
+                    self.assertEqual(
+                        int(
+                            self._row(
+                                "SELECT COUNT(*) FROM project_locks WHERE run_id=?",
+                                (run_id,),
+                            )[0]
+                        ),
+                        1,
+                        "Recovery must retain visibility and ownership of active cleanup",
+                    )
+        finally:
+            ORCHESTRATOR.run_command = original_run_command
+
+    def test_cancelled_pipeline_waits_for_recovery_when_rollback_fails(self) -> None:
+        objective_id, plan_id, attempt_id, task = self._create_running_plan()
+        run_id = "run-cancel-cleanup-pipeline"
+        self._insert_run(run_id, status="REVIEWING")
+        original_run_json = ORCHESTRATOR.run_json
+        original_reviewer = ORCHESTRATOR.launch_reviewer_with_transport_retry
+        original_run_command = ORCHESTRATOR.run_command
+
+        def fake_run_json(arguments: list[str], *, timeout: int) -> dict[str, Any]:
+            command = Path(arguments[0]).name
+            action = arguments[1]
+            if command == "hermesops-transaction.py" and action == "begin":
+                return {"run_id": run_id}
+            if command == "hermesops-worker.py":
+                self._command(OBJECTIVES.command_cancel, objective_id)
+                return {"execution_id": "worker-cancel-cleanup", "exit_code": 0}
+            if command == "hermesops-transaction.py" and action == "submit":
+                return {"run_id": run_id, "status": "REVIEWING"}
+            raise AssertionError(arguments)
+
+        ORCHESTRATOR.run_json = fake_run_json
+        ORCHESTRATOR.launch_reviewer_with_transport_retry = lambda *args, **kwargs: (
+            {"execution_id": "review-cancel-cleanup", "decision": "APPROVE"},
+            [],
+            {},
+        )
+        ORCHESTRATOR.run_command = lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            17,
+            "",
+            "rollback failed",
+        )
+        try:
+            result = ORCHESTRATOR.execute_pipeline(
+                task,
+                attempt_id,
+                "test-instance",
+                {
+                    "command_timeout_seconds": 5,
+                    "worker_timeout_seconds": 5,
+                },
+            )
+        finally:
+            ORCHESTRATOR.run_json = original_run_json
+            ORCHESTRATOR.launch_reviewer_with_transport_retry = original_reviewer
+            ORCHESTRATOR.run_command = original_run_command
+
+        self.assertEqual(result["integration"]["status"], "RECOVERING")
+        self.assertFalse(result["integration"]["cleanup_completed"])
+        ORCHESTRATOR.finish_task_cancellation_recovery(task, attempt_id, result)
+        ORCHESTRATOR.synchronize_objective_states()
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status, task.status, run.status, "
+                    "run.recovery_decision "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=? AND task.orchestration_task_id=?",
+                    (objective_id, task["orchestration_task_id"]),
+                )
+            ),
+            (
+                "CANCEL_REQUESTED",
+                "BLOCKED",
+                "BLOCKED",
+                "RECOVERING",
+                "ROLLBACK_SAFE",
+            ),
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "DELETE FROM project_locks WHERE run_id=?",
+                (run_id,),
+            )
+            connection.execute(
+                "UPDATE runs SET status='CANCELLED', finished_at=? WHERE run_id=?",
+                (NOW, run_id),
+            )
+            connection.commit()
+        ORCHESTRATOR.synchronize_objective_states()
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "WHERE objective.objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            ("CANCELLED", "CANCELLED"),
+            "Recovery completion must release the pending business cancellation",
         )
 
     def test_block_human_gate_is_not_automatically_rolled_back(self) -> None:
