@@ -611,7 +611,7 @@ def objective_status_for_run(
     return str(rows[0]["status"]) if rows else None
 
 
-def run_plan_is_waiting_human(
+def run_plan_has_active_human_gate(
     connection: sqlite3.Connection,
     run_id: str,
 ) -> bool:
@@ -628,9 +628,27 @@ def run_plan_is_waiting_human(
     ).fetchall()
     if len(rows) > 1:
         fail("Run is linked to multiple orchestration plans")
+    if not rows:
+        return False
+
+    pending_approval = connection.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM approvals AS approval
+            JOIN orchestration_attempts AS gate_attempt
+              ON gate_attempt.run_id = approval.run_id
+            JOIN orchestration_tasks AS gate_task
+              ON gate_task.orchestration_task_id = gate_attempt.orchestration_task_id
+            WHERE gate_task.plan_id = ?
+              AND approval.status = 'PENDING'
+        )
+        """,
+        (rows[0]["plan_id"],),
+    ).fetchone()[0]
     return bool(
-        rows
-        and (
+        pending_approval
+        or (
             (
                 rows[0]["status"] == "BLOCKED"
                 and rows[0]["last_error"] == "waiting for human decision"
@@ -694,7 +712,7 @@ def record_non_integration(
             connection.rollback()
             return cancelled_integration_result(run["run_id"])
 
-        if run_plan_is_waiting_human(connection, run["run_id"]):
+        if run_plan_has_active_human_gate(connection, run["run_id"]):
             connection.rollback()
             return blocked_human_integration_result(run["run_id"])
 
@@ -960,7 +978,7 @@ def integrate_approved(
             connection.rollback()
             return cancelled_integration_result(run["run_id"])
 
-        if run_plan_is_waiting_human(connection, run["run_id"]):
+        if run_plan_has_active_human_gate(connection, run["run_id"]):
             connection.rollback()
             return blocked_human_integration_result(run["run_id"])
 
