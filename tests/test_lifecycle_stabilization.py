@@ -237,6 +237,42 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         )
         return objective_id, plan_id, attempt_id, task
 
+    def _create_idle_runnable_plan(
+        self,
+        *,
+        task_key: str,
+        kind: str = "NOOP",
+        project_id: str | None = None,
+    ) -> tuple[str, str, str]:
+        plan_id = ORCHESTRATOR.insert_plan(
+            self._plan(
+                self._task(
+                    task_key,
+                    kind=kind,
+                    project_id=project_id,
+                    role_id="worker" if kind == "PIPELINE" else None,
+                )
+            ),
+            source="TEST",
+            initial_status="READY",
+        )
+        objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key=?",
+                (plan_id, task_key),
+            )[0]
+        )
+        return objective_id, plan_id, task_id
+
     def _insert_project(self, project_id: str) -> None:
         with contextlib.closing(self.connect()) as connection:
             connection.execute(
@@ -798,6 +834,655 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             ),
             ("QUEUED", future, plan_id),
         )
+
+    def test_stale_selection_after_cancel_cannot_reserve_attempt(self) -> None:
+        objective_id, plan_id, _, _ = self._create_running_plan()
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=4))
+        attempts_before = int(
+            self._row("SELECT COUNT(*) FROM orchestration_attempts")[0]
+        )
+
+        self._command(OBJECTIVES.command_cancel, objective_id)
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "CANCEL_REQUESTED",
+        )
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(task_id, instance_id="test-instance")
+
+        self.assertEqual(
+            int(self._row("SELECT COUNT(*) FROM orchestration_attempts")[0]),
+            attempts_before,
+        )
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM orchestration_tasks "
+                "WHERE orchestration_task_id=?",
+                (task_id,),
+            )[0],
+            "READY",
+        )
+        self.assertEqual(
+            int(self._row("SELECT COUNT(*) FROM worker_executions")[0]),
+            0,
+        )
+
+    def test_stale_selection_after_paused_cannot_reserve_attempt(self) -> None:
+        objective_id, _, task_id = self._create_idle_runnable_plan(
+            task_key="stale_after_paused"
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=1))
+        self._command(OBJECTIVES.command_pause, objective_id)
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "PAUSED",
+        )
+
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(task_id, instance_id="test-instance")
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, attempt_count FROM orchestration_tasks "
+                    "WHERE orchestration_task_id=?",
+                    (task_id,),
+                )
+            ),
+            ("READY", 0),
+        )
+
+    def test_stale_selection_after_pause_requested_cannot_reserve_attempt(self) -> None:
+        objective_id, plan_id, _, _ = self._create_running_plan()
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=4))
+        self._command(OBJECTIVES.command_pause, objective_id)
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "PAUSE_REQUESTED",
+        )
+
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(task_id, instance_id="test-instance")
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, attempt_count FROM orchestration_tasks "
+                    "WHERE orchestration_task_id=?",
+                    (task_id,),
+                )
+            ),
+            ("READY", 0),
+        )
+
+    def test_stale_selection_after_pending_human_gate_cannot_reserve(self) -> None:
+        _, plan_id, gate_attempt_id, gate_task = self._create_running_plan()
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=4))
+
+        run_id = "run-rc9-stale-human-gate"
+        self._insert_run(run_id, status="REVIEWING")
+        review = self._seed_review(
+            run_id,
+            "rc9-stale-human-gate",
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                (run_id, gate_attempt_id),
+            )
+            connection.commit()
+            run = INTEGRATOR.get_run(connection, run_id)
+        INTEGRATOR.record_non_integration(
+            run=run,
+            review=review,
+            owner=OWNER,
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+            action="BLOCK_HUMAN",
+            evidence={"main_before": "a" * 40},
+        )
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT plan.status, task.status, approval.status "
+                    "FROM orchestration_plans AS plan "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN approvals AS approval ON approval.run_id=? "
+                    "WHERE plan.plan_id=? AND task.orchestration_task_id=?",
+                    (run_id, plan_id, task_id),
+                )
+            ),
+            ("RUNNING", "READY", "PENDING"),
+            "the relational gate commits before plan/task projection",
+        )
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(task_id, instance_id="test-instance")
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM orchestration_tasks "
+                "WHERE orchestration_task_id=?",
+                (task_id,),
+            )[0],
+            "READY",
+        )
+        self.assertEqual(gate_task["plan_id"], plan_id)
+
+    def test_stale_selection_after_plan_recovery_block_cannot_reserve(self) -> None:
+        _, plan_id, task_id = self._create_idle_runnable_plan(
+            task_key="stale_after_recovery_block"
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=1))
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status='BLOCKED', last_error=? "
+                "WHERE plan_id=?",
+                ("cancellation cleanup requires recovery", plan_id),
+            )
+            connection.commit()
+
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(task_id, instance_id="test-instance")
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT plan.status, task.status, task.attempt_count "
+                    "FROM orchestration_plans AS plan "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "WHERE plan.plan_id=? AND task.orchestration_task_id=?",
+                    (plan_id, task_id),
+                )
+            ),
+            ("BLOCKED", "READY", 0),
+        )
+
+    def test_duplicate_concurrent_stale_reservation_has_one_winner(self) -> None:
+        _, _, task_id = self._create_idle_runnable_plan(
+            task_key="duplicate_stale_reservation"
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=1))
+        start = threading.Event()
+        successes: list[str] = []
+        failures: list[BaseException] = []
+
+        def reserve() -> None:
+            start.wait(timeout=5)
+            try:
+                attempt_id, _, _ = ORCHESTRATOR.reserve_attempt(
+                    task_id,
+                    instance_id="test-instance",
+                )
+                successes.append(attempt_id)
+            except BaseException as error:
+                failures.append(error)
+
+        workers = [threading.Thread(target=reserve) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        start.set()
+        for worker in workers:
+            worker.join(timeout=5)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], ORCHESTRATOR.OrchestratorError)
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM orchestration_attempts "
+                    "WHERE orchestration_task_id=?",
+                    (task_id,),
+                )[0]
+            ),
+            1,
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, attempt_count, max_attempts "
+                    "FROM orchestration_tasks WHERE orchestration_task_id=?",
+                    (task_id,),
+                )
+            ),
+            ("RUNNING", 1, 1),
+        )
+
+    def test_lifecycle_command_commit_wins_reservation_writer_race(self) -> None:
+        objective_id, plan_id, _, _ = self._create_running_plan()
+        task_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=4))
+        command_holds_writer = threading.Event()
+        allow_command_commit = threading.Event()
+        reservation_finished = threading.Event()
+        command_errors: list[BaseException] = []
+        reservation_errors: list[BaseException] = []
+        reservation_results: list[str] = []
+        original_add_event = OBJECTIVES.add_event
+
+        def blocking_add_event(*args: Any, **kwargs: Any) -> None:
+            command_holds_writer.set()
+            if not allow_command_commit.wait(timeout=5):
+                raise AssertionError("reservation race did not release lifecycle command")
+            original_add_event(*args, **kwargs)
+
+        def cancel() -> None:
+            try:
+                self._command(OBJECTIVES.command_cancel, objective_id)
+            except BaseException as error:
+                command_errors.append(error)
+
+        def reserve() -> None:
+            try:
+                command_holds_writer.wait(timeout=5)
+                reservation_results.append(
+                    ORCHESTRATOR.reserve_attempt(
+                        task_id,
+                        instance_id="test-instance",
+                    )[0]
+                )
+            except BaseException as error:
+                reservation_errors.append(error)
+            finally:
+                reservation_finished.set()
+
+        OBJECTIVES.add_event = blocking_add_event
+        command_worker = threading.Thread(target=cancel)
+        reservation_worker = threading.Thread(target=reserve)
+        try:
+            command_worker.start()
+            self.assertTrue(command_holds_writer.wait(timeout=5))
+            reservation_worker.start()
+            self.assertFalse(
+                reservation_finished.wait(timeout=0.2),
+                "reservation did not wait for the lifecycle writer",
+            )
+            allow_command_commit.set()
+            command_worker.join(timeout=5)
+            reservation_worker.join(timeout=5)
+        finally:
+            allow_command_commit.set()
+            OBJECTIVES.add_event = original_add_event
+
+        self.assertFalse(command_worker.is_alive())
+        self.assertFalse(reservation_worker.is_alive())
+        self.assertEqual(command_errors, [])
+        self.assertEqual(reservation_results, [])
+        self.assertEqual(len(reservation_errors), 1)
+        self.assertIsInstance(
+            reservation_errors[0],
+            ORCHESTRATOR.OrchestratorError,
+        )
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "CANCEL_REQUESTED",
+        )
+
+    def test_reservation_commit_wins_lifecycle_writer_race(self) -> None:
+        objective_id, _, task_id = self._create_idle_runnable_plan(
+            task_key="reservation_wins_writer_race"
+        )
+        self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=1))
+        reservation_holds_writer = threading.Event()
+        allow_reservation_commit = threading.Event()
+        command_finished = threading.Event()
+        reservation_errors: list[BaseException] = []
+        command_errors: list[BaseException] = []
+        original_add_event = ORCHESTRATOR.add_event
+
+        def blocking_add_event(*args: Any, **kwargs: Any) -> None:
+            if kwargs.get("event_type") == "ORCHESTRATION_TASK_STARTED":
+                reservation_holds_writer.set()
+                if not allow_reservation_commit.wait(timeout=5):
+                    raise AssertionError("lifecycle race did not release reservation")
+            original_add_event(*args, **kwargs)
+
+        def reserve() -> None:
+            try:
+                ORCHESTRATOR.reserve_attempt(
+                    task_id,
+                    instance_id="test-instance",
+                )
+            except BaseException as error:
+                reservation_errors.append(error)
+
+        def pause() -> None:
+            try:
+                reservation_holds_writer.wait(timeout=5)
+                self._command(OBJECTIVES.command_pause, objective_id)
+            except BaseException as error:
+                command_errors.append(error)
+            finally:
+                command_finished.set()
+
+        ORCHESTRATOR.add_event = blocking_add_event
+        reservation_worker = threading.Thread(target=reserve)
+        command_worker = threading.Thread(target=pause)
+        try:
+            reservation_worker.start()
+            self.assertTrue(reservation_holds_writer.wait(timeout=5))
+            command_worker.start()
+            self.assertFalse(
+                command_finished.wait(timeout=0.2),
+                "lifecycle command did not wait for the reservation writer",
+            )
+            allow_reservation_commit.set()
+            reservation_worker.join(timeout=5)
+            command_worker.join(timeout=5)
+        finally:
+            allow_reservation_commit.set()
+            ORCHESTRATOR.add_event = original_add_event
+
+        self.assertFalse(reservation_worker.is_alive())
+        self.assertFalse(command_worker.is_alive())
+        self.assertEqual(reservation_errors, [])
+        self.assertEqual(command_errors, [])
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, task.status, task.attempt_count "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=objective.plan_id "
+                    "WHERE objective.objective_id=? "
+                    "AND task.orchestration_task_id=?",
+                    (objective_id, task_id),
+                )
+            ),
+            ("PAUSE_REQUESTED", "RUNNING", 1),
+        )
+
+    def test_end_to_end_paused_stale_selection_stops_before_pipeline_and_git(self) -> None:
+        objective_id, _, task_id = self._create_idle_runnable_plan(
+            task_key="paused_stale_pipeline",
+            kind="PIPELINE",
+            project_id=PROJECT_ID,
+        )
+        original_health = ORCHESTRATOR.supervisor_is_healthy
+        original_pipeline = ORCHESTRATOR.execute_pipeline
+        original_git = INTEGRATOR.git
+        pipeline_calls: list[str] = []
+        git_calls: list[tuple[str, ...]] = []
+        ORCHESTRATOR.supervisor_is_healthy = lambda: True
+        try:
+            self.assertIn(task_id, ORCHESTRATOR.runnable_tasks(set(), capacity=1))
+            self._command(OBJECTIVES.command_pause, objective_id)
+            self.assertEqual(
+                self._row(
+                    "SELECT status FROM objective_queue WHERE objective_id=?",
+                    (objective_id,),
+                )[0],
+                "PAUSED",
+            )
+            attempts_before = int(
+                self._row("SELECT COUNT(*) FROM orchestration_attempts")[0]
+            )
+            runs_before = int(self._row("SELECT COUNT(*) FROM runs")[0])
+
+            def fake_pipeline(*args: Any, **kwargs: Any) -> dict[str, Any]:
+                pipeline_calls.append(task_id)
+                return {
+                    "kind": "PIPELINE",
+                    "integration": {
+                        "action": "INTEGRATE",
+                        "status": "COMPLETED",
+                        "integrated": True,
+                    },
+                }
+
+            def fake_git(_: Path, *arguments: str) -> str:
+                git_calls.append(arguments)
+                return ""
+
+            ORCHESTRATOR.execute_pipeline = fake_pipeline
+            INTEGRATOR.git = fake_git
+            with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+                ORCHESTRATOR.execute_task(
+                    task_id,
+                    instance_id="test-instance",
+                    config={"heartbeat_seconds": 1},
+                )
+
+            self.assertEqual(pipeline_calls, [])
+            self.assertEqual(git_calls, [])
+            self.assertEqual(
+                int(self._row("SELECT COUNT(*) FROM orchestration_attempts")[0]),
+                attempts_before,
+            )
+            self.assertEqual(
+                int(self._row("SELECT COUNT(*) FROM runs")[0]),
+                runs_before,
+            )
+            self.assertEqual(
+                int(
+                    self._row(
+                        "SELECT COUNT(*) FROM integration_executions "
+                        "WHERE status='PREPARED'"
+                    )[0]
+                ),
+                0,
+            )
+            self.assertEqual(
+                int(
+                    self._row(
+                        "SELECT COUNT(*) FROM runs WHERE status='COMMITTING'"
+                    )[0]
+                ),
+                0,
+            )
+        finally:
+            ORCHESTRATOR.supervisor_is_healthy = original_health
+            ORCHESTRATOR.execute_pipeline = original_pipeline
+            INTEGRATOR.git = original_git
+
+    def test_stale_selection_revalidates_writer_per_project(self) -> None:
+        _, _, first_task = self._create_idle_runnable_plan(
+            task_key="writer_candidate_one",
+            kind="PIPELINE",
+            project_id=PROJECT_ID,
+        )
+        _, _, second_task = self._create_idle_runnable_plan(
+            task_key="writer_candidate_two",
+            kind="PIPELINE",
+            project_id=PROJECT_ID,
+        )
+        original_health = ORCHESTRATOR.supervisor_is_healthy
+        ORCHESTRATOR.supervisor_is_healthy = lambda: True
+        try:
+            selected = ORCHESTRATOR.runnable_tasks(set(), capacity=4)
+        finally:
+            ORCHESTRATOR.supervisor_is_healthy = original_health
+        self.assertEqual(len(selected), 1)
+        candidate = selected[0]
+        other = second_task if candidate == first_task else first_task
+        ORCHESTRATOR.reserve_attempt(other, instance_id="test-instance")
+
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(candidate, instance_id="test-instance")
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM orchestration_tasks "
+                "WHERE orchestration_task_id=?",
+                (candidate,),
+            )[0],
+            "READY",
+        )
+
+    def test_stale_selection_revalidates_plan_parallel_limit(self) -> None:
+        first_project = "lifecycle-rc9-parallel-one"
+        second_project = "lifecycle-rc9-parallel-two"
+        self._insert_project(first_project)
+        self._insert_project(second_project)
+        plan = self._plan(
+            self._task(
+                "parallel_candidate_one",
+                kind="PIPELINE",
+                project_id=first_project,
+                role_id="worker",
+            ),
+            self._task(
+                "parallel_candidate_two",
+                kind="PIPELINE",
+                project_id=second_project,
+                role_id="worker",
+            ),
+        )
+        plan["max_parallel_tasks"] = 1
+        plan_id = ORCHESTRATOR.insert_plan(plan, source="TEST", initial_status="READY")
+        objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            task_ids = [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT orchestration_task_id FROM orchestration_tasks "
+                    "WHERE plan_id=? ORDER BY task_key",
+                    (plan_id,),
+                ).fetchall()
+            ]
+        original_health = ORCHESTRATOR.supervisor_is_healthy
+        ORCHESTRATOR.supervisor_is_healthy = lambda: True
+        try:
+            selected = ORCHESTRATOR.runnable_tasks(set(), capacity=2)
+        finally:
+            ORCHESTRATOR.supervisor_is_healthy = original_health
+        self.assertEqual(len(selected), 1)
+        candidate = selected[0]
+        other = task_ids[1] if candidate == task_ids[0] else task_ids[0]
+        ORCHESTRATOR.reserve_attempt(other, instance_id="test-instance")
+
+        with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+            ORCHESTRATOR.reserve_attempt(candidate, instance_id="test-instance")
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM orchestration_tasks "
+                    "WHERE plan_id=? AND status='RUNNING'",
+                    (plan_id,),
+                )[0]
+            ),
+            1,
+        )
+
+    def test_reservation_objective_status_matrix(self) -> None:
+        for status in (
+            "QUEUED",
+            "PLANNING",
+            "RUNNING",
+            "PAUSE_REQUESTED",
+            "PAUSED",
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+            "COMPLETED",
+            "FAILED",
+        ):
+            with self.subTest(status=status):
+                objective_id, _, task_id = self._create_idle_runnable_plan(
+                    task_key=f"objective_matrix_{status.lower()}"
+                )
+                self.assertIn(
+                    task_id,
+                    ORCHESTRATOR.runnable_tasks(set(), capacity=100),
+                )
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE objective_queue SET status=? WHERE objective_id=?",
+                        (status, objective_id),
+                    )
+                    connection.commit()
+                if status == "RUNNING":
+                    ORCHESTRATOR.reserve_attempt(
+                        task_id,
+                        instance_id="test-instance",
+                    )
+                else:
+                    with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+                        ORCHESTRATOR.reserve_attempt(
+                            task_id,
+                            instance_id="test-instance",
+                        )
+
+    def test_reservation_plan_status_matrix(self) -> None:
+        for status in (
+            "DRAFT",
+            "READY",
+            "RUNNING",
+            "BLOCKED",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+        ):
+            with self.subTest(status=status):
+                _, plan_id, task_id = self._create_idle_runnable_plan(
+                    task_key=f"plan_matrix_{status.lower()}"
+                )
+                self.assertIn(
+                    task_id,
+                    ORCHESTRATOR.runnable_tasks(set(), capacity=100),
+                )
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE orchestration_plans SET status=? WHERE plan_id=?",
+                        (status, plan_id),
+                    )
+                    connection.commit()
+                if status in {"READY", "RUNNING"}:
+                    ORCHESTRATOR.reserve_attempt(
+                        task_id,
+                        instance_id="test-instance",
+                    )
+                else:
+                    with self.assertRaises(ORCHESTRATOR.OrchestratorError):
+                        ORCHESTRATOR.reserve_attempt(
+                            task_id,
+                            instance_id="test-instance",
+                        )
 
     def test_ai_objective_resume_continues_with_its_existing_plan(self) -> None:
         objective_id = self._insert_objective(source="AI")
@@ -1417,7 +2102,17 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             )
             connection.commit()
 
-        _, _, second_attempt_id, _ = self._create_running_plan()
+        second_project = "lifecycle-ambiguous-objective-two"
+        self._insert_project(second_project)
+        _, _, second_task_id = self._create_idle_runnable_plan(
+            task_key="ambiguous_objective_two",
+            kind="PIPELINE",
+            project_id=second_project,
+        )
+        second_attempt_id, _, _ = ORCHESTRATOR.reserve_attempt(
+            second_task_id,
+            instance_id="test-instance",
+        )
         with contextlib.closing(self.connect()) as connection:
             connection.execute(
                 "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",

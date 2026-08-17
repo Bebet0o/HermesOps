@@ -1085,6 +1085,59 @@ def refresh_plan_states(plan_id: str) -> None:
         connection.commit()
 
 
+def reservation_ineligibility_reason(
+    connection: sqlite3.Connection,
+    task: sqlite3.Row,
+) -> str | None:
+    if task["status"] != "READY":
+        return f"Task cannot start from status {task['status']}"
+    if task["attempt_count"] >= task["max_attempts"]:
+        return "Task attempt budget is exhausted"
+
+    plan = connection.execute(
+        "SELECT status, max_parallel_tasks FROM orchestration_plans WHERE plan_id=?",
+        (task["plan_id"],),
+    ).fetchone()
+    if plan is None:
+        return "Task orchestration plan disappeared before reservation"
+    if plan["status"] not in {"READY", "RUNNING"}:
+        return f"Plan cannot start work from status {plan['status']}"
+
+    objectives = connection.execute(
+        "SELECT objective_id, status FROM objective_queue WHERE plan_id=?",
+        (task["plan_id"],),
+    ).fetchall()
+    if len(objectives) > 1:
+        return "Plan is linked to multiple objectives"
+    if objectives and objectives[0]["status"] != "RUNNING":
+        return (
+            "Objective cannot start work from status "
+            f"{objectives[0]['status']}"
+        )
+
+    if plan_has_active_human_gate(connection, task["plan_id"]):
+        return "Plan is waiting for a human decision"
+
+    running_for_plan = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM orchestration_tasks "
+            "WHERE plan_id=? AND status='RUNNING'",
+            (task["plan_id"],),
+        ).fetchone()[0]
+    )
+    if running_for_plan >= int(plan["max_parallel_tasks"]):
+        return "Plan parallel task limit is exhausted"
+
+    if project_is_busy(
+        connection,
+        task["project_id"],
+        task["orchestration_task_id"],
+    ):
+        return "Task project already has active work"
+
+    return None
+
+
 def reserve_attempt(
     task_id: str,
     *,
@@ -1102,12 +1155,13 @@ def reserve_attempt(
         if task is None:
             connection.rollback()
             fail(f"Unknown orchestration task: {task_id}")
-        if task["status"] != "READY":
+        ineligibility_reason = reservation_ineligibility_reason(
+            connection,
+            task,
+        )
+        if ineligibility_reason is not None:
             connection.rollback()
-            fail(f"Task cannot start from status {task['status']}")
-        if task["attempt_count"] >= task["max_attempts"]:
-            connection.rollback()
-            fail("Task attempt budget is exhausted")
+            fail(ineligibility_reason)
 
         attempt_number = int(task["attempt_count"]) + 1
         attempt_id = "orchestration-attempt-" + uuid.uuid4().hex
