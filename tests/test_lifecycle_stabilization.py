@@ -233,7 +233,35 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         )
         return objective_id, plan_id, attempt_id, task
 
-    def _insert_run(self, run_id: str, *, status: str = "RUNNING") -> None:
+    def _insert_project(self, project_id: str) -> None:
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO projects (
+                    project_id, display_name, repo_path, data_path, policy_id,
+                    enabled, config_source, config_hash, registered_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'default', 1, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    f"Lifecycle project {project_id}",
+                    str(self.root / f"repository-{project_id}"),
+                    str(self.root / f"data-{project_id}"),
+                    str(self.root / f"project-{project_id}.toml"),
+                    (project_id * 64)[:64],
+                    NOW,
+                    NOW,
+                ),
+            )
+            connection.commit()
+
+    def _insert_run(
+        self,
+        run_id: str,
+        *,
+        status: str = "RUNNING",
+        project_id: str = PROJECT_ID,
+    ) -> None:
         with contextlib.closing(self.connect()) as connection:
             connection.execute(
                 """
@@ -245,7 +273,7 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                 """,
                 (
                     run_id,
-                    PROJECT_ID,
+                    project_id,
                     status,
                     "a" * 40,
                     "b" * 40,
@@ -263,9 +291,80 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                     project_id, run_id, holder, acquired_at, heartbeat_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (PROJECT_ID, run_id, OWNER, NOW, NOW),
+                (project_id, run_id, OWNER, NOW, NOW),
             )
             connection.commit()
+
+    def _seed_review(
+        self,
+        run_id: str,
+        suffix: str,
+        *,
+        decision: str,
+        verdict: str,
+    ) -> sqlite3.Row:
+        task_id = f"review-task-{suffix}"
+        review_id = f"review-{suffix}"
+        execution_id = f"reviewer-execution-{suffix}"
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, run_id, role, status, description, attempt,
+                    metadata_json, created_at, started_at, finished_at, heartbeat_at
+                ) VALUES (?, ?, 'reviewer', 'COMPLETED', ?, 1, '{}', ?, ?, ?, ?)
+                """,
+                (task_id, run_id, f"Review {suffix}", NOW, NOW, NOW, NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO review_results (
+                    review_id, run_id, verdict, summary, details_json, created_at
+                ) VALUES (?, ?, ?, ?, '{}', ?)
+                """,
+                (review_id, run_id, verdict, f"Review {suffix}", NOW),
+            )
+            connection.execute(
+                """
+                INSERT INTO reviewer_executions (
+                    execution_id, review_id, task_id, run_id, role_id,
+                    source_profile, runtime_profile, outer_container_name,
+                    prompt_path, output_path, workspace_mode, network_enabled,
+                    cpu_limit, memory_mb, mount_verified, isolation_verified,
+                    repository_unchanged, decision, verdict, exit_code,
+                    result_json, created_at, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, 'reviewer', 'test-reviewer', ?, ?, ?, ?,
+                          'read_only', 0, 1, 512, 1, 1, 1, ?, ?, 0, '{}', ?, ?, ?)
+                """,
+                (
+                    execution_id,
+                    review_id,
+                    task_id,
+                    run_id,
+                    f"runtime-{suffix}",
+                    f"review-container-{suffix}",
+                    str(self.root / f"{suffix}.prompt"),
+                    str(self.root / f"{suffix}.output"),
+                    decision,
+                    verdict,
+                    NOW,
+                    NOW,
+                    NOW,
+                ),
+            )
+            connection.commit()
+            review = connection.execute(
+                """
+                SELECT review.*, execution.execution_id AS review_execution_id
+                FROM review_results AS review
+                JOIN reviewer_executions AS execution
+                  ON execution.review_id=review.review_id
+                WHERE review.review_id=?
+                """,
+                (review_id,),
+            ).fetchone()
+        self.assertIsNotNone(review)
+        return review
 
     def _create_waiting_human_plan(
         self,
@@ -1635,6 +1734,562 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                 )
             ),
             ("BLOCKED", "waiting for human decision", "COMPLETED"),
+        )
+
+    def test_deferred_human_gate_blocks_third_sibling_before_ponr(self) -> None:
+        project_b = "lifecycle-project-b"
+        project_c = "lifecycle-project-c"
+        self._insert_project(project_b)
+        self._insert_project(project_c)
+        plan = self._plan(
+            self._task(
+                "gate_a",
+                kind="PIPELINE",
+                project_id=PROJECT_ID,
+                role_id="worker",
+            ),
+            self._task(
+                "grandfathered_b",
+                kind="PIPELINE",
+                project_id=project_b,
+                role_id="worker",
+            ),
+            self._task(
+                "pre_ponr_c",
+                kind="PIPELINE",
+                project_id=project_c,
+                role_id="worker",
+            ),
+        )
+        plan["max_parallel_tasks"] = 3
+        plan_id = ORCHESTRATOR.insert_plan(
+            plan,
+            source="TEST",
+            initial_status="READY",
+        )
+        objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+
+        attempts: dict[str, tuple[str, sqlite3.Row]] = {}
+        with contextlib.closing(self.connect()) as connection:
+            task_rows = connection.execute(
+                """
+                SELECT task_key, orchestration_task_id
+                FROM orchestration_tasks
+                WHERE plan_id=?
+                """,
+                (plan_id,),
+            ).fetchall()
+        for row in task_rows:
+            attempt_id, _, task = ORCHESTRATOR.reserve_attempt(
+                str(row["orchestration_task_id"]),
+                instance_id="test-instance",
+            )
+            attempts[str(row["task_key"])] = (attempt_id, task)
+
+        run_a = "run-deferred-gate-a"
+        run_b = "run-deferred-grandfathered-b"
+        run_c = "run-deferred-pre-ponr-c"
+        self._insert_run(run_a, status="REVIEWING")
+        self._insert_run(run_b, status="REVIEWING", project_id=project_b)
+        self._insert_run(run_c, status="REVIEWING", project_id=project_c)
+        review_a = self._seed_review(
+            run_a,
+            "deferred-a",
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+        )
+        review_b = self._seed_review(
+            run_b,
+            "deferred-b",
+            decision="APPROVE",
+            verdict="PASS",
+        )
+        review_c = self._seed_review(
+            run_c,
+            "deferred-c",
+            decision="APPROVE",
+            verdict="PASS",
+        )
+        with contextlib.closing(self.connect()) as connection:
+            for key, run_id in (
+                ("gate_a", run_a),
+                ("grandfathered_b", run_b),
+                ("pre_ponr_c", run_c),
+            ):
+                connection.execute(
+                    "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                    (run_id, attempts[key][0]),
+                )
+            connection.commit()
+            row_a = INTEGRATOR.get_run(connection, run_a)
+            row_b = INTEGRATOR.get_run(connection, run_b)
+            row_c = INTEGRATOR.get_run(connection, run_c)
+
+        git_reached_b = threading.Event()
+        allow_git_b = threading.Event()
+        git_merges: list[str] = []
+        integration_b: list[dict[str, Any]] = []
+        integration_errors: list[BaseException] = []
+        original_git = INTEGRATOR.git
+
+        def fake_git(repository: Path, *arguments: str) -> str:
+            if arguments[0] == "merge":
+                project = Path(repository).name
+                git_merges.append(project)
+                if project == f"repository-{project_b}":
+                    git_reached_b.set()
+                    if not allow_git_b.wait(timeout=5):
+                        raise AssertionError("test did not release grandfathered Git")
+                return ""
+            if arguments[:2] == ("rev-parse", "HEAD"):
+                return "b" * 40
+            if arguments[0] == "status":
+                return ""
+            raise AssertionError(arguments)
+
+        class Transaction:
+            @staticmethod
+            def cleanup_worktree(*_: Any) -> None:
+                return None
+
+        def integrate_b() -> None:
+            try:
+                integration_b.append(
+                    INTEGRATOR.integrate_approved(
+                        run=row_b,
+                        review=review_b,
+                        owner=OWNER,
+                        decision="APPROVE",
+                        verdict="PASS",
+                        evidence={
+                            "repository": str(self.root / f"repository-{project_b}"),
+                            "worktree": str(self.root / "worktree-b"),
+                            "main_before": "a" * 40,
+                        },
+                        transaction=Transaction(),
+                    )
+                )
+            except BaseException as error:
+                integration_errors.append(error)
+
+        INTEGRATOR.git = fake_git
+        worker_b = threading.Thread(target=integrate_b)
+        try:
+            worker_b.start()
+            self.assertTrue(git_reached_b.wait(timeout=5))
+            self.assertEqual(
+                tuple(
+                    self._row(
+                        "SELECT run.status, integration.status "
+                        "FROM runs AS run JOIN integration_executions AS integration "
+                        "ON integration.run_id=run.run_id WHERE run.run_id=?",
+                        (run_b,),
+                    )
+                ),
+                ("COMMITTING", "PREPARED"),
+            )
+
+            result_a = INTEGRATOR.record_non_integration(
+                run=row_a,
+                review=review_a,
+                owner=OWNER,
+                decision="BLOCK_HUMAN",
+                verdict="HUMAN",
+                action="BLOCK_HUMAN",
+                evidence={"main_before": "a" * 40},
+            )
+            ORCHESTRATOR.finish_task_waiting_human(
+                attempts["gate_a"][1],
+                attempts["gate_a"][0],
+                {"kind": "PIPELINE", "integration": result_a},
+            )
+            self.assertEqual(
+                tuple(
+                    self._row(
+                        "SELECT status, last_error FROM orchestration_plans "
+                        "WHERE plan_id=?",
+                        (plan_id,),
+                    )
+                ),
+                (
+                    "RUNNING",
+                    "waiting for in-flight integration before human decision",
+                ),
+            )
+
+            result_c = INTEGRATOR.integrate_approved(
+                run=row_c,
+                review=review_c,
+                owner=OWNER,
+                decision="APPROVE",
+                verdict="PASS",
+                evidence={
+                    "repository": str(self.root / f"repository-{project_c}"),
+                    "worktree": str(self.root / "worktree-c"),
+                    "main_before": "a" * 40,
+                },
+                transaction=Transaction(),
+            )
+            self.assertEqual(
+                (
+                    result_c["action"],
+                    result_c["status"],
+                    result_c["integrated"],
+                ),
+                ("BLOCK_HUMAN", "BLOCKED", False),
+            )
+            self.assertNotIn(f"repository-{project_c}", git_merges)
+            self.assertEqual(
+                int(
+                    self._row(
+                        "SELECT COUNT(*) FROM integration_executions "
+                        "WHERE run_id=? AND status='PREPARED'",
+                        (run_c,),
+                    )[0]
+                ),
+                0,
+            )
+            ORCHESTRATOR.finish_task_waiting_human(
+                attempts["pre_ponr_c"][1],
+                attempts["pre_ponr_c"][0],
+                {"kind": "PIPELINE", "integration": result_c},
+            )
+        finally:
+            allow_git_b.set()
+            worker_b.join(timeout=5)
+            INTEGRATOR.git = original_git
+
+        self.assertFalse(worker_b.is_alive())
+        self.assertEqual(integration_errors, [])
+        self.assertEqual(len(integration_b), 1)
+        self.assertTrue(integration_b[0]["integrated"])
+        ORCHESTRATOR.finish_task_success(
+            attempts["grandfathered_b"][1],
+            attempts["grandfathered_b"][0],
+            {"kind": "PIPELINE", "integration": integration_b[0]},
+        )
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM approvals WHERE status='PENDING'"
+                )[0]
+            ),
+            1,
+        )
+        self.assertEqual(ORCHESTRATOR.runnable_tasks(set(), capacity=4), [])
+
+    def test_deferred_gate_waits_for_all_grandfathered_integrations(self) -> None:
+        project_one = "lifecycle-grandfathered-one"
+        project_two = "lifecycle-grandfathered-two"
+        self._insert_project(project_one)
+        self._insert_project(project_two)
+        plan = self._plan(
+            self._task("gate"),
+            self._task("grandfathered_one"),
+            self._task("grandfathered_two"),
+        )
+        plan["max_parallel_tasks"] = 3
+        plan_id = ORCHESTRATOR.insert_plan(
+            plan,
+            source="TEST",
+            initial_status="READY",
+        )
+        objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+
+        attempts: dict[str, tuple[str, sqlite3.Row]] = {}
+        with contextlib.closing(self.connect()) as connection:
+            task_rows = connection.execute(
+                "SELECT task_key, orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=?",
+                (plan_id,),
+            ).fetchall()
+        for row in task_rows:
+            attempt_id, _, task = ORCHESTRATOR.reserve_attempt(
+                str(row["orchestration_task_id"]),
+                instance_id="test-instance",
+            )
+            attempts[str(row["task_key"])] = (attempt_id, task)
+
+        for suffix, task_key, project_id in (
+            ("grandfathered-one", "grandfathered_one", project_one),
+            ("grandfathered-two", "grandfathered_two", project_two),
+        ):
+            run_id = f"run-{suffix}"
+            self._insert_run(
+                run_id,
+                status="COMMITTING",
+                project_id=project_id,
+            )
+            review = self._seed_review(
+                run_id,
+                suffix,
+                decision="APPROVE",
+                verdict="PASS",
+            )
+            with contextlib.closing(self.connect()) as connection:
+                connection.execute(
+                    "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                    (run_id, attempts[task_key][0]),
+                )
+                run = INTEGRATOR.get_run(connection, run_id)
+                INTEGRATOR.insert_integration(
+                    connection,
+                    integration_id=f"integration-{suffix}",
+                    run=run,
+                    review=review,
+                    owner=OWNER,
+                    decision="APPROVE",
+                    verdict="PASS",
+                    status="PREPARED",
+                    evidence={"main_before": "a" * 40},
+                    snapshot_verified=True,
+                    review_current=True,
+                )
+                connection.commit()
+
+        ORCHESTRATOR.finish_task_waiting_human(
+            attempts["gate"][1],
+            attempts["gate"][0],
+            {
+                "kind": "PIPELINE",
+                "integration": {
+                    "action": "BLOCK_HUMAN",
+                    "status": "BLOCKED",
+                    "integrated": False,
+                },
+            },
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            (
+                "RUNNING",
+                "waiting for in-flight integration before human decision",
+            ),
+        )
+
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE integration_executions SET status='COMPLETED' "
+                "WHERE integration_id='integration-grandfathered-one'"
+            )
+            connection.execute(
+                "UPDATE runs SET status='COMPLETED' "
+                "WHERE run_id='run-grandfathered-one'"
+            )
+            connection.execute(
+                "UPDATE orchestration_attempts SET status='COMPLETED' "
+                "WHERE attempt_id=?",
+                (attempts["grandfathered_one"][0],),
+            )
+            connection.execute(
+                "UPDATE orchestration_tasks SET status='COMPLETED' "
+                "WHERE orchestration_task_id=?",
+                (attempts["grandfathered_one"][1]["orchestration_task_id"],),
+            )
+            connection.execute(
+                "UPDATE integration_executions SET status='FAILED' "
+                "WHERE integration_id='integration-grandfathered-two'"
+            )
+            connection.execute(
+                "UPDATE runs SET status='RECOVERING', "
+                "recovery_decision='BLOCK_HUMAN' "
+                "WHERE run_id='run-grandfathered-two'"
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            (
+                "RUNNING",
+                "waiting for in-flight integration before human decision",
+            ),
+            "Recovery of one grandfathered run must retain the deferred gate",
+        )
+
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE integration_executions SET status='COMPLETED' "
+                "WHERE integration_id='integration-grandfathered-two'"
+            )
+            connection.execute(
+                "UPDATE runs SET status='COMPLETED', recovery_decision='RESUME_SAFE' "
+                "WHERE run_id='run-grandfathered-two'"
+            )
+            connection.execute(
+                "UPDATE orchestration_attempts SET status='COMPLETED' "
+                "WHERE attempt_id=?",
+                (attempts["grandfathered_two"][0],),
+            )
+            connection.execute(
+                "UPDATE orchestration_tasks SET status='COMPLETED' "
+                "WHERE orchestration_task_id=?",
+                (attempts["grandfathered_two"][1]["orchestration_task_id"],),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+
+    def test_human_gate_blocks_two_pre_ponr_siblings(self) -> None:
+        project_one = "lifecycle-pre-ponr-one"
+        project_two = "lifecycle-pre-ponr-two"
+        self._insert_project(project_one)
+        self._insert_project(project_two)
+        plan = self._plan(
+            self._task("gate"),
+            self._task("pre_ponr_one"),
+            self._task("pre_ponr_two"),
+        )
+        plan["max_parallel_tasks"] = 3
+        plan_id = ORCHESTRATOR.insert_plan(
+            plan,
+            source="TEST",
+            initial_status="READY",
+        )
+        objective_id = self._insert_objective(source="TEST", plan_id=plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE objective_queue SET status='RUNNING' WHERE objective_id=?",
+                (objective_id,),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+
+        attempts: dict[str, tuple[str, sqlite3.Row]] = {}
+        with contextlib.closing(self.connect()) as connection:
+            task_rows = connection.execute(
+                "SELECT task_key, orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=?",
+                (plan_id,),
+            ).fetchall()
+        for row in task_rows:
+            attempt_id, _, task = ORCHESTRATOR.reserve_attempt(
+                str(row["orchestration_task_id"]),
+                instance_id="test-instance",
+            )
+            attempts[str(row["task_key"])] = (attempt_id, task)
+
+        runs: list[tuple[sqlite3.Row, sqlite3.Row]] = []
+        for suffix, task_key, project_id in (
+            ("pre-ponr-one", "pre_ponr_one", project_one),
+            ("pre-ponr-two", "pre_ponr_two", project_two),
+        ):
+            run_id = f"run-{suffix}"
+            self._insert_run(
+                run_id,
+                status="REVIEWING",
+                project_id=project_id,
+            )
+            review = self._seed_review(
+                run_id,
+                suffix,
+                decision="APPROVE",
+                verdict="PASS",
+            )
+            with contextlib.closing(self.connect()) as connection:
+                connection.execute(
+                    "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                    (run_id, attempts[task_key][0]),
+                )
+                connection.commit()
+                run = INTEGRATOR.get_run(connection, run_id)
+            runs.append((run, review))
+
+        ORCHESTRATOR.finish_task_waiting_human(
+            attempts["gate"][1],
+            attempts["gate"][0],
+            {
+                "kind": "PIPELINE",
+                "integration": {
+                    "action": "BLOCK_HUMAN",
+                    "status": "BLOCKED",
+                    "integrated": False,
+                },
+            },
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+
+        original_git = INTEGRATOR.git
+        INTEGRATOR.git = lambda *_: self.fail("pre-PONR sibling reached Git")
+        try:
+            for run, review in runs:
+                result = INTEGRATOR.integrate_approved(
+                    run=run,
+                    review=review,
+                    owner=OWNER,
+                    decision="APPROVE",
+                    verdict="PASS",
+                    evidence={
+                        "repository": str(self.root / "repository-unused"),
+                        "worktree": str(self.root / "worktree-unused"),
+                        "main_before": "a" * 40,
+                    },
+                    transaction=None,
+                )
+                self.assertEqual(
+                    (result["action"], result["status"], result["integrated"]),
+                    ("BLOCK_HUMAN", "BLOCKED", False),
+                )
+        finally:
+            INTEGRATOR.git = original_git
+        self.assertEqual(
+            int(
+                self._row(
+                    "SELECT COUNT(*) FROM integration_executions "
+                    "WHERE run_id IN ('run-pre-ponr-one', 'run-pre-ponr-two')"
+                )[0]
+            ),
+            0,
         )
 
     def test_cancel_waiting_human_cleanup_success_converges(self) -> None:

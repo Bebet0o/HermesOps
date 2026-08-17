@@ -630,8 +630,14 @@ def run_plan_is_waiting_human(
         fail("Run is linked to multiple orchestration plans")
     return bool(
         rows
-        and rows[0]["status"] == "BLOCKED"
-        and rows[0]["last_error"] == "waiting for human decision"
+        and (
+            (
+                rows[0]["status"] == "BLOCKED"
+                and rows[0]["last_error"] == "waiting for human decision"
+            )
+            or rows[0]["last_error"]
+            == "waiting for in-flight integration before human decision"
+        )
     )
 
 
