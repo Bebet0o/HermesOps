@@ -267,6 +267,77 @@ def running_task_count(
     )
 
 
+def integration_point_of_no_return(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+) -> bool:
+    if plan_id is None:
+        return False
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id = attempt.orchestration_task_id
+                JOIN runs AS run
+                  ON run.run_id = attempt.run_id
+                WHERE task.plan_id = ?
+                  AND (
+                        run.status IN ('COMMITTING', 'COMPLETED')
+                        OR EXISTS (
+                            SELECT 1
+                            FROM integration_executions AS integration
+                            WHERE integration.run_id = run.run_id
+                              AND integration.decision = 'APPROVE'
+                              AND integration.status IN (
+                                  'PREPARED', 'COMPLETED', 'FAILED'
+                              )
+                        )
+                  )
+            )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
+    )
+
+
+def resumed_status_for_plan(plan_status: str | None) -> str:
+    if plan_status in {None, "DRAFT", "READY", "RUNNING"}:
+        return "QUEUED"
+    if plan_status == "BLOCKED":
+        return "RUNNING"
+    if plan_status in TERMINAL_STATUSES:
+        return plan_status
+    fail(f"Unsupported orchestration plan status during resume: {plan_status}")
+
+
+def active_run_count(
+    connection: sqlite3.Connection,
+    plan_id: str | None,
+) -> int:
+    if plan_id is None:
+        return 0
+    return int(
+        connection.execute(
+            """
+            SELECT COUNT(DISTINCT run.run_id)
+            FROM orchestration_attempts AS attempt
+            JOIN orchestration_tasks AS task
+              ON task.orchestration_task_id = attempt.orchestration_task_id
+            JOIN runs AS run ON run.run_id = attempt.run_id
+            WHERE task.plan_id = ?
+              AND run.status IN (
+                  'SNAPSHOTTING', 'RUNNING', 'REVIEWING',
+                  'WAITING_HUMAN', 'COMMITTING', 'RECOVERING'
+              )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
+    )
+
+
 def cancel_plan_in_transaction(
     connection: sqlite3.Connection,
     plan_id: str | None,
@@ -441,6 +512,9 @@ def command_pause(arguments: argparse.Namespace) -> None:
             connection.rollback()
             fail(f"Unknown objective: {arguments.objective}")
         old = row["status"]
+        if old == "CANCEL_REQUESTED":
+            connection.rollback()
+            fail("Objective cancellation is pending")
         if old in TERMINAL_STATUSES:
             connection.rollback()
             fail(f"Objective is terminal: {old}")
@@ -477,7 +551,13 @@ def command_resume(arguments: argparse.Namespace) -> None:
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         row = connection.execute(
-            "SELECT status FROM objective_queue WHERE objective_id = ?",
+            """
+            SELECT objective.*, plan.status AS plan_status
+            FROM objective_queue AS objective
+            LEFT JOIN orchestration_plans AS plan
+              ON plan.plan_id = objective.plan_id
+            WHERE objective.objective_id = ?
+            """,
             (arguments.objective,),
         ).fetchone()
         if row is None:
@@ -486,25 +566,40 @@ def command_resume(arguments: argparse.Namespace) -> None:
         if row["status"] != "PAUSED":
             connection.rollback()
             fail("Objective can only resume from PAUSED")
+        if row["plan_id"] is not None and row["plan_status"] is None:
+            connection.rollback()
+            fail("Objective plan disappeared during resume")
+        new = resumed_status_for_plan(row["plan_status"])
+        terminal = new in TERMINAL_STATUSES
+        error = {
+            "FAILED": "linked orchestration plan failed",
+            "CANCELLED": "linked orchestration plan cancelled",
+        }.get(new)
         connection.execute(
             """
             UPDATE objective_queue
-            SET status = 'QUEUED',
-                not_before = ?,
+            SET status = ?,
                 heartbeat_at = ?,
                 paused_at = NULL,
-                finished_at = NULL,
-                last_error = NULL
+                finished_at = CASE WHEN ? THEN ? ELSE NULL END,
+                last_error = ?
             WHERE objective_id = ?
             """,
-            (now, now, arguments.objective),
+            (
+                new,
+                now,
+                1 if terminal else 0,
+                now,
+                error,
+                arguments.objective,
+            ),
         )
         add_event(
             connection,
             objective_id=arguments.objective,
             event_type="OBJECTIVE_RESUMED",
             old_status="PAUSED",
-            new_status="QUEUED",
+            new_status=new,
         )
         connection.commit()
     print(json.dumps(objective_payload(arguments.objective), indent=2, sort_keys=True))
@@ -525,8 +620,12 @@ def command_cancel(arguments: argparse.Namespace) -> None:
         if old in TERMINAL_STATUSES:
             connection.rollback()
             fail(f"Objective is terminal: {old}")
+        if integration_point_of_no_return(connection, row["plan_id"]):
+            connection.rollback()
+            fail("Objective passed the integration point of no return")
         running = running_task_count(connection, row["plan_id"])
-        if old == "PLANNING" or running:
+        active_runs = active_run_count(connection, row["plan_id"])
+        if old == "PLANNING" or running or active_runs:
             new = "CANCEL_REQUESTED"
         else:
             new = "CANCELLED"

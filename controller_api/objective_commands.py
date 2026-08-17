@@ -427,6 +427,80 @@ class ObjectiveCommandStore:
         )
 
     @staticmethod
+    def _integration_point_of_no_return(
+        connection: sqlite3.Connection,
+        plan_id: str | None,
+    ) -> bool:
+        if plan_id is None:
+            return False
+        return bool(
+            connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM orchestration_attempts AS attempt
+                    JOIN orchestration_tasks AS task
+                      ON task.orchestration_task_id = attempt.orchestration_task_id
+                    JOIN runs AS run ON run.run_id = attempt.run_id
+                    WHERE task.plan_id = ?
+                      AND (
+                            run.status IN ('COMMITTING', 'COMPLETED')
+                            OR EXISTS (
+                                SELECT 1
+                                FROM integration_executions AS integration
+                                WHERE integration.run_id = run.run_id
+                                  AND integration.decision = 'APPROVE'
+                                  AND integration.status IN (
+                                      'PREPARED', 'COMPLETED', 'FAILED'
+                                  )
+                            )
+                      )
+                )
+                """,
+                (plan_id,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _active_run_count(
+        connection: sqlite3.Connection,
+        plan_id: str | None,
+    ) -> int:
+        if plan_id is None:
+            return 0
+        return int(
+            connection.execute(
+                """
+                SELECT COUNT(DISTINCT run.run_id)
+                FROM orchestration_attempts AS attempt
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id = attempt.orchestration_task_id
+                JOIN runs AS run ON run.run_id = attempt.run_id
+                WHERE task.plan_id = ?
+                  AND run.status IN (
+                      'SNAPSHOTTING', 'RUNNING', 'REVIEWING',
+                      'WAITING_HUMAN', 'COMMITTING', 'RECOVERING'
+                  )
+                """,
+                (plan_id,),
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _resumed_status_for_plan(plan_status: str | None) -> str:
+        if plan_status in {None, "DRAFT", "READY", "RUNNING"}:
+            return "QUEUED"
+        if plan_status == "BLOCKED":
+            return "RUNNING"
+        if plan_status in TERMINAL_STATUSES:
+            return plan_status
+        raise ControllerError(
+            503,
+            "objective_plan_state_invalid",
+            "Objective plan state unavailable",
+        )
+
+    @staticmethod
     def _cancel_plan(connection: sqlite3.Connection, plan_id: str | None, now: str) -> None:
         if plan_id is None:
             return
@@ -878,14 +952,40 @@ class ObjectiveCommandStore:
                 elif command == "resume":
                     if old != "PAUSED":
                         raise ControllerError(409, "objective_not_paused", "Objective can only resume from PAUSED")
-                    new = "QUEUED"
+                    plan_status: str | None = None
+                    if row["plan_id"] is not None:
+                        plan_row = connection.execute(
+                            "SELECT status FROM orchestration_plans WHERE plan_id=?",
+                            (row["plan_id"],),
+                        ).fetchone()
+                        if plan_row is None:
+                            raise ControllerError(
+                                503,
+                                "objective_plan_unavailable",
+                                "Objective plan unavailable",
+                            )
+                        plan_status = str(plan_row["status"])
+                    new = self._resumed_status_for_plan(plan_status)
+                    terminal = new in TERMINAL_STATUSES
+                    error = {
+                        "FAILED": "linked orchestration plan failed",
+                        "CANCELLED": "linked orchestration plan cancelled",
+                    }.get(new)
                     connection.execute(
                         """
-                        UPDATE objective_queue SET status='QUEUED',
-                            heartbeat_at=?, paused_at=NULL, finished_at=NULL,
-                            last_error=NULL WHERE objective_id=?
+                        UPDATE objective_queue SET status=?,
+                            heartbeat_at=?, paused_at=NULL,
+                            finished_at=CASE WHEN ? THEN ? ELSE NULL END,
+                            last_error=? WHERE objective_id=?
                         """,
-                        (now, objective_id),
+                        (
+                            new,
+                            now,
+                            1 if terminal else 0,
+                            now,
+                            error,
+                            objective_id,
+                        ),
                     )
                     self._add_event(
                         connection,
@@ -901,9 +1001,24 @@ class ObjectiveCommandStore:
                 else:
                     if old in TERMINAL_STATUSES:
                         raise ControllerError(409, "objective_terminal", "Objective is terminal")
+                    if self._integration_point_of_no_return(
+                        connection,
+                        row["plan_id"],
+                    ):
+                        raise ControllerError(
+                            409,
+                            "objective_integration_committed",
+                            "Objective passed the integration point of no return",
+                        )
                     running = self._running_task_count(connection, row["plan_id"])
-                    new = "CANCEL_REQUESTED" if old == "PLANNING" or running else "CANCELLED"
-                    self._cancel_plan(connection, row["plan_id"], now)
+                    active_runs = self._active_run_count(connection, row["plan_id"])
+                    new = (
+                        "CANCEL_REQUESTED"
+                        if old == "PLANNING" or running or active_runs
+                        else "CANCELLED"
+                    )
+                    if new == "CANCELLED":
+                        self._cancel_plan(connection, row["plan_id"], now)
                     connection.execute(
                         """
                         UPDATE objective_queue SET status=?, heartbeat_at=?,
