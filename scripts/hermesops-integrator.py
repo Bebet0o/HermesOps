@@ -617,7 +617,7 @@ def run_plan_has_active_human_gate(
 ) -> bool:
     rows = connection.execute(
         """
-        SELECT DISTINCT plan.plan_id, plan.status, plan.last_error
+        SELECT DISTINCT plan.plan_id
         FROM orchestration_attempts AS attempt
         JOIN orchestration_tasks AS task
           ON task.orchestration_task_id = attempt.orchestration_task_id
@@ -646,17 +646,7 @@ def run_plan_has_active_human_gate(
         """,
         (rows[0]["plan_id"],),
     ).fetchone()[0]
-    return bool(
-        pending_approval
-        or (
-            (
-                rows[0]["status"] == "BLOCKED"
-                and rows[0]["last_error"] == "waiting for human decision"
-            )
-            or rows[0]["last_error"]
-            == "waiting for in-flight integration before human decision"
-        )
-    )
+    return bool(pending_approval)
 
 
 def cancelled_integration_result(run_id: str) -> dict[str, Any]:
