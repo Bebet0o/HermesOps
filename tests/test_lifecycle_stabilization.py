@@ -406,6 +406,205 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         ORCHESTRATOR.finish_task_waiting_human(task, attempt_id, result)
         return objective_id, plan_id, attempt_id, task
 
+    def _create_human_gate_with_running_sibling(
+        self,
+        suffix: str,
+        *,
+        sibling_max_attempts: int = 1,
+    ) -> tuple[str, str, str, sqlite3.Row]:
+        _, plan_id, gate_attempt_id, gate_task = self._create_running_plan()
+        sibling_id = str(
+            self._row(
+                "SELECT orchestration_task_id FROM orchestration_tasks "
+                "WHERE plan_id=? AND task_key='after_cancel'",
+                (plan_id,),
+            )[0]
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_tasks SET max_attempts=? "
+                "WHERE orchestration_task_id=?",
+                (sibling_max_attempts, sibling_id),
+            )
+            connection.commit()
+        sibling_attempt_id, _, sibling_task = ORCHESTRATOR.reserve_attempt(
+            sibling_id,
+            instance_id="test-instance",
+        )
+
+        gate_run_id = f"run-{suffix}-gate"
+        self._insert_run(gate_run_id, status="REVIEWING")
+        gate_review = self._seed_review(
+            gate_run_id,
+            f"{suffix}-gate",
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                (gate_run_id, gate_attempt_id),
+            )
+            connection.commit()
+            gate_run = INTEGRATOR.get_run(connection, gate_run_id)
+        gate_result = INTEGRATOR.record_non_integration(
+            run=gate_run,
+            review=gate_review,
+            owner=OWNER,
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+            action="BLOCK_HUMAN",
+            evidence={"main_before": "a" * 40},
+        )
+        ORCHESTRATOR.finish_task_waiting_human(
+            gate_task,
+            gate_attempt_id,
+            {"kind": "PIPELINE", "integration": gate_result},
+        )
+        return plan_id, gate_run_id, sibling_attempt_id, sibling_task
+
+    def _resolve_plan_approvals(self, plan_id: str) -> None:
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE approvals SET status='CANCELLED', resolved_at=? "
+                "WHERE status='PENDING' AND run_id IN ("
+                "SELECT attempt.run_id FROM orchestration_attempts AS attempt "
+                "JOIN orchestration_tasks AS task "
+                "ON task.orchestration_task_id=attempt.orchestration_task_id "
+                "WHERE task.plan_id=?"
+                ")",
+                (NOW, plan_id),
+            )
+            connection.commit()
+
+    def _finish_task_with_pending_human_gate(
+        self,
+        task: sqlite3.Row,
+        attempt_id: str,
+        suffix: str,
+    ) -> dict[str, Any]:
+        run_id = f"run-{suffix}-human-gate"
+        project_id = f"lifecycle-{suffix}-human-gate"
+        self._insert_project(project_id)
+        self._insert_run(run_id, status="REVIEWING", project_id=project_id)
+        review = self._seed_review(
+            run_id,
+            f"{suffix}-human-gate",
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                (run_id, attempt_id),
+            )
+            connection.commit()
+            run = INTEGRATOR.get_run(connection, run_id)
+        result = INTEGRATOR.record_non_integration(
+            run=run,
+            review=review,
+            owner=OWNER,
+            decision="BLOCK_HUMAN",
+            verdict="HUMAN",
+            action="BLOCK_HUMAN",
+            evidence={"main_before": "a" * 40},
+        )
+        ORCHESTRATOR.finish_task_waiting_human(
+            task,
+            attempt_id,
+            {"kind": "PIPELINE", "integration": result},
+        )
+        return result
+
+    def _assert_execute_pipeline_ignores_resolved_marker(
+        self,
+        *,
+        marker: str,
+        suffix: str,
+    ) -> None:
+        plan_id, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling(suffix)
+        )
+        self._resolve_plan_approvals(plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status=?, last_error=? "
+                "WHERE plan_id=?",
+                (
+                    "BLOCKED" if marker == "waiting for human decision" else "RUNNING",
+                    marker,
+                    plan_id,
+                ),
+            )
+            connection.commit()
+
+        run_id = f"run-{suffix}-pipeline"
+        pipeline_project = f"lifecycle-{suffix}-pipeline"
+        self._insert_project(pipeline_project)
+        self._insert_run(
+            run_id,
+            status="RUNNING",
+            project_id=pipeline_project,
+        )
+        integration_calls: list[list[str]] = []
+        rollback_calls: list[str] = []
+        original_run_json = ORCHESTRATOR.run_json
+        original_reviewer = ORCHESTRATOR.launch_reviewer_with_transport_retry
+        original_rollback = ORCHESTRATOR.rollback_run_best_effort
+
+        def fake_run_json(arguments: list[str], *, timeout: int) -> dict[str, Any]:
+            command = Path(arguments[0]).name
+            action = arguments[1]
+            if command == "hermesops-transaction.py" and action == "begin":
+                return {"run_id": run_id}
+            if command == "hermesops-worker.py":
+                return {"execution_id": f"worker-{suffix}", "exit_code": 0}
+            if command == "hermesops-transaction.py" and action == "submit":
+                return {"run_id": run_id, "status": "REVIEWING"}
+            if command == "hermesops-integrator.py" and action == "apply":
+                integration_calls.append(arguments)
+                return {
+                    "integration_id": None,
+                    "run_id": run_id,
+                    "action": "INTEGRATE",
+                    "status": "COMPLETED",
+                    "integrated": True,
+                }
+            raise AssertionError(arguments)
+
+        def fake_rollback(called_run_id: str, timeout: int) -> bool:
+            rollback_calls.append(called_run_id)
+            return True
+
+        ORCHESTRATOR.run_json = fake_run_json
+        ORCHESTRATOR.launch_reviewer_with_transport_retry = lambda *args, **kwargs: (
+            {"execution_id": f"reviewer-{suffix}", "decision": "APPROVE"},
+            [],
+            {},
+        )
+        ORCHESTRATOR.rollback_run_best_effort = fake_rollback
+        try:
+            result = ORCHESTRATOR.execute_pipeline(
+                sibling_task,
+                sibling_attempt_id,
+                "test-instance",
+                {
+                    "command_timeout_seconds": 5,
+                    "worker_timeout_seconds": 5,
+                },
+            )
+        finally:
+            ORCHESTRATOR.run_json = original_run_json
+            ORCHESTRATOR.launch_reviewer_with_transport_retry = original_reviewer
+            ORCHESTRATOR.rollback_run_best_effort = original_rollback
+
+        self.assertEqual(len(integration_calls), 1)
+        self.assertEqual(rollback_calls, [])
+        self.assertEqual(
+            (result["integration"]["action"], result["integration"]["integrated"]),
+            ("INTEGRATE", True),
+        )
+
     def test_ai_objective_resume_continues_with_its_existing_plan(self) -> None:
         objective_id = self._insert_objective(source="AI")
         reserved = ORCHESTRATOR.reserve_ai_objective(
@@ -1077,17 +1276,10 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                     instance_id="test-instance",
                 )
 
-                ORCHESTRATOR.finish_task_waiting_human(
+                self._finish_task_with_pending_human_gate(
                     gate_task,
                     gate_attempt_id,
-                    {
-                        "kind": "PIPELINE",
-                        "integration": {
-                            "action": "BLOCK_HUMAN",
-                            "status": "BLOCKED",
-                            "integrated": False,
-                        },
-                    },
+                    f"parallel-outcome-{sibling_outcome}",
                 )
                 if sibling_outcome == "success":
                     ORCHESTRATOR.finish_task_success(
@@ -1264,17 +1456,10 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             raise AssertionError(arguments)
 
         def reviewer_then_gate(*args: Any, **kwargs: Any) -> tuple[Any, ...]:
-            ORCHESTRATOR.finish_task_waiting_human(
+            self._finish_task_with_pending_human_gate(
                 gate_task,
                 gate_attempt_id,
-                {
-                    "kind": "PIPELINE",
-                    "integration": {
-                        "action": "BLOCK_HUMAN",
-                        "status": "BLOCKED",
-                        "integrated": False,
-                    },
-                },
+                "parallel-review",
             )
             return (
                 {"execution_id": "review-parallel-gate", "decision": "APPROVE"},
@@ -1704,17 +1889,10 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                 ),
                 ("COMMITTING", "PREPARED"),
             )
-            ORCHESTRATOR.finish_task_waiting_human(
+            self._finish_task_with_pending_human_gate(
                 gate_task,
                 gate_attempt_id,
-                {
-                    "kind": "PIPELINE",
-                    "integration": {
-                        "action": "BLOCK_HUMAN",
-                        "status": "BLOCKED",
-                        "integrated": False,
-                    },
-                },
+                "prepared-race",
             )
             self.assertEqual(
                 tuple(
@@ -2738,6 +2916,224 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         self.assertFalse(self._human_gate_active(current_run))
         self.assertTrue(self._human_gate_active(unrelated_run))
 
+    def test_resolved_final_gate_does_not_block_finish_task_success(self) -> None:
+        plan_id, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling("rc7-success-resolved")
+        )
+        self._resolve_plan_approvals(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+
+        ORCHESTRATOR.finish_task_success(
+            sibling_task,
+            sibling_attempt_id,
+            {"kind": "NOOP", "completed": True},
+        )
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT task.status, attempt.status, task.failure_reason "
+                    "FROM orchestration_tasks AS task "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "WHERE task.orchestration_task_id=? AND attempt.attempt_id=?",
+                    (sibling_task["orchestration_task_id"], sibling_attempt_id),
+                )
+            ),
+            ("COMPLETED", "COMPLETED", None),
+        )
+
+    def test_pending_gate_still_blocks_finish_task_success(self) -> None:
+        _, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling("rc7-success-pending")
+        )
+        ORCHESTRATOR.finish_task_success(
+            sibling_task,
+            sibling_attempt_id,
+            {"kind": "NOOP", "completed": True},
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT task.status, attempt.status, task.failure_reason "
+                    "FROM orchestration_tasks AS task "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "WHERE task.orchestration_task_id=? AND attempt.attempt_id=?",
+                    (sibling_task["orchestration_task_id"], sibling_attempt_id),
+                )
+            ),
+            ("BLOCKED", "COMPLETED", "waiting for human decision"),
+        )
+
+    def test_pending_gate_with_recovery_marker_still_blocks_success(self) -> None:
+        plan_id, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling("rc7-success-recovery")
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status='BLOCKED', last_error=? "
+                "WHERE plan_id=?",
+                ("cancellation cleanup requires recovery", plan_id),
+            )
+            connection.commit()
+        ORCHESTRATOR.finish_task_success(
+            sibling_task,
+            sibling_attempt_id,
+            {"kind": "NOOP", "completed": True},
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT task.status, attempt.status FROM orchestration_tasks AS task "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "WHERE task.orchestration_task_id=? AND attempt.attempt_id=?",
+                    (sibling_task["orchestration_task_id"], sibling_attempt_id),
+                )
+            ),
+            ("BLOCKED", "COMPLETED"),
+        )
+
+    def test_resolved_final_gate_does_not_suppress_failure_retry(self) -> None:
+        plan_id, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling(
+                "rc7-failure-resolved",
+                sibling_max_attempts=2,
+            )
+        )
+        self._resolve_plan_approvals(plan_id)
+        ORCHESTRATOR.finish_task_failure(
+            sibling_task,
+            sibling_attempt_id,
+            "retryable sibling failure",
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT task.status, attempt.status, task.failure_reason "
+                    "FROM orchestration_tasks AS task "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "WHERE task.orchestration_task_id=? AND attempt.attempt_id=?",
+                    (sibling_task["orchestration_task_id"], sibling_attempt_id),
+                )
+            ),
+            ("READY", "FAILED", "retryable sibling failure"),
+        )
+
+    def test_pending_gate_still_suppresses_failure_retry(self) -> None:
+        _, _, sibling_attempt_id, sibling_task = (
+            self._create_human_gate_with_running_sibling(
+                "rc7-failure-pending",
+                sibling_max_attempts=2,
+            )
+        )
+        ORCHESTRATOR.finish_task_failure(
+            sibling_task,
+            sibling_attempt_id,
+            "retryable sibling failure",
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT task.status, attempt.status FROM orchestration_tasks AS task "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "WHERE task.orchestration_task_id=? AND attempt.attempt_id=?",
+                    (sibling_task["orchestration_task_id"], sibling_attempt_id),
+                )
+            ),
+            ("BLOCKED", "FAILED"),
+        )
+
+    def test_resolved_final_marker_does_not_short_circuit_execute_pipeline(self) -> None:
+        self._assert_execute_pipeline_ignores_resolved_marker(
+            marker="waiting for human decision",
+            suffix="rc7-pipeline-final",
+        )
+
+    def test_resolved_deferred_marker_does_not_short_circuit_execute_pipeline(self) -> None:
+        self._assert_execute_pipeline_ignores_resolved_marker(
+            marker="waiting for in-flight integration before human decision",
+            suffix="rc7-pipeline-deferred",
+        )
+
+    def test_resolved_deferred_marker_is_not_promoted_by_refresh(self) -> None:
+        plan_id, _, _, _ = self._create_human_gate_with_running_sibling(
+            "rc7-refresh-resolved"
+        )
+        self._resolve_plan_approvals(plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status='RUNNING', last_error=? "
+                "WHERE plan_id=?",
+                ("waiting for in-flight integration before human decision", plan_id),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("RUNNING", "waiting for in-flight integration before human decision"),
+        )
+
+    def test_pending_deferred_marker_is_finalized_by_refresh(self) -> None:
+        plan_id, _, _, _ = self._create_human_gate_with_running_sibling(
+            "rc7-refresh-pending"
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_plans SET status='RUNNING', last_error=? "
+                "WHERE plan_id=?",
+                ("waiting for in-flight integration before human decision", plan_id),
+            )
+            connection.commit()
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+
+    def test_orchestrator_gate_ignores_markers_without_pending_approval(self) -> None:
+        _, plan_id, _, _ = self._create_running_plan()
+        for status, marker in (
+            ("BLOCKED", "waiting for human decision"),
+            ("RUNNING", "waiting for in-flight integration before human decision"),
+        ):
+            with self.subTest(marker=marker):
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE orchestration_plans SET status=?, last_error=? "
+                        "WHERE plan_id=?",
+                        (status, marker, plan_id),
+                    )
+                    connection.commit()
+                    self.assertFalse(
+                        ORCHESTRATOR.plan_is_waiting_human(connection, plan_id)
+                    )
+                    self.assertFalse(
+                        ORCHESTRATOR.plan_has_pending_human_gate(connection, plan_id)
+                    )
+                self.assertFalse(ORCHESTRATOR.plan_waiting_human_requested(plan_id))
+
     def test_deferred_gate_waits_for_all_grandfathered_integrations(self) -> None:
         project_one = "lifecycle-grandfathered-one"
         project_two = "lifecycle-grandfathered-two"
@@ -2814,17 +3210,10 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                 )
                 connection.commit()
 
-        ORCHESTRATOR.finish_task_waiting_human(
+        self._finish_task_with_pending_human_gate(
             attempts["gate"][1],
             attempts["gate"][0],
-            {
-                "kind": "PIPELINE",
-                "integration": {
-                    "action": "BLOCK_HUMAN",
-                    "status": "BLOCKED",
-                    "integrated": False,
-                },
-            },
+            "all-grandfathered",
         )
         self.assertEqual(
             tuple(

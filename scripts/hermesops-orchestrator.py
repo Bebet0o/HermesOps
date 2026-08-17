@@ -966,6 +966,7 @@ def refresh_plan_states(plan_id: str) -> None:
                 (plan_id,),
             ).fetchall()
         ]
+        human_gate_active = plan_has_active_human_gate(connection, plan_id)
 
         if statuses and all(status == "COMPLETED" for status in statuses):
             connection.execute(
@@ -987,7 +988,10 @@ def refresh_plan_states(plan_id: str) -> None:
                 severity="INFO",
                 payload={},
             )
-        elif plan["last_error"] == HUMAN_GATE_DEFERRED_ERROR:
+        elif (
+            human_gate_active
+            and plan["last_error"] == HUMAN_GATE_DEFERRED_ERROR
+        ):
             if plan_has_authorized_integration_in_flight(connection, plan_id):
                 connection.execute(
                     """
@@ -1018,11 +1022,16 @@ def refresh_plan_states(plan_id: str) -> None:
                 )
         elif (
             plan["status"] == "BLOCKED"
-            and plan["last_error"] in {
-                HUMAN_GATE_ERROR,
-                CANCELLATION_RECOVERY_ERROR,
-                CANCELLATION_PENDING_ERROR,
-            }
+            and (
+                (
+                    human_gate_active
+                    and plan["last_error"] == HUMAN_GATE_ERROR
+                )
+                or plan["last_error"] in {
+                    CANCELLATION_RECOVERY_ERROR,
+                    CANCELLATION_PENDING_ERROR,
+                }
+            )
         ):
             connection.execute(
                 """
@@ -1263,6 +1272,7 @@ def plan_is_waiting_human(
     ).fetchone()
     return bool(
         row is not None
+        and plan_has_active_human_gate(connection, plan_id)
         and row["status"] == "BLOCKED"
         and row["last_error"] == HUMAN_GATE_ERROR
     )
@@ -1278,7 +1288,31 @@ def plan_has_pending_human_gate(
     ).fetchone()
     return bool(
         row is not None
+        and plan_has_active_human_gate(connection, plan_id)
         and row["last_error"] == HUMAN_GATE_DEFERRED_ERROR
+    )
+
+
+def plan_has_active_human_gate(
+    connection: sqlite3.Connection,
+    plan_id: str,
+) -> bool:
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM approvals AS approval
+                JOIN orchestration_attempts AS attempt
+                  ON attempt.run_id=approval.run_id
+                JOIN orchestration_tasks AS task
+                  ON task.orchestration_task_id=attempt.orchestration_task_id
+                WHERE task.plan_id=?
+                  AND approval.status='PENDING'
+            )
+            """,
+            (plan_id,),
+        ).fetchone()[0]
     )
 
 
@@ -1386,10 +1420,7 @@ def finish_task_success(
     with connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
         result_json = canonical_json(result)
-        human_gate = plan_is_waiting_human(
-            connection,
-            task["plan_id"],
-        ) or plan_has_pending_human_gate(connection, task["plan_id"])
+        human_gate = plan_has_active_human_gate(connection, task["plan_id"])
         authorized_integration = bool(
             result.get("kind") == "PIPELINE"
             and result.get("integration", {}).get("integrated")
@@ -1869,10 +1900,7 @@ def finish_task_failure(
             connection.rollback()
             return
 
-        if (
-            plan_is_waiting_human(connection, task["plan_id"])
-            or plan_has_pending_human_gate(connection, task["plan_id"])
-        ):
+        if plan_has_active_human_gate(connection, task["plan_id"]):
             finish_running_task_blocked_by_human_gate(
                 connection,
                 task,
@@ -3301,7 +3329,7 @@ def objective_cancellation_requested(plan_id: str) -> bool:
 
 def plan_waiting_human_requested(plan_id: str) -> bool:
     with connect() as connection:
-        return plan_is_waiting_human(connection, plan_id)
+        return plan_has_active_human_gate(connection, plan_id)
 
 
 def finish_objective_planning_success(
