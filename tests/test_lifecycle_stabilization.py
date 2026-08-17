@@ -477,6 +477,22 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
             )
             connection.commit()
 
+    def _complete_all_plan_tasks(self, plan_id: str) -> None:
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_tasks SET status='COMPLETED', "
+                "failure_reason=NULL, finished_at=? WHERE plan_id=?",
+                (NOW, plan_id),
+            )
+            connection.execute(
+                "UPDATE orchestration_attempts SET status='COMPLETED', finished_at=? "
+                "WHERE orchestration_task_id IN ("
+                "SELECT orchestration_task_id FROM orchestration_tasks WHERE plan_id=?"
+                ")",
+                (NOW, plan_id),
+            )
+            connection.commit()
+
     def _finish_task_with_pending_human_gate(
         self,
         task: sqlite3.Row,
@@ -603,6 +619,184 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
         self.assertEqual(
             (result["integration"]["action"], result["integration"]["integrated"]),
             ("INTEGRATE", True),
+        )
+
+    def test_cli_pause_rejects_cancel_requested_objective(self) -> None:
+        objective_id, _, _, _ = self._create_running_plan()
+        self._command(OBJECTIVES.command_cancel, objective_id)
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "CANCEL_REQUESTED",
+        )
+
+        with self.assertRaisesRegex(
+            OBJECTIVES.ObjectiveError,
+            "cancellation is pending",
+        ):
+            self._command(OBJECTIVES.command_pause, objective_id)
+
+        self.assertEqual(
+            self._row(
+                "SELECT status FROM objective_queue WHERE objective_id=?",
+                (objective_id,),
+            )[0],
+            "CANCEL_REQUESTED",
+        )
+
+    def test_cancel_remains_authoritative_after_rejected_cli_pause(self) -> None:
+        objective_id, _, attempt_id, _ = self._create_running_plan()
+        run_id = "run-rc8-cancel-pause-integration"
+        self._insert_run(run_id, status="REVIEWING")
+        review = self._seed_review(
+            run_id,
+            "rc8-cancel-pause-integration",
+            decision="APPROVE",
+            verdict="PASS",
+        )
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE orchestration_attempts SET run_id=? WHERE attempt_id=?",
+                (run_id, attempt_id),
+            )
+            connection.commit()
+            run = INTEGRATOR.get_run(connection, run_id)
+
+        self._command(OBJECTIVES.command_cancel, objective_id)
+        with self.assertRaisesRegex(
+            OBJECTIVES.ObjectiveError,
+            "cancellation is pending",
+        ):
+            self._command(OBJECTIVES.command_pause, objective_id)
+
+        original_git = INTEGRATOR.git
+        INTEGRATOR.git = lambda *_: self.fail("cancelled work reached Git")
+        try:
+            result = INTEGRATOR.integrate_approved(
+                run=run,
+                review=review,
+                owner=OWNER,
+                decision="APPROVE",
+                verdict="PASS",
+                evidence={
+                    "repository": str(self.root / "repository"),
+                    "worktree": str(self.root / "worktree"),
+                    "main_before": "a" * 40,
+                },
+                transaction=None,
+            )
+        finally:
+            INTEGRATOR.git = original_git
+
+        self.assertEqual(
+            (result["action"], result["status"], result["integrated"]),
+            ("CANCEL", "CANCELLED", False),
+        )
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, run.status, "
+                    "(SELECT COUNT(*) FROM integration_executions "
+                    "WHERE run_id=run.run_id) "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=? AND run.run_id=?",
+                    (objective_id, run_id),
+                )
+            ),
+            ("CANCEL_REQUESTED", "REVIEWING", 0),
+        )
+
+    def test_cli_resume_rejects_cancellation_and_non_paused_states(self) -> None:
+        for status in (
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+            "COMPLETED",
+            "FAILED",
+            "PAUSE_REQUESTED",
+        ):
+            with self.subTest(status=status):
+                objective_id = self._insert_objective(source="AI")
+                with contextlib.closing(self.connect()) as connection:
+                    connection.execute(
+                        "UPDATE objective_queue SET status=? WHERE objective_id=?",
+                        (status, objective_id),
+                    )
+                    connection.commit()
+                with self.assertRaisesRegex(
+                    OBJECTIVES.ObjectiveError,
+                    "only resume from PAUSED",
+                ):
+                    self._command(OBJECTIVES.command_resume, objective_id)
+                self.assertEqual(
+                    self._row(
+                        "SELECT status FROM objective_queue WHERE objective_id=?",
+                        (objective_id,),
+                    )[0],
+                    status,
+                )
+
+    def test_cli_resume_preserves_future_not_before(self) -> None:
+        future = "2099-01-01T00:00:00.000Z"
+        objective_id = OBJECTIVES.insert_objective(
+            objective="Future lifecycle objective",
+            source="AI",
+            priority=10,
+            not_before=future,
+            project_ids=[PROJECT_ID],
+            max_parallel_tasks=1,
+            planning_max_attempts=3,
+            plan_id=None,
+        )
+
+        for _ in range(2):
+            self._command(OBJECTIVES.command_pause, objective_id)
+            self._command(OBJECTIVES.command_resume, objective_id)
+            self.assertEqual(
+                tuple(
+                    self._row(
+                        "SELECT status, not_before FROM objective_queue "
+                        "WHERE objective_id=?",
+                        (objective_id,),
+                    )
+                ),
+                ("QUEUED", future),
+            )
+
+    def test_cli_resume_preserves_not_before_for_existing_ai_plan(self) -> None:
+        future = "2099-01-01T00:00:00.000Z"
+        plan_id = ORCHESTRATOR.insert_plan(
+            self._plan(self._task("future_planned_work")),
+            source="AI",
+            initial_status="DRAFT",
+        )
+        objective_id = OBJECTIVES.insert_objective(
+            objective="Future planned AI objective",
+            source="AI",
+            priority=10,
+            not_before=future,
+            project_ids=[PROJECT_ID],
+            max_parallel_tasks=1,
+            planning_max_attempts=3,
+            plan_id=plan_id,
+        )
+        self._command(OBJECTIVES.command_pause, objective_id)
+        self._command(OBJECTIVES.command_resume, objective_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, not_before, plan_id FROM objective_queue "
+                    "WHERE objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            ("QUEUED", future, plan_id),
         )
 
     def test_ai_objective_resume_continues_with_its_existing_plan(self) -> None:
@@ -3133,6 +3327,141 @@ class LifecycleStabilizationRegressionTest(unittest.TestCase):
                         ORCHESTRATOR.plan_has_pending_human_gate(connection, plan_id)
                     )
                 self.assertFalse(ORCHESTRATOR.plan_waiting_human_requested(plan_id))
+
+    def test_refresh_does_not_complete_plan_with_pending_human_approval(self) -> None:
+        objective_id, plan_id, _, _ = self._create_waiting_human_plan(
+            "run-rc8-pending-terminal-tasks"
+        )
+        self._complete_all_plan_tasks(plan_id)
+
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        ORCHESTRATOR.synchronize_objective_states()
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status, plan.last_error, "
+                    "approval.status, run.status "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN approvals AS approval ON approval.run_id=attempt.run_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            (
+                "RUNNING",
+                "BLOCKED",
+                "waiting for human decision",
+                "PENDING",
+                "WAITING_HUMAN",
+            ),
+        )
+        self.assertTrue(self._human_gate_active("run-rc8-pending-terminal-tasks"))
+
+    def test_refresh_completes_after_last_human_approval_is_resolved(self) -> None:
+        run_id = "run-rc8-resolved-terminal-tasks"
+        objective_id, plan_id, _, _ = self._create_waiting_human_plan(run_id)
+        self._complete_all_plan_tasks(plan_id)
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT status, last_error FROM orchestration_plans WHERE plan_id=?",
+                    (plan_id,),
+                )
+            ),
+            ("BLOCKED", "waiting for human decision"),
+        )
+
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE approvals SET status='CANCELLED', resolved_at=? "
+                "WHERE run_id=? AND status='PENDING'",
+                (NOW, run_id),
+            )
+            connection.execute(
+                "UPDATE runs SET status='COMPLETED', finished_at=?, heartbeat_at=? "
+                "WHERE run_id=?",
+                (NOW, NOW, run_id),
+            )
+            connection.execute("DELETE FROM project_locks WHERE run_id=?", (run_id,))
+            connection.commit()
+
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        ORCHESTRATOR.synchronize_objective_states()
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status, approval.status, run.status, "
+                    "EXISTS(SELECT 1 FROM project_locks AS lock "
+                    "WHERE lock.run_id=run.run_id) "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN approvals AS approval ON approval.run_id=attempt.run_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            ("COMPLETED", "COMPLETED", "CANCELLED", "COMPLETED", 0),
+        )
+        self.assertFalse(self._human_gate_active(run_id))
+
+    def test_refresh_preserves_recovery_with_pending_human_approval(self) -> None:
+        run_id = "run-rc8-recovery-terminal-tasks"
+        objective_id, plan_id, _, _ = self._create_waiting_human_plan(run_id)
+        self._complete_all_plan_tasks(plan_id)
+        with contextlib.closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE runs SET status='RECOVERING', "
+                "recovery_decision='BLOCK_HUMAN' WHERE run_id=?",
+                (run_id,),
+            )
+            connection.execute(
+                "UPDATE orchestration_plans SET status='BLOCKED', last_error=? "
+                "WHERE plan_id=?",
+                ("cancellation cleanup requires recovery", plan_id),
+            )
+            connection.commit()
+
+        ORCHESTRATOR.refresh_plan_states(plan_id)
+        ORCHESTRATOR.synchronize_objective_states()
+
+        self.assertEqual(
+            tuple(
+                self._row(
+                    "SELECT objective.status, plan.status, plan.last_error, "
+                    "approval.status, run.status, run.recovery_decision "
+                    "FROM objective_queue AS objective "
+                    "JOIN orchestration_plans AS plan ON plan.plan_id=objective.plan_id "
+                    "JOIN orchestration_tasks AS task ON task.plan_id=plan.plan_id "
+                    "JOIN orchestration_attempts AS attempt "
+                    "ON attempt.orchestration_task_id=task.orchestration_task_id "
+                    "JOIN approvals AS approval ON approval.run_id=attempt.run_id "
+                    "JOIN runs AS run ON run.run_id=attempt.run_id "
+                    "WHERE objective.objective_id=?",
+                    (objective_id,),
+                )
+            ),
+            (
+                "RUNNING",
+                "BLOCKED",
+                "cancellation cleanup requires recovery",
+                "PENDING",
+                "RECOVERING",
+                "BLOCK_HUMAN",
+            ),
+        )
+        self.assertTrue(self._human_gate_active(run_id))
 
     def test_deferred_gate_waits_for_all_grandfathered_integrations(self) -> None:
         project_one = "lifecycle-grandfathered-one"

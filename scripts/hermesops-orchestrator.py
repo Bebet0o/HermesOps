@@ -968,27 +968,7 @@ def refresh_plan_states(plan_id: str) -> None:
         ]
         human_gate_active = plan_has_active_human_gate(connection, plan_id)
 
-        if statuses and all(status == "COMPLETED" for status in statuses):
-            connection.execute(
-                """
-                UPDATE orchestration_plans
-                SET status = 'COMPLETED',
-                    heartbeat_at = ?,
-                    finished_at = ?,
-                    last_error = NULL
-                WHERE plan_id = ?
-                """,
-                (now, now, plan_id),
-            )
-            add_event(
-                connection,
-                plan_id=plan_id,
-                task_id=None,
-                event_type="ORCHESTRATION_PLAN_COMPLETED",
-                severity="INFO",
-                payload={},
-            )
-        elif (
+        if (
             human_gate_active
             and plan["last_error"] == HUMAN_GATE_DEFERRED_ERROR
         ):
@@ -1040,6 +1020,26 @@ def refresh_plan_states(plan_id: str) -> None:
                 WHERE plan_id = ?
                 """,
                 (now, plan_id),
+            )
+        elif statuses and all(status == "COMPLETED" for status in statuses):
+            connection.execute(
+                """
+                UPDATE orchestration_plans
+                SET status = 'COMPLETED',
+                    heartbeat_at = ?,
+                    finished_at = ?,
+                    last_error = NULL
+                WHERE plan_id = ?
+                """,
+                (now, now, plan_id),
+            )
+            add_event(
+                connection,
+                plan_id=plan_id,
+                task_id=None,
+                event_type="ORCHESTRATION_PLAN_COMPLETED",
+                severity="INFO",
+                payload={},
             )
         elif any(
             status in {"FAILED", "BLOCKED", "CANCELLED"}

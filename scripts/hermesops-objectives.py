@@ -512,6 +512,9 @@ def command_pause(arguments: argparse.Namespace) -> None:
             connection.rollback()
             fail(f"Unknown objective: {arguments.objective}")
         old = row["status"]
+        if old == "CANCEL_REQUESTED":
+            connection.rollback()
+            fail("Objective cancellation is pending")
         if old in TERMINAL_STATUSES:
             connection.rollback()
             fail(f"Objective is terminal: {old}")
@@ -576,7 +579,6 @@ def command_resume(arguments: argparse.Namespace) -> None:
             """
             UPDATE objective_queue
             SET status = ?,
-                not_before = ?,
                 heartbeat_at = ?,
                 paused_at = NULL,
                 finished_at = CASE WHEN ? THEN ? ELSE NULL END,
@@ -585,7 +587,6 @@ def command_resume(arguments: argparse.Namespace) -> None:
             """,
             (
                 new,
-                now,
                 now,
                 1 if terminal else 0,
                 now,
