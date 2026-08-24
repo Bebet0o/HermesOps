@@ -17,8 +17,11 @@ python3 -m py_compile \
 grep -Fq 'def precreate_reviewer_sandbox' \
     "${REPO}/scripts/hermesops-reviewer.py"
 
-grep -Fq 'f"{clone}:/workspace:ro"' \
+grep -Fq 'read_only=True' \
     "${REPO}/scripts/hermesops-reviewer.py"
+
+grep -Fq 'mount_mode = "ro" if sandbox.read_only else "rw"' \
+    "${REPO}/scripts/agent_runtime/hermes.py"
 
 grep -Fq 'if workspace_mount.get("RW"):' \
     "${REPO}/scripts/hermesops-reviewer.py"

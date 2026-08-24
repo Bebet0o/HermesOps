@@ -2103,6 +2103,110 @@ def contained_path(path: Path, root: Path) -> bool:
         return False
 
 
+def owned_runtime_container(
+    name: str,
+    *,
+    timeout: int,
+) -> str | None:
+    """Return the immutable ID of an explicitly owned outer container."""
+    if not re.fullmatch(
+        r"(?:agent-runtime|hermesops-(?:orchestrator|reviewer))-[a-f0-9]{12}",
+        name,
+    ):
+        return None
+    inspected = run_command(
+        ["docker", "container", "inspect", name],
+        timeout=timeout,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        return None
+    try:
+        payload = json.loads(inspected.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or len(payload) != 1:
+        return None
+    container = payload[0]
+    if not isinstance(container, dict):
+        return None
+    actual_name = str(container.get("Name") or "").removeprefix("/")
+    container_id = str(container.get("Id") or "")
+    if (
+        actual_name != name
+        or re.fullmatch(r"[a-f0-9]{64}", container_id) is None
+    ):
+        return None
+    labels = ((container.get("Config") or {}).get("Labels") or {})
+    if name.startswith("agent-runtime-"):
+        owned = (
+            labels.get("hermesops-runtime-container") == "1"
+            and labels.get("hermesops-runtime-request-id") == name
+        )
+    else:
+        owned = (
+            labels.get("com.docker.compose.service") == "hermes-agent"
+            and str(labels.get("com.docker.compose.oneoff")).lower() == "true"
+        )
+    return container_id if owned else None
+
+
+def owned_reviewer_sandbox(
+    container_id: str,
+    evidence: dict[str, Any],
+    *,
+    timeout: int,
+) -> str | None:
+    """Return the immutable ID of an owned generic or historical sandbox."""
+    inspected = run_command(
+        [
+            "docker",
+            "exec",
+            "hermesops-sandbox-engine",
+            "docker",
+            "container",
+            "inspect",
+            container_id,
+        ],
+        timeout=timeout,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        return None
+    try:
+        payload = json.loads(inspected.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or len(payload) != 1:
+        return None
+    container = payload[0]
+    if not isinstance(container, dict):
+        return None
+    actual_id = str(container.get("Id") or "")
+    if (
+        re.fullmatch(r"[a-f0-9]{64}", actual_id) is None
+        or not actual_id.startswith(container_id)
+    ):
+        return None
+    labels = ((container.get("Config") or {}).get("Labels") or {})
+    task_id = str(evidence.get("task_id") or "")
+    outer = str(evidence.get("outer_container_name") or "")
+    profile = str(evidence.get("runtime_profile") or "")
+    if labels.get("hermesops-sandbox") == "1":
+        owned = (
+            re.fullmatch(r"[a-f0-9]{64}", container_id) is not None
+            and labels.get("hermesops-task-id") == task_id
+            and labels.get("hermesops-runtime-request-id") == outer
+        )
+    else:
+        owned = (
+            labels.get("hermes-agent") == "1"
+            and labels.get("hermes-task-id") == task_id
+            and labels.get("hermes-profile") == profile
+        )
+    return actual_id if owned else None
+
+
 def cleanup_reviewer_resources(
     evidence: dict[str, Any],
     *,
@@ -2140,11 +2244,17 @@ def cleanup_reviewer_resources(
         or evidence.get("outer_container")
         or ""
     )
-    if re.fullmatch(r"hermesops-reviewer-[a-f0-9]{12}", outer):
-        record(["docker", "rm", "-f", outer])
+    outer_id = owned_runtime_container(outer, timeout=timeout)
+    if outer_id is not None:
+        record(["docker", "rm", "-f", outer_id])
 
     sandbox = str(evidence.get("sandbox_container_id") or "")
-    if re.fullmatch(r"[a-f0-9]{12,64}", sandbox):
+    sandbox_id = (
+        owned_reviewer_sandbox(sandbox, evidence, timeout=timeout)
+        if re.fullmatch(r"[a-f0-9]{12,64}", sandbox)
+        else None
+    )
+    if sandbox_id is not None:
         record(
             [
                 "docker",
@@ -2153,12 +2263,20 @@ def cleanup_reviewer_resources(
                 "docker",
                 "rm",
                 "-f",
-                sandbox,
+                sandbox_id,
             ]
         )
 
     profile = str(evidence.get("runtime_profile") or "")
-    if re.fullmatch(r"runtime-reviewer-[a-f0-9]{12}", profile):
+    legacy_profile = re.fullmatch(
+        r"runtime-reviewer-[a-f0-9]{12}",
+        profile,
+    )
+    current_profile = re.fullmatch(
+        r"agent-runtime-[a-f0-9]{12}",
+        profile,
+    )
+    if legacy_profile:
         listed = record(
             [
                 "docker",
@@ -2168,11 +2286,22 @@ def cleanup_reviewer_resources(
                 "ps",
                 "-aq",
                 "--filter",
+                "label=hermes-agent=1",
+                "--filter",
                 f"label=hermes-profile={profile}",
             ]
         )
         for container_id in listed.stdout.split():
-            if re.fullmatch(r"[a-f0-9]{12,64}", container_id):
+            owned_id = (
+                owned_reviewer_sandbox(
+                    container_id,
+                    evidence,
+                    timeout=timeout,
+                )
+                if re.fullmatch(r"[a-f0-9]{12,64}", container_id)
+                else None
+            )
+            if owned_id is not None:
                 record(
                     [
                         "docker",
@@ -2181,10 +2310,11 @@ def cleanup_reviewer_resources(
                         "docker",
                         "rm",
                         "-f",
-                        container_id,
+                        owned_id,
                     ]
                 )
 
+    if legacy_profile or current_profile:
         profile_root = ROOT / "state/hermes-home/profiles"
         profile_path = profile_root / profile
         if contained_path(profile_path, profile_root):
@@ -3624,11 +3754,14 @@ def reconcile_interrupted_planner_executions() -> None:
         ).fetchall()
 
     for row in rows:
-        run_command(
-            ["docker", "rm", "-f", row["outer_container_name"]],
-            timeout=60,
-            check=False,
-        )
+        outer_name = str(row["outer_container_name"] or "")
+        outer_id = owned_runtime_container(outer_name, timeout=60)
+        if outer_id is not None:
+            run_command(
+                ["docker", "rm", "-f", outer_id],
+                timeout=60,
+                check=False,
+            )
 
     if rows:
         with connect() as connection:

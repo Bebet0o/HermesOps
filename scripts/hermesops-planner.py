@@ -6,14 +6,19 @@ import argparse
 import importlib.util
 import json
 import os
-import shutil
 import sqlite3
-import subprocess
 import sys
-import time
 import uuid
 from pathlib import Path
 from typing import Any, NoReturn
+
+from agent_runtime import (
+    AgentRuntime,
+    RuntimeError as AgentRuntimeError,
+    RuntimeRequest,
+    RuntimeRole,
+    create_runtime,
+)
 
 
 ROOT = Path(
@@ -21,10 +26,6 @@ ROOT = Path(
 ).resolve()
 REPO = ROOT / "repo"
 DATABASE = ROOT / "state/controller/hermesops.db"
-COMPOSE_FILE = REPO / "compose/agent.yaml"
-LOCK_FILE = REPO / "compose/images.lock.env"
-HERMES_HOME = ROOT / "state/hermes-home"
-ENTRY = REPO / "scripts/hermesops-planner-entry.py"
 ORCHESTRATOR_SCRIPT = REPO / "scripts/hermesops-orchestrator.py"
 EXECUTIONS_ROOT = ROOT / "state/controller/orchestrator-executions"
 JSON_BEGIN = "HERMESOPS_PLAN_JSON_BEGIN"
@@ -47,6 +48,15 @@ def utc_now() -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+def persist_transcript(path: Path, output: str) -> None:
+    flags = os.O_WRONLY | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(output)
 
 
 def connect() -> sqlite3.Connection:
@@ -205,7 +215,7 @@ line:
 def reserve_execution(
     *,
     execution_id: str,
-    outer_container: str,
+    runtime_request_id: str,
     prompt_path: Path,
     output_path: Path,
     marker: str,
@@ -235,7 +245,7 @@ def reserve_execution(
             """,
             (
                 execution_id,
-                outer_container,
+                runtime_request_id,
                 str(prompt_path),
                 str(output_path),
                 marker,
@@ -278,7 +288,12 @@ def finish_execution(
         connection.commit()
 
 
-def command_generate(arguments: argparse.Namespace) -> None:
+def command_generate(
+    arguments: argparse.Namespace,
+    runtime: AgentRuntime | None = None,
+) -> None:
+    if runtime is None:
+        runtime = create_runtime(ROOT, required_role=RuntimeRole.PLANNER)
     objective_path = Path(arguments.objective_file).resolve()
     if not objective_path.is_file():
         fail(f"Objective file is absent: {objective_path}")
@@ -304,7 +319,7 @@ def command_generate(arguments: argparse.Namespace) -> None:
     orchestrator = load_orchestrator()
     suffix = uuid.uuid4().hex[:12]
     execution_id = "orchestrator-execution-" + uuid.uuid4().hex
-    outer_container = f"hermesops-orchestrator-{suffix}"
+    runtime_request_id = f"agent-runtime-{suffix}"
     directory = EXECUTIONS_ROOT / suffix
     directory.mkdir(parents=True, mode=0o750)
     prompt_path = directory / "prompt.txt"
@@ -316,46 +331,11 @@ def command_generate(arguments: argparse.Namespace) -> None:
 
     reserve_execution(
         execution_id=execution_id,
-        outer_container=outer_container,
+        runtime_request_id=runtime_request_id,
         prompt_path=prompt_path,
         output_path=output_path,
         marker=marker,
     )
-
-    command = [
-        "docker",
-        "compose",
-        "--env-file",
-        str(LOCK_FILE),
-        "-f",
-        str(COMPOSE_FILE),
-        "run",
-        "--rm",
-        "--no-deps",
-        "-T",
-        "--name",
-        outer_container,
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-        "--workdir",
-        "/tmp",
-        "--env",
-        "HOME=/home/hermes",
-        "--env",
-        "HERMES_ENABLE_PROJECT_PLUGINS=false",
-        "--env",
-        "HERMES_MAX_ITERATIONS=30",
-        "--volume",
-        f"{ENTRY}:/opt/hermesops/hermesops-planner-entry.py:ro",
-        "--entrypoint",
-        "python3",
-        "hermes-agent",
-        "/opt/hermesops/hermesops-planner-entry.py",
-        "-p",
-        "ops-orchestrator",
-        "-z",
-        prompt,
-    ]
 
     exit_code: int | None = None
     plan_id: str | None = None
@@ -363,21 +343,19 @@ def command_generate(arguments: argparse.Namespace) -> None:
     failure_reason: str | None = None
 
     try:
-        with output_path.open("w", encoding="utf-8") as stream:
-            process = subprocess.run(
-                command,
-                stdout=stream,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=arguments.timeout,
-                check=False,
+        runtime_result = runtime.execute(
+            RuntimeRequest(
+                role=RuntimeRole.PLANNER,
+                prompt=prompt,
+                runtime_config_id="ops-orchestrator",
+                request_id=runtime_request_id,
+                timeout_seconds=arguments.timeout,
+                completion_marker=marker,
             )
-        exit_code = process.returncode
-        if exit_code != 0:
-            fail(f"Hermes planner exited with code {exit_code}")
-
-        output = output_path.read_text(encoding="utf-8", errors="replace")
-        raw_plan = parse_output(output, marker)
+        )
+        exit_code = 0
+        persist_transcript(output_path, runtime_result.output)
+        raw_plan = parse_output(runtime_result.output, marker)
         plan = orchestrator.validate_plan(
             raw_plan,
             allow_test_actions=False,
@@ -406,23 +384,30 @@ def command_generate(arguments: argparse.Namespace) -> None:
             "execution_id": execution_id,
             "plan_id": plan_id,
             "source_profile": "ops-orchestrator",
-            "outer_container": outer_container,
+            "runtime_request_id": runtime_request_id,
             "output_path": str(output_path),
             "marker_found": True,
             "plan_sha256": orchestrator.payload_sha256(plan),
             "task_count": len(plan["tasks"]),
             "status": arguments.status,
         }
+    except AgentRuntimeError as error:
+        exit_code = error.exit_status
+        failure_reason = (
+            f"runtime_error[{error.kind.value}]: {str(error)[:4096]}"
+        )
+        try:
+            persist_transcript(output_path, error.output)
+        except OSError as transcript_error:
+            failure_reason += (
+                "; transcript persistence failed: "
+                f"{type(transcript_error).__name__}"
+            )
+        raise
     except Exception as error:
         failure_reason = str(error)
         raise
     finally:
-        subprocess.run(
-            ["docker", "rm", "-f", outer_container],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
         finish_execution(
             execution_id,
             plan_id=plan_id,
@@ -500,6 +485,12 @@ def main() -> None:
         arguments.function(arguments)
     except PlannerError as error:
         print(f"Planner error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    except AgentRuntimeError as error:
+        print(
+            f"Planner runtime error [{error.kind.value}]: {error}",
+            file=sys.stderr,
+        )
         raise SystemExit(1) from error
 
 
