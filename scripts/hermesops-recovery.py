@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -749,43 +750,177 @@ def docker_exists() -> bool:
     return shutil.which("docker") is not None
 
 
-def remove_host_container(name: str) -> bool:
+def inspection_document(
+    result: subprocess.CompletedProcess[str],
+) -> dict[str, Any] | None:
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or len(payload) != 1:
+        return None
+    return payload[0] if isinstance(payload[0], dict) else None
+
+
+def host_container_ownership(
+    container: dict[str, Any],
+    *,
+    expected_name: str,
+    known_names: set[str] | None = None,
+) -> str | None:
+    """Return the explicit ownership class, never a name-only guess."""
+    if known_names is not None and expected_name not in known_names:
+        return None
+    labels = ((container.get("Config") or {}).get("Labels") or {})
+    actual_name = str(container.get("Name") or "").removeprefix("/")
+    if actual_name != expected_name:
+        return None
+    if (
+        labels.get("hermesops-runtime-container") == "1"
+        and labels.get("hermesops-runtime-request-id") == expected_name
+        and re.fullmatch(r"agent-runtime-[a-f0-9]{12}", expected_name)
+    ):
+        return "NEW_GENERIC"
+    if (
+        labels.get("com.docker.compose.service") == "hermes-agent"
+        and str(labels.get("com.docker.compose.oneoff")).lower() == "true"
+        and re.fullmatch(
+            r"hermesops-(?:orchestrator|worker|reviewer)-[a-f0-9]{12}",
+            expected_name,
+        )
+    ):
+        return "LEGACY_HERMES"
+    return None
+
+
+def nested_container_ownership(
+    container: dict[str, Any],
+    *,
+    expected_task_id: str | None = None,
+    expected_request_id: str | None = None,
+    expected_profile: str | None = None,
+    known_bindings: set[tuple[str, str]] | None = None,
+) -> str | None:
+    """Classify only explicitly owned nested sandboxes."""
+    labels = ((container.get("Config") or {}).get("Labels") or {})
+    name = str(container.get("Name") or "").removeprefix("/")
+    if labels.get("hermesops-sandbox") == "1":
+        task = str(labels.get("hermesops-task-id") or "")
+        request = str(labels.get("hermesops-runtime-request-id") or "")
+        if not re.fullmatch(r"task-[a-f0-9]{32}", task):
+            return None
+        if not re.fullmatch(r"agent-runtime-[a-f0-9]{12}", request):
+            return None
+        if name != "hermesops-sandbox-" + request.removeprefix("agent-runtime-"):
+            return None
+        if expected_task_id is not None and task != expected_task_id:
+            return None
+        if expected_request_id is not None and request != expected_request_id:
+            return None
+        if known_bindings is not None and (task, request) not in known_bindings:
+            return None
+        return "NEW_GENERIC"
+    if labels.get("hermes-agent") == "1":
+        task = str(labels.get("hermes-task-id") or "")
+        profile = str(labels.get("hermes-profile") or "")
+        if not re.fullmatch(r"task-[a-f0-9]{32}", task):
+            return None
+        if not re.fullmatch(
+            r"runtime-(?:worker|reviewer)-[a-f0-9]{12}", profile
+        ):
+            return None
+        if expected_task_id is not None and task != expected_task_id:
+            return None
+        if expected_profile is not None and profile != expected_profile:
+            return None
+        if known_bindings is not None and (task, profile) not in known_bindings:
+            return None
+        return "LEGACY_HERMES"
+    return None
+
+
+def inspect_host_container(name: str) -> dict[str, Any] | None:
+    return inspection_document(
+        run_command(
+            ["docker", "container", "inspect", name],
+            check=False,
+        )
+    )
+
+
+def inspect_nested_container(container_id: str) -> dict[str, Any] | None:
+    return inspection_document(
+        run_command(
+            [
+                "docker",
+                "exec",
+                ENGINE,
+                "docker",
+                "container",
+                "inspect",
+                container_id,
+            ],
+            check=False,
+        )
+    )
+
+
+def remove_host_container(
+    name: str,
+    *,
+    known_names: set[str] | None = None,
+) -> bool:
     if not name or not docker_exists():
         return False
 
-    inspect = run_command(
-        ["docker", "container", "inspect", name],
-        check=False,
-    )
-
-    if inspect.returncode != 0:
+    container = inspect_host_container(name)
+    if container is None or host_container_ownership(
+        container,
+        expected_name=name,
+        known_names=known_names,
+    ) is None:
+        return False
+    container_id = str(container.get("Id") or "")
+    if re.fullmatch(r"[a-f0-9]{64}", container_id) is None:
         return False
 
-    run_command(["docker", "rm", "-f", name], check=False)
-    return True
+    removed = run_command(
+        ["docker", "rm", "-f", container_id],
+        check=False,
+    )
+    return removed.returncode == 0
 
 
-def remove_nested_container(container_id: str) -> bool:
+def remove_nested_container(
+    container_id: str,
+    *,
+    expected_task_id: str | None = None,
+    expected_request_id: str | None = None,
+    expected_profile: str | None = None,
+    known_bindings: set[tuple[str, str]] | None = None,
+) -> bool:
     if not container_id or not docker_exists():
         return False
 
-    inspect = run_command(
-        [
-            "docker",
-            "exec",
-            ENGINE,
-            "docker",
-            "container",
-            "inspect",
-            container_id,
-        ],
-        check=False,
-    )
-
-    if inspect.returncode != 0:
+    container = inspect_nested_container(container_id)
+    if container is None or nested_container_ownership(
+        container,
+        expected_task_id=expected_task_id,
+        expected_request_id=expected_request_id,
+        expected_profile=expected_profile,
+        known_bindings=known_bindings,
+    ) is None:
+        return False
+    full_container_id = str(container.get("Id") or "")
+    if (
+        re.fullmatch(r"[a-f0-9]{64}", full_container_id) is None
+        or not full_container_id.startswith(container_id)
+    ):
         return False
 
-    run_command(
+    removed = run_command(
         [
             "docker",
             "exec",
@@ -793,15 +928,19 @@ def remove_nested_container(container_id: str) -> bool:
             "docker",
             "rm",
             "-f",
-            container_id,
+            full_container_id,
         ],
         check=False,
     )
-    return True
+    return removed.returncode == 0
 
 
 def remove_profile(profile_name: str) -> bool:
-    if not profile_name.startswith(("runtime-worker-", "runtime-reviewer-")):
+    if not profile_name.startswith((
+        "agent-runtime-",
+        "runtime-worker-",
+        "runtime-reviewer-",
+    )):
         return False
 
     path = ensure_within(
@@ -899,17 +1038,28 @@ def cleanup_run_resources(run_id: str) -> list[dict[str, Any]]:
         ).fetchall()
 
     for row in rows:
+        outer_name = str(row["outer_container_name"] or "")
+        profile = str(row["runtime_profile"] or "")
+        request_id = (
+            outer_name
+            if outer_name.startswith("agent-runtime-")
+            else None
+        )
         action = {
             "kind": row["execution_kind"],
             "execution_id": row["execution_id"],
             "outer_container_removed": remove_host_container(
-                row["outer_container_name"]
+                outer_name,
+                known_names={outer_name},
             ),
             "sandbox_removed": remove_nested_container(
-                row["sandbox_container_id"] or ""
+                row["sandbox_container_id"] or "",
+                expected_task_id=str(row["task_id"]),
+                expected_request_id=request_id,
+                expected_profile=profile,
             ),
             "profile_removed": remove_profile(
-                row["runtime_profile"]
+                profile
             ),
         }
         actions.append(action)
@@ -1590,8 +1740,8 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
         #
         # A worker/reviewer reserves its SQLite task before creating the
         # nested sandbox. sandbox_container_id is finalized later, so the
-        # task label is the authoritative race-free reference during that
-        # interval.
+        # generic control-plane task label is the authoritative race-free
+        # reference during that interval.
         active_task_ids = {
             str(row["task_id"])
             for row in connection.execute(
@@ -1628,12 +1778,48 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
             )
             """
         ).fetchall()
+        execution_bindings = connection.execute(
+            """
+            SELECT task_id, outer_container_name, runtime_profile
+            FROM worker_executions
+            UNION ALL
+            SELECT task_id, outer_container_name, runtime_profile
+            FROM reviewer_executions
+            """
+        ).fetchall()
+        planner_names = {
+            str(row["outer_container_name"])
+            for row in connection.execute(
+                """
+                SELECT outer_container_name
+                FROM orchestrator_executions
+                """
+            ).fetchall()
+            if row["outer_container_name"]
+        }
+        active_planner_names = {
+            str(row["outer_container_name"])
+            for row in connection.execute(
+                """
+                SELECT outer_container_name
+                FROM orchestrator_executions
+                WHERE finished_at IS NULL
+                """
+            ).fetchall()
+            if row["outer_container_name"]
+        }
+        known_run_bindings = {
+            (str(row["project_id"]), str(row["run_id"]))
+            for row in connection.execute(
+                "SELECT project_id, run_id FROM runs"
+            ).fetchall()
+        }
 
     referenced_outer = {
         str(row["outer_container_name"])
         for row in references
         if row["outer_container_name"]
-    }
+    } | active_planner_names
     referenced_sandbox = {
         str(row["sandbox_container_id"])
         for row in references
@@ -1644,93 +1830,139 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
         for row in references
         if row["runtime_profile"]
     }
+    known_outer_names = planner_names | {
+        str(row["outer_container_name"])
+        for row in execution_bindings
+        if row["outer_container_name"]
+    }
+    known_profile_names = {
+        str(row["runtime_profile"])
+        for row in execution_bindings
+        if row["runtime_profile"]
+    }
+    known_bindings = {
+        (str(row["task_id"]), str(value))
+        for row in execution_bindings
+        for value in (row["outer_container_name"], row["runtime_profile"])
+        if row["task_id"] and value
+    }
 
     if docker_exists():
-        result = run_command(
-            [
-                "docker",
-                "ps",
-                "-a",
-                "--format",
-                "{{.Names}}",
-            ],
-            check=False,
-        )
+        host_candidates: set[str] = set()
+        for ownership_filter in (
+            "label=hermesops-runtime-container=1",
+            "label=com.docker.compose.service=hermes-agent",
+        ):
+            result = run_command(
+                [
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    ownership_filter,
+                    "--format",
+                    "{{.Names}}",
+                ],
+                check=False,
+            )
+            if result.returncode == 0:
+                host_candidates.update(result.stdout.splitlines())
 
-        if result.returncode == 0:
-            for name in result.stdout.splitlines():
-                if not name.startswith((
-                    "hermesops-worker-",
-                    "hermesops-reviewer-",
-                )):
-                    continue
-                if name in referenced_outer:
-                    continue
-                actions.append(
-                    {
-                        "resource": "host-container",
-                        "name": name,
-                        "removed": False if dry_run else remove_host_container(name),
-                    }
-                )
+        for name in sorted(host_candidates):
+            if name in referenced_outer:
+                continue
+            container = inspect_host_container(name)
+            if container is None:
+                continue
+            ownership = host_container_ownership(
+                container,
+                expected_name=name,
+                known_names=known_outer_names,
+            )
+            if ownership is None:
+                continue
+            actions.append(
+                {
+                    "resource": "host-container",
+                    "ownership": ownership,
+                    "name": name,
+                    "removed": False
+                    if dry_run
+                    else remove_host_container(
+                        name,
+                        known_names=known_outer_names,
+                    ),
+                }
+            )
 
-        nested = run_command(
-            [
-                "docker",
-                "exec",
-                ENGINE,
-                "docker",
-                "ps",
-                "-a",
-                "--filter",
-                "label=hermes-agent=1",
-                "--format",
-                "{{.ID}} {{.Names}}",
-            ],
-            check=False,
-        )
-
-        if nested.returncode == 0:
+        nested_candidates: dict[str, str] = {}
+        for ownership_filter in (
+            "label=hermesops-sandbox=1",
+            "label=hermes-agent=1",
+        ):
+            nested = run_command(
+                [
+                    "docker",
+                    "exec",
+                    ENGINE,
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    ownership_filter,
+                    "--format",
+                    "{{.ID}} {{.Names}}",
+                ],
+                check=False,
+            )
+            if nested.returncode != 0:
+                continue
             for line in nested.stdout.splitlines():
                 parts = line.split(maxsplit=1)
-                container_id = parts[0]
-                name = parts[1] if len(parts) == 2 else ""
+                if parts:
+                    nested_candidates[parts[0]] = (
+                        parts[1] if len(parts) == 2 else ""
+                    )
 
-                if container_id in referenced_sandbox:
-                    continue
-
-                task_label = run_command(
-                    [
-                        "docker",
-                        "exec",
-                        ENGINE,
-                        "docker",
-                        "inspect",
-                        "--format",
-                        '{{ index .Config.Labels "hermes-task-id" }}',
+        for container_id, name in sorted(nested_candidates.items()):
+            if any(
+                container_id == reference
+                or container_id.startswith(reference)
+                or reference.startswith(container_id)
+                for reference in referenced_sandbox
+            ):
+                continue
+            container = inspect_nested_container(container_id)
+            if container is None:
+                continue
+            ownership = nested_container_ownership(
+                container,
+                known_bindings=known_bindings,
+            )
+            if ownership is None:
+                continue
+            labels = ((container.get("Config") or {}).get("Labels") or {})
+            container_task_id = str(
+                labels.get("hermesops-task-id")
+                or labels.get("hermes-task-id")
+                or ""
+            )
+            if container_task_id in active_task_ids:
+                continue
+            actions.append(
+                {
+                    "resource": "nested-container",
+                    "ownership": ownership,
+                    "id": container_id,
+                    "name": name,
+                    "removed": False
+                    if dry_run
+                    else remove_nested_container(
                         container_id,
-                    ],
-                    check=False,
-                )
-                container_task_id = (
-                    task_label.stdout.strip()
-                    if task_label.returncode == 0
-                    else ""
-                )
-
-                if container_task_id in active_task_ids:
-                    continue
-
-                if not name.startswith("hermesops-"):
-                    continue
-                actions.append(
-                    {
-                        "resource": "nested-container",
-                        "id": container_id,
-                        "name": name,
-                        "removed": False if dry_run else remove_nested_container(container_id),
-                    }
-                )
+                        known_bindings=known_bindings,
+                    ),
+                }
+            )
 
     profiles_root = HERMES_HOME / "profiles"
 
@@ -1739,9 +1971,12 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
             if not path.is_dir():
                 continue
             if not path.name.startswith((
+                "agent-runtime-",
                 "runtime-worker-",
                 "runtime-reviewer-",
             )):
+                continue
+            if path.name not in known_profile_names:
                 continue
             if path.name in referenced_profiles:
                 continue
@@ -1768,6 +2003,11 @@ def cleanup_orphans(*, dry_run: bool) -> dict[str, Any]:
                 continue
             for run_path in project_path.iterdir():
                 if not run_path.is_dir():
+                    continue
+                if (
+                    project_path.name,
+                    run_path.name,
+                ) not in known_run_bindings:
                     continue
                 if run_path.name in active_runs:
                     continue

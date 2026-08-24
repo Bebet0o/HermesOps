@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -17,7 +17,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
-import yaml
+from agent_runtime import (
+    AgentRuntime,
+    RuntimeError as AgentRuntimeError,
+    RuntimeRequest,
+    RuntimeRole,
+    RuntimeSandboxContext,
+    create_runtime,
+)
 
 
 ROOT = Path(
@@ -30,13 +37,8 @@ ROOT = Path(
 REPO = ROOT / "repo"
 DATABASE = ROOT / "state/controller/hermesops.db"
 HERMES_HOME = ROOT / "state/hermes-home"
-PROFILE_ROOT = HERMES_HOME / "profiles"
 EXECUTIONS_ROOT = ROOT / "state/controller/executions"
 CLONES_ROOT = ROOT / "workspaces/.hermesops-worker-clones"
-HERMES_ENTRY_WRAPPER = REPO / "scripts/hermes-worker-entry.py"
-
-COMPOSE_FILE = REPO / "compose/agent.yaml"
-LOCK_FILE = REPO / "compose/images.lock.env"
 WORKER_LOCK = REPO / "config/worker-sandbox.lock.toml"
 
 ENGINE = "hermesops-sandbox-engine"
@@ -76,6 +78,15 @@ def utc_now() -> str:
         .isoformat(timespec="milliseconds")
         .replace("+00:00", "Z")
     )
+
+
+def persist_transcript(path: Path, output: str) -> None:
+    flags = os.O_WRONLY | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(output)
 
 
 def connect() -> sqlite3.Connection:
@@ -350,121 +361,6 @@ def prepare_worker_clone(
     return clone
 
 
-def create_runtime_profile(
-    *,
-    source_profile: str,
-    runtime_profile: str,
-    task_id: str,
-    clone: Path,
-    image_id: str,
-    cpu_limit: int,
-    memory_mb: int,
-) -> Path:
-    source = PROFILE_ROOT / source_profile
-    target = PROFILE_ROOT / runtime_profile
-
-    if not source.is_dir():
-        fail(f"Source profile is absent: {source}")
-
-    if target.exists():
-        fail(f"Runtime profile already exists: {target}")
-
-    target.mkdir(mode=0o750)
-
-    config = yaml.safe_load(
-        (source / "config.yaml").read_text(encoding="utf-8")
-    ) or {}
-
-    config.pop("toolsets", None)
-    config["platform_toolsets"] = {
-        "cli": ["terminal"],
-    }
-
-    terminal = config.setdefault("terminal", {})
-    terminal.update({
-        "backend": "docker",
-        "cwd": "/workspace",
-        "docker_image": image_id,
-        "docker_volumes": [f"{clone}:/workspace:rw"],
-        "docker_mount_cwd_to_workspace": False,
-        "docker_run_as_host_user": True,
-        "docker_forward_env": [],
-        "docker_env": {},
-        "docker_extra_args": [],
-        "docker_network": False,
-        "container_cpu": cpu_limit,
-        "container_memory": memory_mb,
-        "container_disk": 0,
-        "container_persistent": False,
-        "docker_persist_across_processes": True,
-        "docker_orphan_reaper": False,
-        "persistent_shell": False,
-        "lifetime_seconds": 900,
-    })
-
-    agent = config.setdefault("agent", {})
-    agent["max_turns"] = min(int(agent.get("max_turns", 40)), 40)
-
-    config_path = target / "config.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            config,
-            sort_keys=False,
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
-    config_path.chmod(0o600)
-
-    shutil.copy2(source / "SOUL.md", target / "SOUL.md")
-    (target / "SOUL.md").chmod(0o640)
-
-    source_skills = source / "skills"
-
-    if source_skills.is_dir():
-        shutil.copytree(source_skills, target / "skills")
-    else:
-        (target / "skills").mkdir(mode=0o750)
-
-    (target / ".no-bundled-skills").touch(mode=0o640)
-
-    metadata: dict[str, Any] = {}
-    source_metadata = source / "profile.yaml"
-
-    if source_metadata.is_file():
-        metadata = yaml.safe_load(
-            source_metadata.read_text(encoding="utf-8")
-        ) or {}
-
-    metadata["name"] = runtime_profile
-    metadata["description"] = (
-        f"Ephemeral HermesOps worker for {task_id}"
-    )
-    metadata["description_auto"] = False
-
-    metadata_path = target / "profile.yaml"
-    metadata_path.write_text(
-        yaml.safe_dump(
-            metadata,
-            sort_keys=False,
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
-    metadata_path.chmod(0o600)
-
-    auth_path = target / "auth.json"
-    auth_path.symlink_to("../../auth.json")
-
-    if (
-        auth_path.resolve(strict=True)
-        != (HERMES_HOME / "auth.json").resolve(strict=True)
-    ):
-        fail("Invalid runtime OAuth symlink")
-
-    return target
-
-
 def reserve_execution(
     *,
     run: sqlite3.Row,
@@ -473,8 +369,7 @@ def reserve_execution(
     execution_id: str,
     instruction: str,
     marker: str,
-    runtime_profile: str,
-    outer_container: str,
+    runtime_request_id: str,
     prompt_path: Path,
     output_path: Path,
     cpu_limit: int,
@@ -530,7 +425,7 @@ def reserve_execution(
                 json.dumps(
                     {
                         "expected_marker": marker,
-                        "runtime_profile": runtime_profile,
+                        "runtime_request_id": runtime_request_id,
                     },
                     sort_keys=True,
                 ),
@@ -578,8 +473,8 @@ def reserve_execution(
                 current["run_id"],
                 role["role_id"],
                 role["profile_name"],
-                runtime_profile,
-                outer_container,
+                runtime_request_id,
+                runtime_request_id,
                 str(prompt_path),
                 str(output_path),
                 cpu_limit,
@@ -611,7 +506,7 @@ def reserve_execution(
                     {
                         "execution_id": execution_id,
                         "role_id": role["role_id"],
-                        "runtime_profile": runtime_profile,
+                        "runtime_request_id": runtime_request_id,
                     },
                     sort_keys=True,
                 ),
@@ -659,15 +554,120 @@ def inspect_nested_container(
     if result.returncode != 0:
         return None
 
-    payload = json.loads(result.stdout)
-    return payload[0] if payload else None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list) or len(payload) != 1:
+        return None
+    return payload[0] if isinstance(payload[0], dict) else None
+
+
+def authorized_sandbox_container_id(
+    container: dict[str, Any],
+    *,
+    candidate_id: str,
+    task_id: str,
+    runtime_request_id: str,
+    clone: Path,
+    image_id: str,
+    read_only: bool,
+) -> str | None:
+    """Return a full ID only for the exact control-plane sandbox grant."""
+    if re.fullmatch(r"[a-f0-9]{12,64}", candidate_id) is None:
+        return None
+    full_id = str(container.get("Id") or "")
+    if (
+        re.fullmatch(r"[a-f0-9]{64}", full_id) is None
+        or not full_id.startswith(candidate_id)
+    ):
+        return None
+
+    config = container.get("Config") or {}
+    if not isinstance(config, dict):
+        return None
+    labels = config.get("Labels") or {}
+    if not isinstance(labels, dict):
+        return None
+    if (
+        labels.get("hermesops-sandbox") != "1"
+        or labels.get("hermesops-task-id") != task_id
+        or labels.get("hermesops-runtime-request-id")
+        != runtime_request_id
+    ):
+        return None
+    state = container.get("State") or {}
+    if not isinstance(state, dict):
+        return None
+    if str(state.get("Status") or "") not in {
+        "created",
+        "running",
+        "paused",
+        "restarting",
+        "exited",
+        "dead",
+    }:
+        return None
+    if container.get("Image") != image_id:
+        return None
+
+    mounts = container.get("Mounts") or []
+    if not isinstance(mounts, list) or not all(
+        isinstance(mount, dict) for mount in mounts
+    ):
+        return None
+    workspace_mounts = [
+        mount
+        for mount in mounts
+        if mount.get("Destination") == "/workspace"
+    ]
+    if len(workspace_mounts) != 1:
+        return None
+    workspace_mount = workspace_mounts[0]
+    mount_rw = workspace_mount.get("RW")
+    if (
+        Path(str(workspace_mount.get("Source") or "")).resolve()
+        != clone.resolve()
+        or not isinstance(mount_rw, bool)
+        or mount_rw != (not read_only)
+    ):
+        return None
+    return full_id
+
+
+def remove_owned_sandbox(
+    container_id: str,
+    *,
+    task_id: str,
+    runtime_request_id: str,
+    clone: Path,
+    image_id: str,
+    read_only: bool,
+) -> bool:
+    """Reinspect an owned sandbox and remove it only by its full ID."""
+    container = inspect_nested_container(container_id)
+    if container is None:
+        return False
+    full_id = authorized_sandbox_container_id(
+        container,
+        candidate_id=container_id,
+        task_id=task_id,
+        runtime_request_id=runtime_request_id,
+        clone=clone,
+        image_id=image_id,
+        read_only=read_only,
+    )
+    if full_id is None:
+        return False
+    removed = nested_docker("rm", "-f", full_id, check=False)
+    return removed.returncode == 0
 
 
 def precreate_worker_sandbox(
     *,
     container_name: str,
     task_id: str,
-    runtime_profile: str,
+    runtime_request_id: str,
     clone: Path,
     image_id: str,
     cpu_limit: int,
@@ -675,20 +675,18 @@ def precreate_worker_sandbox(
     branch_name: str,
     base_commit: str,
 ) -> tuple[str, dict[str, Any], subprocess.CompletedProcess[str]]:
-    """Create and audit the exact sandbox that Hermes must reuse."""
-    nested_docker("rm", "-f", container_name, check=False)
-
+    """Create and audit the generic sandbox authorized for this request."""
     created = nested_docker(
         "run",
         "-d",
         "--name",
         container_name,
         "--label",
-        "hermes-agent=1",
+        "hermesops-sandbox=1",
         "--label",
-        f"hermes-task-id={task_id}",
+        f"hermesops-task-id={task_id}",
         "--label",
-        f"hermes-profile={runtime_profile}",
+        f"hermesops-runtime-request-id={runtime_request_id}",
         "--network=none",
         "--user",
         "1000:1000",
@@ -724,6 +722,8 @@ def precreate_worker_sandbox(
 
     audit = audit_sandbox(
         container_id=container_id,
+        task_id=task_id,
+        runtime_request_id=runtime_request_id,
         clone=clone,
         image_id=image_id,
         cpu_limit=cpu_limit,
@@ -780,14 +780,16 @@ def find_worker_sandbox(
 def audit_sandbox(
     *,
     container_id: str,
+    task_id: str,
+    runtime_request_id: str,
     clone: Path,
     image_id: str,
     cpu_limit: int,
     memory_mb: int,
 ) -> dict[str, Any]:
-    # Hermes keeps the execution container alive when
-    # docker_persist_across_processes=true. Retry inspection briefly to
-    # absorb daemon/API timing without accepting a missing sandbox.
+    # A runtime may keep the authorized execution container alive. Retry
+    # inspection briefly to absorb daemon/API timing without accepting a
+    # missing sandbox.
     data: dict[str, Any] | None = None
 
     for _ in range(20):
@@ -800,6 +802,20 @@ def audit_sandbox(
 
     if data is None:
         fail(f"Sandbox disappeared before audit: {container_id}")
+
+    if data.get("Id") != container_id:
+        fail("Sandbox identity changed before audit")
+
+    container_config = data.get("Config") or {}
+    labels = container_config.get("Labels") or {}
+    if labels.get("hermesops-sandbox") != "1":
+        fail("Sandbox owner label mismatch")
+    if labels.get("hermesops-task-id") != task_id:
+        fail("Sandbox task binding mismatch")
+    if labels.get("hermesops-runtime-request-id") != runtime_request_id:
+        fail("Sandbox request binding mismatch")
+    if str((data.get("State") or {}).get("Status") or "") != "running":
+        fail("Sandbox is not running")
 
     if data.get("Image") != image_id:
         fail(f"Unexpected sandbox image: {data.get('Image')}")
@@ -840,13 +856,16 @@ def audit_sandbox(
             fail(f"Forbidden sandbox destination: {destination}")
 
     host_config = data.get("HostConfig") or {}
-    container_config = data.get("Config") or {}
-
     if host_config.get("NetworkMode") != "none":
         fail(
             "Sandbox network is not disabled: "
             f"{host_config.get('NetworkMode')}"
         )
+    attached_networks = set(
+        ((data.get("NetworkSettings") or {}).get("Networks") or {})
+    ) - {"none"}
+    if attached_networks:
+        fail("Sandbox has an attached network")
 
     expected_memory = memory_mb * 1024 * 1024
     actual_memory = int(host_config.get("Memory") or 0)
@@ -868,6 +887,9 @@ def audit_sandbox(
 
     if int(host_config.get("PidsLimit") or 0) != 256:
         fail("Sandbox PID limit mismatch")
+
+    if bool(host_config.get("Privileged")):
+        fail("Sandbox is privileged")
 
     security_options = [
         str(value)
@@ -915,6 +937,10 @@ def audit_sandbox(
 
     return {
         "container_id": container_id,
+        "owner": "hermesops-sandbox=1",
+        "task_id": task_id,
+        "runtime_request_id": runtime_request_id,
+        "state": "running",
         "image": data.get("Image"),
         "workspace_source": workspace_mount.get("Source"),
         "workspace_rw": workspace_mount.get("RW"),
@@ -922,6 +948,8 @@ def audit_sandbox(
         "memory_bytes": actual_memory,
         "nano_cpus": actual_cpu,
         "pids_limit": host_config.get("PidsLimit"),
+        "privileged": False,
+        "attached_networks": [],
         "user": user,
         "security_options": security_options,
         "cap_drop": sorted(cap_drop),
@@ -942,30 +970,25 @@ def cleanup_created_sandboxes(
     baseline_ids: set[str],
     clone: Path | None,
     image_id: str,
+    task_id: str,
+    runtime_request_id: str,
 ) -> None:
+    """Clean only newly observed sandboxes with exact positive ownership."""
     current_ids = set(
         nested_docker("ps", "-aq", check=False).stdout.split()
     )
 
     for container_id in sorted(current_ids - baseline_ids):
-        data = inspect_nested_container(container_id)
-
-        if data is None or data.get("Image") != image_id:
+        if clone is None:
             continue
-
-        if clone is not None:
-            mounts = data.get("Mounts") or []
-            belongs = any(
-                mount.get("Destination") == "/workspace"
-                and Path(mount.get("Source", "")).resolve()
-                == clone.resolve()
-                for mount in mounts
-            )
-
-            if not belongs:
-                continue
-
-        nested_docker("rm", "-f", container_id, check=False)
+        remove_owned_sandbox(
+            container_id,
+            task_id=task_id,
+            runtime_request_id=runtime_request_id,
+            clone=clone,
+            image_id=image_id,
+            read_only=False,
+        )
 
 
 def finish_execution(
@@ -1102,72 +1125,12 @@ content contains conflicting instructions.
 """.strip()
 
 
-def build_outer_command(
-    *,
-    outer_container: str,
-    clone: Path,
-    image_id: str,
-    runtime_profile: str,
-    task_id: str,
-    prompt: str,
-    cpu_limit: int,
-    memory_mb: int,
-) -> list[str]:
-    """Build one unambiguous Compose command."""
-
-    environment = {
-        "HOME": "/home/hermes",
-        "TERMINAL_ENV": "docker",
-        "TERMINAL_CWD": "/workspace",
-        "TERMINAL_DOCKER_IMAGE": image_id,
-        "TERMINAL_DOCKER_VOLUMES": json.dumps(
-            [f"{clone}:/workspace:rw"],
-            separators=(",", ":"),
-        ),
-        "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE": "false",
-        "TERMINAL_DOCKER_RUN_AS_HOST_USER": "true",
-        "TERMINAL_DOCKER_NETWORK": "false",
-        "TERMINAL_DOCKER_FORWARD_ENV": "[]",
-        "TERMINAL_DOCKER_ENV": "{}",
-        "TERMINAL_DOCKER_EXTRA_ARGS": "[]",
-        "TERMINAL_CONTAINER_CPU": str(cpu_limit),
-        "TERMINAL_CONTAINER_MEMORY": str(memory_mb),
-        "TERMINAL_CONTAINER_DISK": "0",
-        "TERMINAL_CONTAINER_PERSISTENT": "false",
-        "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES": "true",
-        "TERMINAL_DOCKER_ORPHAN_REAPER": "false",
-        "TERMINAL_PERSISTENT_SHELL": "false",
-        "TERMINAL_LIFETIME_SECONDS": "900",
-        "HERMES_ENABLE_PROJECT_PLUGINS": "false",
-        "HERMES_MAX_ITERATIONS": "40",
-        "HERMESOPS_SANDBOX_TASK_ID": task_id,
-        "HERMESOPS_SANDBOX_PROFILE": runtime_profile,
-    }
-
-    command = [
-        "docker", "compose", "--env-file", str(LOCK_FILE),
-        "-f", str(COMPOSE_FILE), "run", "--rm", "--no-deps", "-T",
-        "--name", outer_container,
-        "--user", f"{os.getuid()}:{os.getgid()}",
-        "--workdir", str(clone),
-    ]
-
-    for key, value in environment.items():
-        command.extend(["--env", f"{key}={value}"])
-
-    command.extend([
-        "--volume",
-        f"{HERMES_ENTRY_WRAPPER}:/opt/hermesops/hermes-worker-entry.py:ro",
-        "--entrypoint", "python3",
-        "hermes-agent",
-        "/opt/hermesops/hermes-worker-entry.py",
-        "-p", runtime_profile,
-        "-z", prompt,
-    ])
-    return command
-
-
-def command_launch(arguments: argparse.Namespace) -> None:
+def command_launch(
+    arguments: argparse.Namespace,
+    runtime: AgentRuntime | None = None,
+) -> None:
+    if runtime is None:
+        runtime = create_runtime(ROOT, required_role=RuntimeRole.WORKER)
     instruction_path = Path(arguments.instruction_file).resolve()
 
     if not instruction_path.is_file():
@@ -1188,9 +1151,6 @@ def command_launch(arguments: argparse.Namespace) -> None:
 
     image_id = load_worker_image()
 
-    if not HERMES_ENTRY_WRAPPER.is_file():
-        fail(f"Hermes worker entry wrapper is absent: {HERMES_ENTRY_WRAPPER}")
-
     with connect() as connection:
         role = load_role(connection, arguments.role)
         run = load_run(connection, arguments.run)
@@ -1208,8 +1168,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
     suffix = uuid.uuid4().hex[:12]
     task_id = "task-" + uuid.uuid4().hex
     execution_id = "execution-" + uuid.uuid4().hex
-    runtime_profile = f"runtime-worker-{suffix}"
-    outer_container = f"hermesops-worker-{suffix}"
+    runtime_request_id = f"agent-runtime-{suffix}"
 
     execution_directory = EXECUTIONS_ROOT / run["run_id"] / suffix
     execution_directory.mkdir(parents=True, mode=0o750)
@@ -1229,8 +1188,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
         execution_id=execution_id,
         instruction=instruction,
         marker=marker,
-        runtime_profile=runtime_profile,
-        outer_container=outer_container,
+        runtime_request_id=runtime_request_id,
         prompt_path=prompt_path,
         output_path=output_path,
         cpu_limit=cpu_limit,
@@ -1238,8 +1196,6 @@ def command_launch(arguments: argparse.Namespace) -> None:
     )
 
     clone: Path | None = None
-    runtime_directory: Path | None = None
-    process: subprocess.Popen[str] | None = None
     sandbox_id: str | None = None
     audit: dict[str, Any] | None = None
     exit_code: int | None = None
@@ -1258,7 +1214,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
         sandbox_id, audit, preflight = precreate_worker_sandbox(
             container_name=f"hermesops-sandbox-{suffix}",
             task_id=task_id,
-            runtime_profile=runtime_profile,
+            runtime_request_id=runtime_request_id,
             clone=clone,
             image_id=image_id,
             cpu_limit=cpu_limit,
@@ -1267,101 +1223,38 @@ def command_launch(arguments: argparse.Namespace) -> None:
             base_commit=run["base_commit"],
         )
 
-        runtime_directory = create_runtime_profile(
-            source_profile=role["profile_name"],
-            runtime_profile=runtime_profile,
-            task_id=task_id,
-            clone=clone,
-            image_id=image_id,
-            cpu_limit=cpu_limit,
-            memory_mb=memory_mb,
-        )
-
-        command = build_outer_command(
-            outer_container=outer_container,
-            clone=clone,
-            image_id=image_id,
-            runtime_profile=runtime_profile,
-            task_id=task_id,
-            prompt=prompt,
-            cpu_limit=cpu_limit,
-            memory_mb=memory_mb,
-        )
-
         docker_log_since = utc_now()
-
-        with output_path.open("w", encoding="utf-8") as output_stream:
-            process = subprocess.Popen(
-                command,
-                stdout=output_stream,
-                stderr=subprocess.STDOUT,
-                text=True,
-                start_new_session=True,
-            )
-
-        started = time.monotonic()
         last_heartbeat = 0.0
-        marker_found = False
 
-        while True:
-            elapsed = time.monotonic() - started
-
-            if elapsed > arguments.timeout:
-                fail(f"Worker exceeded timeout {arguments.timeout}s")
-
+        def poll_runtime(elapsed: float) -> None:
+            nonlocal last_heartbeat
             if elapsed - last_heartbeat >= 5:
                 heartbeat(run["run_id"], task_id)
                 last_heartbeat = elapsed
 
-            if sandbox_id is None:
-                sandbox_id = find_worker_sandbox(
-                    baseline_ids=baseline_ids,
-                    clone=clone,
+        runtime_result = runtime.execute(
+            RuntimeRequest(
+                role=RuntimeRole.WORKER,
+                prompt=prompt,
+                runtime_config_id=str(role["profile_name"]),
+                request_id=runtime_request_id,
+                timeout_seconds=arguments.timeout,
+                completion_marker=marker,
+                sandbox=RuntimeSandboxContext(
+                    workspace=clone,
                     image_id=image_id,
-                )
-
-                if sandbox_id is not None:
-                    try:
-                        audit = audit_sandbox(
-                            container_id=sandbox_id,
-                            clone=clone,
-                            image_id=image_id,
-                            cpu_limit=cpu_limit,
-                            memory_mb=memory_mb,
-                        )
-                    except WorkerError as error:
-                        if "Sandbox disappeared before audit" not in str(error):
-                            raise
-                        sandbox_id = None
-                        audit = None
-
-            output_text = output_path.read_text(
-                encoding="utf-8",
-                errors="replace",
+                    cpu_limit=cpu_limit,
+                    memory_mb=memory_mb,
+                    read_only=False,
+                    network_enabled=False,
+                    sandbox_handle=sandbox_id,
+                    task_id=task_id,
+                ),
+                on_poll=poll_runtime,
             )
-            marker_found = any(
-                line.strip() == marker
-                for line in output_text.splitlines()
-            )
-
-            if marker_found or process.poll() is not None:
-                break
-
-            time.sleep(1)
-
-        if marker_found and process.poll() is None:
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                run_command(
-                    ["docker", "stop", "--time", "10", outer_container],
-                    check=False,
-                )
-
-        if process.poll() is None:
-            process.wait(timeout=30)
-
-        exit_code = process.returncode
+        )
+        exit_code = 0
+        persist_transcript(output_path, runtime_result.output)
 
         if sandbox_id is None:
             sandbox_id = find_worker_sandbox(
@@ -1379,7 +1272,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
             )
             fail(
                 "Worker sandbox was never observed"
-                f"; outer_exit={process.returncode}"
+                f"; outer_exit={exit_code}"
                 f"\nworker_output_tail:\n{output_tail}"
                 f"\ndind_stdout:\n{daemon_logs.stdout}"
                 f"\ndind_stderr:\n{daemon_logs.stderr}"
@@ -1389,6 +1282,8 @@ def command_launch(arguments: argparse.Namespace) -> None:
             try:
                 audit = audit_sandbox(
                     container_id=sandbox_id,
+                    task_id=task_id,
+                    runtime_request_id=runtime_request_id,
                     clone=clone,
                     image_id=image_id,
                     cpu_limit=cpu_limit,
@@ -1408,26 +1303,11 @@ def command_launch(arguments: argparse.Namespace) -> None:
                     check=False,
                 )
                 fail(
-                    f"{error}; outer_exit={process.returncode}"
+                    f"{error}; outer_exit={exit_code}"
                     f"\nworker_output_tail:\n{output_tail}"
                     f"\ndind_stdout:\n{daemon_logs.stdout}"
                     f"\ndind_stderr:\n{daemon_logs.stderr}"
                 )
-
-        output_text = output_path.read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-        marker_found = any(
-            line.strip() == marker
-            for line in output_text.splitlines()
-        )
-
-        if exit_code != 0:
-            fail(f"Hermes worker process exited with code {exit_code}")
-
-        if not marker_found:
-            fail("Expected worker marker is absent")
 
         status = git(
             clone,
@@ -1532,8 +1412,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
             "run_id": run["run_id"],
             "role_id": role["role_id"],
             "source_profile": role["profile_name"],
-            "runtime_profile": runtime_profile,
-            "outer_container": outer_container,
+            "runtime_request_id": runtime_request_id,
             "sandbox_container_id": sandbox_id,
             "output_path": str(output_path),
             "result_commit": head,
@@ -1541,7 +1420,7 @@ def command_launch(arguments: argparse.Namespace) -> None:
             "marker_found": True,
             "standalone_clone": True,
             "precreated_sandbox": True,
-            "reused_by_hermes": True,
+            "sandbox_handoff": "opaque_handle",
             "protected_refs_verified": True,
             "sandbox_preflight": {
                 "exit_code": preflight.returncode,
@@ -1553,34 +1432,41 @@ def command_launch(arguments: argparse.Namespace) -> None:
         }
         success = True
 
+    except AgentRuntimeError as error:
+        exit_code = error.exit_status
+        failure_reason = (
+            f"runtime_error[{error.kind.value}]: {str(error)[:4096]}"
+        )
+        try:
+            persist_transcript(output_path, error.output)
+        except OSError as transcript_error:
+            failure_reason += (
+                "; transcript persistence failed: "
+                f"{type(transcript_error).__name__}"
+            )
+        raise
     except Exception as error:
         failure_reason = str(error)
-
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-
         raise
 
     finally:
-        run_command(
-            ["docker", "rm", "-f", outer_container],
-            check=False,
-        )
-
-        if sandbox_id is not None:
-            nested_docker("rm", "-f", sandbox_id, check=False)
+        if sandbox_id is not None and clone is not None:
+            remove_owned_sandbox(
+                sandbox_id,
+                task_id=task_id,
+                runtime_request_id=runtime_request_id,
+                clone=clone,
+                image_id=image_id,
+                read_only=False,
+            )
 
         cleanup_created_sandboxes(
             baseline_ids=baseline_ids,
             clone=clone,
             image_id=image_id,
+            task_id=task_id,
+            runtime_request_id=runtime_request_id,
         )
-
-        if runtime_directory is not None:
-            shutil.rmtree(runtime_directory, ignore_errors=True)
 
         if clone is not None:
             shutil.rmtree(clone, ignore_errors=True)
@@ -1657,6 +1543,12 @@ def main() -> None:
         arguments.function(arguments)
     except WorkerError as error:
         print(f"Worker error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    except AgentRuntimeError as error:
+        print(
+            f"Worker runtime error [{error.kind.value}]: {error}",
+            file=sys.stderr,
+        )
         raise SystemExit(1) from error
 
 

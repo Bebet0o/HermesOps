@@ -13,6 +13,11 @@
 - Orchestrateur par projet.
 - Workers spécialisés.
 - Reviewer indépendant.
+- Frontière [`AgentRuntime`](AGENT_RUNTIME.md) entre le plan de contrôle et
+  l'exécution IA ; `HermesRuntime` est l'adapter transitionnel actuel.
+- Adoption et cleanup des conteneurs fail-closed : labels d'ownership,
+  identité cohérente et binding durable sont requis ; un nom ressemblant à
+  HermesOps n'est jamais une preuve de propriété.
 - Worktrees Git isolés.
 - Une transaction d'écriture active par projet.
 
