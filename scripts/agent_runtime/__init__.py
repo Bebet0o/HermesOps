@@ -4,6 +4,9 @@ from pathlib import Path
 
 from .contract import (
     AgentRuntime,
+    RuntimeEvent,
+    RuntimeEventDispatcher,
+    RuntimeEventKind,
     RuntimeError,
     RuntimeErrorKind,
     RuntimeRequest,
@@ -11,6 +14,7 @@ from .contract import (
     RuntimeRole,
     RuntimeSandboxContext,
 )
+from .failure import RuntimeFailureRecord, record_runtime_failure
 from .fake import FakeRuntime, FakeRuntimeOutcome
 from .hermes import HermesRuntime
 
@@ -28,11 +32,16 @@ __all__ = [
     "FakeRuntime",
     "FakeRuntimeOutcome",
     "HermesRuntime",
+    "RuntimeEvent",
+    "RuntimeEventDispatcher",
+    "RuntimeEventKind",
     "RuntimeError",
     "RuntimeErrorKind",
     "RuntimeRequest",
     "RuntimeResult",
     "RuntimeRole",
     "RuntimeSandboxContext",
+    "RuntimeFailureRecord",
     "create_runtime",
+    "record_runtime_failure",
 ]

@@ -9,6 +9,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,6 +17,9 @@ import yaml
 
 from .contract import (
     AgentRuntime,
+    RuntimeEvent,
+    RuntimeEventDispatcher,
+    RuntimeEventKind,
     RuntimeError,
     RuntimeErrorKind,
     RuntimeRequest,
@@ -33,6 +37,7 @@ class HermesRuntime(AgentRuntime):
         *,
         poll_interval_seconds: float = 1.0,
         required_role: RuntimeRole | None = None,
+        event_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.repo = self.root / "repo"
@@ -43,6 +48,11 @@ class HermesRuntime(AgentRuntime):
         self.planner_entry = self.repo / "scripts/hermesops-planner-entry.py"
         self.worker_entry = self.repo / "scripts/hermes-worker-entry.py"
         self.poll_interval_seconds = poll_interval_seconds
+        if event_clock is not None and not callable(event_clock):
+            raise TypeError("Runtime event clock must be callable")
+        self.event_clock = event_clock or (
+            lambda: datetime.now(timezone.utc)
+        )
         if required_role is not None:
             self.validate_role(required_role)
 
@@ -623,6 +633,7 @@ class HermesRuntime(AgentRuntime):
         try:
             if not isinstance(request, RuntimeRequest):
                 raise TypeError("Runtime request does not satisfy the contract")
+            event_dispatcher = RuntimeEventDispatcher(request)
             execution_name = self._execution_name(request)
             self.validate_role(request.role)
             if request.sandbox is not None:
@@ -647,8 +658,17 @@ class HermesRuntime(AgentRuntime):
                         execution_name,
                         process,
                     )
+                    event_dispatcher.emit(
+                        RuntimeEvent(
+                            kind=RuntimeEventKind.STARTED,
+                            request_id=request.request_id,
+                            role=request.role,
+                            timestamp=self.event_clock(),
+                        )
+                    )
 
                     marker_found = False
+                    last_heartbeat = 0.0
                     while True:
                         elapsed = time.monotonic() - started
                         if elapsed > request.timeout_seconds:
@@ -657,15 +677,16 @@ class HermesRuntime(AgentRuntime):
                                 f"{request.role.value} runtime exceeded "
                                 f"timeout {request.timeout_seconds}s",
                             )
-                        if request.on_poll is not None:
-                            try:
-                                request.on_poll(elapsed)
-                            except Exception as error:
-                                raise RuntimeError(
-                                    RuntimeErrorKind.EXECUTION_FAILED,
-                                    "Control-plane runtime polling callback failed: "
-                                    f"{type(error).__name__}",
-                                ) from error
+                        if elapsed - last_heartbeat >= 5:
+                            event_dispatcher.emit(
+                                RuntimeEvent(
+                                    kind=RuntimeEventKind.HEARTBEAT,
+                                    request_id=request.request_id,
+                                    role=request.role,
+                                    timestamp=self.event_clock(),
+                                )
+                            )
+                            last_heartbeat = elapsed
 
                         output = self._read_output(output_stream)
                         marker_found = self._marker_found(

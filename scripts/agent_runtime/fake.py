@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .contract import (
+    RuntimeEvent,
+    RuntimeEventDispatcher,
+    RuntimeEventKind,
     RuntimeError,
     RuntimeErrorKind,
     RuntimeRequest,
@@ -24,6 +28,7 @@ class FakeRuntimeOutcome:
         compare=False,
         repr=False,
     )
+    events: tuple[RuntimeEventKind, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.output, str):
@@ -42,6 +47,10 @@ class FakeRuntimeOutcome:
             raise TypeError("Fake runtime message must be a string")
         if self.effect is not None and not callable(self.effect):
             raise TypeError("Fake runtime effect must be callable")
+        if not isinstance(self.events, tuple) or any(
+            not isinstance(kind, RuntimeEventKind) for kind in self.events
+        ):
+            raise TypeError("Fake runtime events must be RuntimeEventKind values")
         if self.error_kind is not None and not self.message:
             raise ValueError("Fake runtime failures require a message")
         if (
@@ -60,8 +69,9 @@ class FakeRuntimeOutcome:
         *,
         output: str,
         effect: Callable[[RuntimeRequest], None] | None = None,
+        events: tuple[RuntimeEventKind, ...] = (),
     ) -> "FakeRuntimeOutcome":
-        return cls(output=output, effect=effect)
+        return cls(output=output, effect=effect, events=events)
 
     @classmethod
     def failure(cls, message: str) -> "FakeRuntimeOutcome":
@@ -116,6 +126,17 @@ class FakeRuntime:
             )
 
         outcome = self._outcomes.pop(0)
+        dispatcher = RuntimeEventDispatcher(request)
+        event_epoch = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        for index, kind in enumerate(outcome.events):
+            dispatcher.emit(
+                RuntimeEvent(
+                    kind=kind,
+                    request_id=request.request_id,
+                    role=request.role,
+                    timestamp=event_epoch + timedelta(microseconds=index),
+                )
+            )
         if outcome.error_kind is None and outcome.exit_status != 0:
             raise RuntimeError(
                 RuntimeErrorKind.EXECUTION_FAILED,

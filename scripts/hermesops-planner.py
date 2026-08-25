@@ -18,6 +18,7 @@ from agent_runtime import (
     RuntimeRequest,
     RuntimeRole,
     create_runtime,
+    record_runtime_failure,
 )
 
 
@@ -392,17 +393,12 @@ def command_generate(
             "status": arguments.status,
         }
     except AgentRuntimeError as error:
-        exit_code = error.exit_status
-        failure_reason = (
-            f"runtime_error[{error.kind.value}]: {str(error)[:4096]}"
+        failure = record_runtime_failure(
+            error,
+            lambda output: persist_transcript(output_path, output),
         )
-        try:
-            persist_transcript(output_path, error.output)
-        except OSError as transcript_error:
-            failure_reason += (
-                "; transcript persistence failed: "
-                f"{type(transcript_error).__name__}"
-            )
+        exit_code = failure.exit_code
+        failure_reason = failure.failure_reason
         raise
     except Exception as error:
         failure_reason = str(error)
