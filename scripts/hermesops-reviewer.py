@@ -18,11 +18,14 @@ from typing import Any, NoReturn
 
 from agent_runtime import (
     AgentRuntime,
+    RuntimeEvent,
+    RuntimeEventKind,
     RuntimeError as AgentRuntimeError,
     RuntimeRequest,
     RuntimeRole,
     RuntimeSandboxContext,
     create_runtime,
+    record_runtime_failure,
 )
 import hermesops_review_assignment as ASSIGNMENTS
 
@@ -1427,13 +1430,9 @@ def command_launch(
             result_commit=result_commit,
         )
 
-        last_heartbeat = 0.0
-
-        def poll_runtime(elapsed: float) -> None:
-            nonlocal last_heartbeat
-            if elapsed - last_heartbeat >= 5:
+        def handle_runtime_event(event: RuntimeEvent) -> None:
+            if event.kind is RuntimeEventKind.HEARTBEAT:
                 heartbeat(run["run_id"], task_id)
-                last_heartbeat = elapsed
 
         runtime_result = runtime.execute(
             RuntimeRequest(
@@ -1453,7 +1452,7 @@ def command_launch(
                     sandbox_handle=sandbox_id,
                     task_id=task_id,
                 ),
-                on_poll=poll_runtime,
+                on_event=handle_runtime_event,
             )
         )
         exit_code = 0
@@ -1537,17 +1536,12 @@ def command_launch(
         success = True
 
     except AgentRuntimeError as error:
-        exit_code = error.exit_status
-        failure_reason = (
-            f"runtime_error[{error.kind.value}]: {str(error)[:4096]}"
+        failure = record_runtime_failure(
+            error,
+            lambda output: persist_transcript(output_path, output),
         )
-        try:
-            persist_transcript(output_path, error.output)
-        except OSError as transcript_error:
-            failure_reason += (
-                "; transcript persistence failed: "
-                f"{type(transcript_error).__name__}"
-            )
+        exit_code = failure.exit_code
+        failure_reason = failure.failure_reason
         raise
     except Exception as error:
         failure_reason = str(error)

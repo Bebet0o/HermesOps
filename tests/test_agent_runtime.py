@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import fields
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -29,12 +30,16 @@ from agent_runtime import (  # noqa: E402
     FakeRuntime,
     FakeRuntimeOutcome,
     HermesRuntime,
+    RuntimeEvent,
+    RuntimeEventDispatcher,
+    RuntimeEventKind,
     RuntimeError,
     RuntimeErrorKind,
     RuntimeRequest,
     RuntimeResult,
     RuntimeRole,
     RuntimeSandboxContext,
+    record_runtime_failure,
 )
 
 RECOVERY_SPEC = importlib.util.spec_from_file_location(
@@ -94,7 +99,7 @@ class AgentRuntimeContractTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.request(timeout_seconds=True)
         with self.assertRaises(TypeError):
-            self.request(on_poll="not-callable")
+            self.request(on_event="not-callable")
 
     def test_prompt_is_omitted_from_request_repr(self) -> None:
         secret = "prompt-secret-that-must-not-appear"
@@ -239,6 +244,349 @@ class AgentRuntimeContractTest(unittest.TestCase):
                 "bad status",
                 exit_status=True,
             )
+
+    def event(self, **overrides: object) -> RuntimeEvent:
+        values: dict[str, object] = {
+            "kind": RuntimeEventKind.STARTED,
+            "request_id": "runtime-test",
+            "role": RuntimeRole.PLANNER,
+            "timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        }
+        values.update(overrides)
+        return RuntimeEvent(**values)
+
+    def test_runtime_event_contract_is_strict_bounded_and_secret_free(self) -> None:
+        event = self.event()
+        self.assertEqual(
+            {item.name for item in fields(event)},
+            {"kind", "request_id", "role", "timestamp"},
+        )
+        self.assertNotIn("prompt", repr(event).lower())
+        with self.assertRaises(TypeError):
+            self.event(kind="started")
+        with self.assertRaises(TypeError):
+            self.event(role="planner")
+        with self.assertRaises(ValueError):
+            self.event(timestamp=datetime(2026, 1, 1))
+        with self.assertRaises(ValueError):
+            self.event(
+                timestamp=datetime(
+                    2026,
+                    1,
+                    1,
+                    tzinfo=timezone(timedelta(hours=1)),
+                )
+            )
+
+    def test_runtime_event_binding_and_order_fail_closed(self) -> None:
+        dispatcher = RuntimeEventDispatcher(self.request())
+        with self.assertRaises(RuntimeError) as caught:
+            dispatcher.emit(self.event(request_id="other-request"))
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.INVALID_RESULT)
+        with self.assertRaises(RuntimeError):
+            dispatcher.emit(self.event(role=RuntimeRole.WORKER))
+        with self.assertRaises(RuntimeError):
+            dispatcher.emit(self.event(kind=RuntimeEventKind.HEARTBEAT))
+        dispatcher.emit(self.event())
+        with self.assertRaises(RuntimeError):
+            dispatcher.emit(self.event())
+
+    def test_runtime_event_sink_failure_is_normalized(self) -> None:
+        request = self.request(
+            on_event=mock.Mock(side_effect=ValueError("sink failed"))
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            RuntimeEventDispatcher(request).emit(self.event())
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.EXECUTION_FAILED)
+        self.assertEqual(
+            str(caught.exception),
+            "Control-plane runtime event sink failed",
+        )
+
+    def test_runtime_event_sink_failure_exposes_no_secondary_data(self) -> None:
+        control_injection = type(
+            "EventSinkFailure\nsecret=event-token",
+            (Exception,),
+            {},
+        )("hostile-message\x00secret=message-token")
+        identifier_injection = type(
+            "runtime_event_secret",
+            (Exception,),
+            {},
+        )("secondary-message")
+
+        class HostileRepresentation(Exception):
+            def __repr__(self) -> str:
+                return "hostile-repr\nsecret=repr-token"
+
+        failures = (
+            control_injection,
+            identifier_injection,
+            HostileRepresentation("hostile-message\r\nsecret=message-token"),
+        )
+        for sink_error in failures:
+            with self.subTest(error=type(sink_error).__name__):
+                request = self.request(
+                    on_event=mock.Mock(side_effect=sink_error)
+                )
+                with self.assertRaises(RuntimeError) as caught:
+                    RuntimeEventDispatcher(request).emit(self.event())
+
+                error = caught.exception
+                self.assertEqual(
+                    error.kind,
+                    RuntimeErrorKind.EXECUTION_FAILED,
+                )
+                self.assertEqual(
+                    str(error),
+                    "Control-plane runtime event sink failed",
+                )
+                record = record_runtime_failure(error, lambda _output: None)
+                self.assertEqual(
+                    record.failure_reason,
+                    "runtime_error[execution_failed]: "
+                    "Control-plane runtime event sink failed",
+                )
+
+                def fail_persistence(_output: str) -> None:
+                    raise type(
+                        "TranscriptFailure\nsecret=transcript-token",
+                        (Exception,),
+                        {},
+                    )("hostile transcript message")
+
+                double_failure = record_runtime_failure(
+                    error,
+                    fail_persistence,
+                )
+                self.assertEqual(
+                    double_failure.failure_reason,
+                    "runtime_error[execution_failed]: "
+                    "Control-plane runtime event sink failed; "
+                    "transcript_persistence_failed",
+                )
+
+    def test_runtime_event_sink_does_not_swallow_base_exceptions(self) -> None:
+        for base_error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(error=type(base_error).__name__):
+                request = self.request(
+                    on_event=mock.Mock(side_effect=base_error)
+                )
+                with self.assertRaises(type(base_error)):
+                    RuntimeEventDispatcher(request).emit(self.event())
+
+    def test_fake_runtime_scripted_events_are_ordered_and_deterministic(self) -> None:
+        delivered: list[RuntimeEvent] = []
+        request = self.request(on_event=delivered.append)
+        runtime = FakeRuntime(
+            [
+                FakeRuntimeOutcome.success(
+                    output="result\nRUNTIME_TEST_OK\n",
+                    events=(
+                        RuntimeEventKind.STARTED,
+                        RuntimeEventKind.HEARTBEAT,
+                    ),
+                )
+            ]
+        )
+        runtime.execute(request)
+        self.assertEqual(
+            [event.kind for event in delivered],
+            [RuntimeEventKind.STARTED, RuntimeEventKind.HEARTBEAT],
+        )
+        self.assertEqual(delivered[0].request_id, request.request_id)
+        self.assertEqual(delivered[0].role, request.role)
+        self.assertEqual(
+            delivered[0].timestamp,
+            datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+        self.assertLess(delivered[0].timestamp, delivered[1].timestamp)
+
+    def test_fake_runtime_rejects_invalid_or_impossible_event_scripts(self) -> None:
+        with self.assertRaises(TypeError):
+            FakeRuntimeOutcome(events=("heartbeat",))
+        runtime = FakeRuntime(
+            [
+                FakeRuntimeOutcome.success(
+                    output="result\nRUNTIME_TEST_OK\n",
+                    events=(RuntimeEventKind.HEARTBEAT,),
+                )
+            ]
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            runtime.execute(self.request())
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.INVALID_RESULT)
+
+    def test_runtime_failure_projection_is_uniform_and_preserves_output(self) -> None:
+        persisted: list[str] = []
+        error = RuntimeError(
+            RuntimeErrorKind.TIMEOUT,
+            "bounded timeout",
+            output="partial diagnostics",
+        )
+        record = record_runtime_failure(error, persisted.append)
+        self.assertIsNone(record.exit_code)
+        self.assertEqual(
+            record.failure_reason,
+            "runtime_error[timeout]: bounded timeout",
+        )
+        self.assertEqual(record.output, "partial diagnostics")
+        self.assertEqual(persisted, ["partial diagnostics"])
+        self.assertNotIn("partial diagnostics", repr(record))
+
+    def test_runtime_failure_projection_bounds_persistence_failure(self) -> None:
+        def fail_persistence(_output: str) -> None:
+            raise OSError("private path detail")
+
+        record = record_runtime_failure(
+            RuntimeError(
+                RuntimeErrorKind.EXECUTION_FAILED,
+                "failed",
+                exit_status=7,
+            ),
+            fail_persistence,
+        )
+        self.assertEqual(record.exit_code, 7)
+        self.assertEqual(
+            record.failure_reason,
+            "runtime_error[execution_failed]: failed; "
+            "transcript_persistence_failed",
+        )
+
+    def test_runtime_failure_projection_preserves_all_ordinary_sink_errors(
+        self,
+    ) -> None:
+        class PersistenceFailure(Exception):
+            pass
+
+        long_persistence_failure = type(
+            "PersistenceFailure" * 16,
+            (Exception,),
+            {},
+        )("bounded persistence failure")
+        failures = (
+            UnicodeEncodeError("utf-8", "x", 0, 1, "not encodable"),
+            ValueError("bad persistence"),
+            PersistenceFailure("generic persistence failure"),
+            long_persistence_failure,
+        )
+        for persistence_error in failures:
+            with self.subTest(error=type(persistence_error).__name__):
+                def fail_persistence(_output: str) -> None:
+                    raise persistence_error
+
+                output = "partial-\ud800"
+                record = record_runtime_failure(
+                    RuntimeError(
+                        RuntimeErrorKind.TIMEOUT,
+                        "provider stalled",
+                        output=output,
+                    ),
+                    fail_persistence,
+                )
+                self.assertIsNone(record.exit_code)
+                self.assertEqual(record.output, output)
+                self.assertEqual(
+                    record.failure_reason,
+                    "runtime_error[timeout]: provider stalled; "
+                    "transcript_persistence_failed",
+                )
+
+    def test_runtime_failure_projection_rejects_secondary_data_injection(
+        self,
+    ) -> None:
+        control_injection = type(
+            "PersistenceFailure\nsecret=runtime-token",
+            (Exception,),
+            {},
+        )("secondary-message\x00secret=abc")
+        valid_identifier_injection = type(
+            "runtime_token_secret",
+            (Exception,),
+            {},
+        )("secondary-message")
+
+        class HostileRepresentation(Exception):
+            def __repr__(self) -> str:
+                return "hostile-repr\nsecret=repr-token"
+
+        failures = (
+            control_injection,
+            valid_identifier_injection,
+            HostileRepresentation("hostile-message\nsecret=message-token"),
+        )
+        for persistence_error in failures:
+            with self.subTest(error=type(persistence_error).__name__):
+                def fail_persistence(_output: str) -> None:
+                    raise persistence_error
+
+                record = record_runtime_failure(
+                    RuntimeError(
+                        RuntimeErrorKind.TIMEOUT,
+                        "provider stalled",
+                        output="partial",
+                    ),
+                    fail_persistence,
+                )
+                self.assertEqual(
+                    record.failure_reason,
+                    "runtime_error[timeout]: provider stalled; "
+                    "transcript_persistence_failed",
+                )
+                self.assertNotIn("secret", record.failure_reason)
+                self.assertNotIn("runtime-token", record.failure_reason)
+                self.assertNotIn("runtime_token_secret", record.failure_reason)
+                self.assertNotIn("\n", record.failure_reason)
+
+    def test_runtime_failure_projection_keeps_primary_kinds_with_fixed_suffix(
+        self,
+    ) -> None:
+        cases = (
+            (RuntimeErrorKind.TIMEOUT, None),
+            (RuntimeErrorKind.EXECUTION_FAILED, 7),
+            (RuntimeErrorKind.INVALID_RESULT, None),
+        )
+        for kind, exit_status in cases:
+            with self.subTest(kind=kind):
+                def fail_persistence(_output: str) -> None:
+                    raise RuntimeError("secondary sink failure")
+
+                record = record_runtime_failure(
+                    RuntimeError(
+                        kind,
+                        "primary message",
+                        exit_status=exit_status,
+                        output="primary output",
+                    ),
+                    fail_persistence,
+                )
+                self.assertEqual(record.exit_code, exit_status)
+                self.assertEqual(record.output, "primary output")
+                self.assertEqual(
+                    record.failure_reason,
+                    f"runtime_error[{kind.value}]: primary message; "
+                    "transcript_persistence_failed",
+                )
+
+    def test_runtime_failure_projection_does_not_swallow_base_exceptions(
+        self,
+    ) -> None:
+        for base_error in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(error=type(base_error).__name__):
+                def interrupt_persistence(_output: str) -> None:
+                    raise base_error
+
+                with self.assertRaises(type(base_error)):
+                    record_runtime_failure(
+                        RuntimeError(RuntimeErrorKind.TIMEOUT, "primary"),
+                        interrupt_persistence,
+                    )
+
+    def test_runtime_events_have_no_business_policy_kinds(self) -> None:
+        self.assertEqual(
+            {kind.value for kind in RuntimeEventKind},
+            {"started", "heartbeat"},
+        )
 
 
 class HermesRuntimeMappingTest(unittest.TestCase):
@@ -389,6 +737,52 @@ class HermesRuntimeExecutionTest(unittest.TestCase):
             result = self.runtime.execute(self.request)
 
         self.assertEqual(result.output, "result\nPLAN_OK\n")
+
+    def test_hermes_runtime_emits_started_before_heartbeat(self) -> None:
+        delivered: list[RuntimeEvent] = []
+        request = RuntimeRequest(
+            role=self.request.role,
+            prompt=self.request.prompt,
+            runtime_config_id=self.request.runtime_config_id,
+            request_id=self.request.request_id,
+            timeout_seconds=self.request.timeout_seconds,
+            completion_marker=self.request.completion_marker,
+            on_event=delivered.append,
+        )
+
+        def launch(*_args: object, **kwargs: object) -> object:
+            stream = kwargs["stdout"]
+            stream.write("result\nPLAN_OK\n")
+            stream.flush()
+            return self.Process(0)
+
+        timestamps = (
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+        )
+        with (
+            mock.patch("agent_runtime.hermes.subprocess.Popen", side_effect=launch),
+            mock.patch(
+                "agent_runtime.hermes.time.monotonic",
+                side_effect=(10.0, 16.0),
+            ),
+            mock.patch.object(
+                self.runtime,
+                "event_clock",
+                side_effect=timestamps,
+            ),
+        ):
+            result = self.runtime.execute(request)
+
+        self.assertEqual(result.output, "result\nPLAN_OK\n")
+        self.assertEqual(
+            [event.kind for event in delivered],
+            [RuntimeEventKind.STARTED, RuntimeEventKind.HEARTBEAT],
+        )
+        self.assertEqual(
+            [event.timestamp for event in delivered],
+            list(timestamps),
+        )
 
     def test_private_transcript_cannot_follow_a_caller_symlink(self) -> None:
         victim = self.root / "victim.txt"
@@ -905,7 +1299,7 @@ class HermesRuntimeExecutionTest(unittest.TestCase):
         self.assertEqual(caught.exception.kind, RuntimeErrorKind.EXECUTION_FAILED)
         self.assertIn("cleanup failed", str(caught.exception).lower())
 
-    def test_poll_callback_exception_is_normalized(self) -> None:
+    def test_event_sink_exception_is_normalized_and_cleanup_continues(self) -> None:
         request = RuntimeRequest(
             role=self.request.role,
             prompt=self.request.prompt,
@@ -913,7 +1307,7 @@ class HermesRuntimeExecutionTest(unittest.TestCase):
             request_id=self.request.request_id,
             timeout_seconds=self.request.timeout_seconds,
             completion_marker=self.request.completion_marker,
-            on_poll=mock.Mock(side_effect=ValueError("heartbeat failed")),
+            on_event=mock.Mock(side_effect=ValueError("heartbeat failed")),
         )
         process = self.Process(None)
         with (
@@ -923,14 +1317,19 @@ class HermesRuntimeExecutionTest(unittest.TestCase):
                 "_capture_outer_container_id",
                 return_value="a" * 64,
             ),
-            mock.patch.object(self.runtime, "_terminate"),
-            mock.patch.object(self.runtime, "_remove_outer_container"),
+            mock.patch.object(self.runtime, "_terminate") as terminate,
+            mock.patch.object(
+                self.runtime,
+                "_remove_outer_container",
+            ) as remove_container,
         ):
             with self.assertRaises(RuntimeError) as caught:
                 self.runtime.execute(request)
 
         self.assertEqual(caught.exception.kind, RuntimeErrorKind.EXECUTION_FAILED)
-        self.assertIn("polling callback", str(caught.exception))
+        self.assertIn("event sink", str(caught.exception))
+        terminate.assert_called_once_with(process)
+        remove_container.assert_called_once_with("a" * 64, "process-test")
 
     def test_yaml_sequence_profile_is_invalid_result(self) -> None:
         profile = self.root / "state/hermes-home/profiles/ops-worker-code"
@@ -1062,6 +1461,37 @@ class PlannerRuntimeInjectionTest(unittest.TestCase):
         )
         self.assertIsNone(self.last_finish.call_args.kwargs["exit_code"])
 
+    def test_planner_persistence_failure_preserves_runtime_error(self) -> None:
+        runtime = FakeRuntime([FakeRuntimeOutcome.timeout()])
+        injected = type(
+            "planner_secret_token",
+            (Exception,),
+            {},
+        )("secret planner persistence")
+        with mock.patch.object(
+            self.planner,
+            "persist_transcript",
+            side_effect=injected,
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.exercise(runtime)
+
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.TIMEOUT)
+        self.last_orchestrator.insert_plan.assert_not_called()
+        self.assertIsNone(self.last_finish.call_args.kwargs["exit_code"])
+        self.assertIn(
+            "runtime_error[timeout]:",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertIn(
+            "transcript_persistence_failed",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertNotIn(
+            "planner_secret_token",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+
     def test_planner_invalid_result_kind_is_durable_without_exit_code(self) -> None:
         runtime = FakeRuntime([FakeRuntimeOutcome.invalid_result()])
         with self.assertRaises(RuntimeError):
@@ -1191,6 +1621,7 @@ class WorkerRuntimeInjectionTest(unittest.TestCase):
         )
         self.last_finish = finish
         self.last_worker_precreate = precreate
+        self.last_worker_heartbeat = mock.Mock()
         connection = mock.MagicMock()
         arguments = SimpleNamespace(
             run="run-test",
@@ -1211,6 +1642,11 @@ class WorkerRuntimeInjectionTest(unittest.TestCase):
             mock.patch.object(self.worker, "git_references", references),
             mock.patch.object(self.worker, "git", side_effect=git_result),
             mock.patch.object(self.worker, "reserve_execution"),
+            mock.patch.object(
+                self.worker,
+                "heartbeat",
+                new=self.last_worker_heartbeat,
+            ),
             mock.patch.object(self.worker, "prepare_worker_clone", return_value=clone),
             mock.patch.object(
                 self.worker,
@@ -1259,6 +1695,21 @@ class WorkerRuntimeInjectionTest(unittest.TestCase):
         self.assertFalse(bool(runtime))
         self.assertEqual(len(runtime.requests), 1)
         self.assertTrue(finish.call_args.kwargs["success"])
+
+    def test_worker_heartbeat_is_driven_by_runtime_event(self) -> None:
+        runtime, _finish = self.exercise(
+            FakeRuntimeOutcome.success(
+                output="WORKER_RUNTIME_OK\n",
+                events=(
+                    RuntimeEventKind.STARTED,
+                    RuntimeEventKind.HEARTBEAT,
+                ),
+            )
+        )
+        self.last_worker_heartbeat.assert_called_once_with(
+            "run-test",
+            runtime.requests[0].sandbox.task_id,
+        )
 
     def test_worker_precreates_a_runtime_neutral_sandbox(self) -> None:
         sandbox_id = "e" * 64
@@ -1608,6 +2059,42 @@ class WorkerRuntimeInjectionTest(unittest.TestCase):
         )
         self.assertIsNone(self.last_finish.call_args.kwargs["exit_code"])
 
+    def test_worker_persistence_failure_preserves_runtime_error(self) -> None:
+        injected = type(
+            "worker_secret_token",
+            (Exception,),
+            {},
+        )("secret worker persistence")
+        with mock.patch.object(
+            self.worker,
+            "persist_transcript",
+            side_effect=injected,
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.exercise(
+                    FakeRuntimeOutcome(
+                        output="partial",
+                        exit_status=7,
+                        error_kind=RuntimeErrorKind.EXECUTION_FAILED,
+                        message="runtime failed",
+                    )
+                )
+
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.EXECUTION_FAILED)
+        self.assertEqual(self.last_finish.call_args.kwargs["exit_code"], 7)
+        self.assertIn(
+            "runtime_error[execution_failed]: runtime failed",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertIn(
+            "transcript_persistence_failed",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertNotIn(
+            "worker_secret_token",
+            self.last_finish.call_args.kwargs["failure_reason"],
+        )
+
     def test_default_worker_preflight_precedes_control_plane_side_effects(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -1710,6 +2197,7 @@ class ReviewerRuntimeInjectionTest(unittest.TestCase):
         )
         self.last_reviewer_finish = finish
         self.last_reviewer_precreate = precreate
+        self.last_reviewer_heartbeat = mock.Mock()
         connection = mock.MagicMock()
         arguments = SimpleNamespace(
             run="run-test",
@@ -1749,6 +2237,11 @@ class ReviewerRuntimeInjectionTest(unittest.TestCase):
             ),
             mock.patch.object(self.reviewer, "git", side_effect=git_result),
             mock.patch.object(self.reviewer, "reserve_review"),
+            mock.patch.object(
+                self.reviewer,
+                "heartbeat",
+                new=self.last_reviewer_heartbeat,
+            ),
             mock.patch.object(self.reviewer, "prepare_review_clone", return_value=clone),
             mock.patch.object(
                 self.reviewer,
@@ -1798,6 +2291,21 @@ class ReviewerRuntimeInjectionTest(unittest.TestCase):
         self.assertFalse(bool(runtime))
         self.assertEqual(len(runtime.requests), 1)
         self.assertTrue(finish.call_args.kwargs["success"])
+
+    def test_reviewer_heartbeat_is_driven_by_runtime_event(self) -> None:
+        runtime, _finish = self.exercise(
+            FakeRuntimeOutcome.success(
+                output=self.valid_output(),
+                events=(
+                    RuntimeEventKind.STARTED,
+                    RuntimeEventKind.HEARTBEAT,
+                ),
+            )
+        )
+        self.last_reviewer_heartbeat.assert_called_once_with(
+            "run-test",
+            runtime.requests[0].sandbox.task_id,
+        )
 
     def test_reviewer_precreates_a_runtime_neutral_sandbox(self) -> None:
         sandbox_id = "f" * 64
@@ -1969,6 +2477,37 @@ class ReviewerRuntimeInjectionTest(unittest.TestCase):
         self.assertEqual(
             self.last_reviewer_finish.call_args.kwargs["failure_reason"],
             "runtime_error[invalid_result]: Runtime result is invalid",
+        )
+
+    def test_reviewer_persistence_failure_preserves_runtime_error(self) -> None:
+        injected = type(
+            "reviewer_secret_token",
+            (Exception,),
+            {},
+        )("secret reviewer persistence")
+        with mock.patch.object(
+            self.reviewer,
+            "persist_transcript",
+            side_effect=injected,
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                self.exercise(FakeRuntimeOutcome.timeout())
+
+        self.assertEqual(caught.exception.kind, RuntimeErrorKind.TIMEOUT)
+        self.assertIsNone(
+            self.last_reviewer_finish.call_args.kwargs["exit_code"]
+        )
+        self.assertIn(
+            "runtime_error[timeout]:",
+            self.last_reviewer_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertIn(
+            "transcript_persistence_failed",
+            self.last_reviewer_finish.call_args.kwargs["failure_reason"],
+        )
+        self.assertNotIn(
+            "reviewer_secret_token",
+            self.last_reviewer_finish.call_args.kwargs["failure_reason"],
         )
 
     def test_reviewer_fake_pass_cannot_bypass_immutability_checks(self) -> None:

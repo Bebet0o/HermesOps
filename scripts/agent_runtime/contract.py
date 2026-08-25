@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Protocol, runtime_checkable
@@ -33,6 +34,38 @@ class RuntimeErrorKind(str, Enum):
     TIMEOUT = "timeout"
     INVALID_RESULT = "invalid_result"
     CANCELLED = "cancelled"
+
+
+class RuntimeEventKind(str, Enum):
+    """Runtime execution facts currently consumed by the control plane."""
+
+    STARTED = "started"
+    HEARTBEAT = "heartbeat"
+
+
+@dataclass(frozen=True)
+class RuntimeEvent:
+    """A bounded runtime fact tied to exactly one request and role."""
+
+    kind: RuntimeEventKind
+    request_id: str
+    role: RuntimeRole
+    timestamp: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, RuntimeEventKind):
+            raise TypeError("Runtime event kind must be a RuntimeEventKind")
+        _validate_identifier(self.request_id, "Runtime event request identity")
+        if not isinstance(self.role, RuntimeRole):
+            raise TypeError("Runtime event role must be a RuntimeRole")
+        if not isinstance(self.timestamp, datetime):
+            raise TypeError("Runtime event timestamp must be a datetime")
+        if (
+            self.timestamp.tzinfo is None
+            or self.timestamp.utcoffset() is None
+            or self.timestamp.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("Runtime event timestamp must be timezone-aware UTC")
 
 
 @dataclass(frozen=True)
@@ -82,7 +115,7 @@ class RuntimeRequest:
     timeout_seconds: int
     completion_marker: str
     sandbox: RuntimeSandboxContext | None = None
-    on_poll: Callable[[float], None] | None = field(
+    on_event: Callable[[RuntimeEvent], None] | None = field(
         default=None,
         compare=False,
         repr=False,
@@ -126,8 +159,8 @@ class RuntimeRequest:
             RuntimeSandboxContext,
         ):
             raise TypeError("Runtime sandbox must be a RuntimeSandboxContext")
-        if self.on_poll is not None and not callable(self.on_poll):
-            raise TypeError("Runtime polling callback must be callable")
+        if self.on_event is not None and not callable(self.on_event):
+            raise TypeError("Runtime event sink must be callable")
         if self.role is RuntimeRole.PLANNER and self.sandbox is not None:
             raise ValueError("Planner runtime request must not carry a task sandbox")
         if self.role is not RuntimeRole.PLANNER and self.sandbox is None:
@@ -173,6 +206,52 @@ class RuntimeError(Exception):
         self.exit_status = exit_status
         self.output = output
         self.secondary_errors: tuple[str, ...] = ()
+
+
+class RuntimeEventDispatcher:
+    """Validate and deliver one request's ordered runtime facts."""
+
+    def __init__(self, request: RuntimeRequest) -> None:
+        if not isinstance(request, RuntimeRequest):
+            raise TypeError("Runtime event dispatcher requires a RuntimeRequest")
+        self._request = request
+        self._started = False
+
+    def emit(self, event: RuntimeEvent) -> None:
+        if not isinstance(event, RuntimeEvent):
+            raise RuntimeError(
+                RuntimeErrorKind.INVALID_RESULT,
+                "Runtime event does not satisfy the runtime contract",
+            )
+        if (
+            event.request_id != self._request.request_id
+            or event.role is not self._request.role
+        ):
+            raise RuntimeError(
+                RuntimeErrorKind.INVALID_RESULT,
+                "Runtime event request or role binding is mismatched",
+            )
+        if event.kind is RuntimeEventKind.STARTED:
+            if self._started:
+                raise RuntimeError(
+                    RuntimeErrorKind.INVALID_RESULT,
+                    "Runtime STARTED event is duplicated",
+                )
+            self._started = True
+        elif event.kind is RuntimeEventKind.HEARTBEAT and not self._started:
+            raise RuntimeError(
+                RuntimeErrorKind.INVALID_RESULT,
+                "Runtime HEARTBEAT event precedes STARTED",
+            )
+
+        if self._request.on_event is not None:
+            try:
+                self._request.on_event(event)
+            except Exception:
+                raise RuntimeError(
+                    RuntimeErrorKind.EXECUTION_FAILED,
+                    "Control-plane runtime event sink failed",
+                )
 
 
 @runtime_checkable

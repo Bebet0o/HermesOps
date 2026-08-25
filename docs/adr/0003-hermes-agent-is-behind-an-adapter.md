@@ -72,6 +72,15 @@ store the neutral request identity.
 Speculative cancellation callbacks and unused execution metadata are not
 included in the 2W contract.
 
+Milestone 2X replaces the polling-shaped callback with one runtime-neutral
+event sink. The only current facts are `STARTED` and `HEARTBEAT`, carried in a
+strict request/role-bound UTC envelope. Runtime implementations choose when to
+emit those facts; control-plane consumers choose their durable effect. Event
+delivery cannot express task completion, verdict, retry, cancellation, or
+Recovery policy. The same milestone centralizes only the mechanical projection
+of a `RuntimeError` into the existing durable reason, exit code, and partial
+output fields.
+
 The control plane owns sandbox creation, network/read-only/resource policy,
 pre/post audits, durable transcript persistence, Git integrity, and reviewer
 immutability. The Hermes adapter owns the private translation from the opaque

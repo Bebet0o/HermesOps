@@ -29,12 +29,31 @@ cancellation.
 
 The public request carries a typed role, prompt, opaque `runtime_config_id`,
 neutral request identifier, timeout, completion marker, optional sandbox
-facts, and optional control-plane polling callback. `RuntimeSandboxContext`
+facts, and one optional runtime-event sink. `RuntimeSandboxContext`
 contains only an absolute workspace, image identity, CPU and memory limits,
 read-only and network policy, the control-plane task identity, and an opaque
 sandbox handle. The task identity is a generic authorization binding, not a
 runtime discovery protocol. The context contains no Hermes, Compose, profile,
 container-name, or discovery-label field.
+
+`RuntimeEvent` is the runtime-fact side of the boundary. Its envelope is
+limited to a strict `RuntimeEventKind`, the request and role bindings, and an
+aware UTC timestamp. Milestone 2X has exactly two event kinds: `STARTED`
+reports that the invocation process was launched, and `HEARTBEAT` lets the
+current worker and reviewer consumers refresh their durable liveness. The
+dispatcher rejects a wrong request, wrong role, duplicate `STARTED`, or a
+`HEARTBEAT` before `STARTED`. A sink exception becomes a normalized
+`execution_failed` error with a stable, controlled message; no detail from the
+secondary sink exception is propagated. Normal process/container/profile
+cleanup still runs. Events are emitted synchronously during `execute`; none
+can be emitted after it returns. They contain no prompt, environment,
+credentials, arbitrary payload, task completion, review verdict, or lifecycle
+instruction.
+The event timestamp is the UTC time reported for the runtime fact and is
+informational, not an authority for durable liveness. When an accepted
+`HEARTBEAT` is received, worker and reviewer persist their control-plane local
+time at reception; a future, stale, or regressing runtime timestamp cannot
+move that durable heartbeat.
 
 The runtime has no durable transcript path. `HermesRuntime` captures output in
 a private temporary file and returns it; the control plane persists success or
@@ -89,6 +108,15 @@ otherwise successful execution is itself `execution_failed`. Invalid Hermes
 profile YAML, including a non-mapping document root, is an `invalid_result`
 because the adapter cannot construct its completion protocol.
 
+Planner, worker, and reviewer use the shared `RuntimeFailureRecord` projection
+for the stable `runtime_error[<kind>]: <message>` journal reason, known exit
+code, and partial output. The projection accepts a control-plane-owned output
+sink; it does not choose task state, retry, rollback, plan policy, or verdict.
+The primary runtime kind, message, exit status, and output are projected before
+that sink is called. If the sink raises an ordinary exception, the primary
+record is preserved and receives only the fixed safe marker
+`transcript_persistence_failed`; no secondary exception detail is persisted.
+
 Timeout and exceptional supervision paths terminate and reap the process while
 the private capture file is still open, then recover partial output. The
 control plane persists the stable kind in the existing `failure_reason` column
@@ -96,9 +124,11 @@ as `runtime_error[<kind>]: <message>`; no provider string and no schema change
 is needed.
 
 `FakeRuntime` returns configured deterministic outcomes without invoking a
-process. It strictly validates outcome types and uses the same request,
-sandbox handle, output, completion, and normalized-error contract. Tests use
-it to exercise success, failure, timeout, invalid output, cancellation, real
+process. It strictly validates outcome and event types, emits scripted events
+with deterministic UTC timestamps through the same binding/order dispatcher,
+and uses the same request, sandbox handle, output, completion, and
+normalized-error contract. Tests use it to exercise success, failure, timeout,
+invalid output, cancellation, worker/reviewer heartbeat consumption, real
 worker Git checks, and real reviewer immutability checks at the runtime seam.
 
 The default launch paths call the centralized `create_runtime` factory, while

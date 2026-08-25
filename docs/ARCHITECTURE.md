@@ -15,6 +15,10 @@
 - Reviewer indépendant.
 - Frontière [`AgentRuntime`](AGENT_RUNTIME.md) entre le plan de contrôle et
   l'exécution IA ; `HermesRuntime` est l'adapter transitionnel actuel.
+- Événements d'exécution typés et liés à la request (`STARTED`, `HEARTBEAT`) ;
+  ils transportent des faits runtime, jamais une décision lifecycle ou métier.
+- Projection d'erreur commune pour le journal durable, sans déplacer la
+  persistance, Git, review ou Recovery dans le runtime.
 - Adoption et cleanup des conteneurs fail-closed : labels d'ownership,
   identité cohérente et binding durable sont requis ; un nom ressemblant à
   HermesOps n'est jamais une preuve de propriété.
