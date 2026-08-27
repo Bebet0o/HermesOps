@@ -14,9 +14,11 @@
 - Workers spécialisés.
 - Reviewer indépendant.
 - Frontière [`AgentRuntime`](AGENT_RUNTIME.md) entre le plan de contrôle et
-  l'exécution IA ; `HermesRuntime` est l'adapter transitionnel actuel.
-- Frontière [`ModelProvider`](MODEL_PROVIDER.md) sous un futur runtime natif ;
-  elle normalise uniquement une génération modèle et son backend concret.
+  l'exécution IA ; `HermesRuntime` est l'adapter transitionnel et
+  `NativeRuntime` est le premier backend natif.
+- `NativeRuntime` dépend de la frontière [`ModelProvider`](MODEL_PROVIDER.md)
+  pour une génération synchrone avec un provider et un modèle fixes ; aucun
+  router ou choix de modèle par rôle n'est encore implémenté.
 - Événements d'exécution typés et liés à la request (`STARTED`, `HEARTBEAT`) ;
   ils transportent des faits runtime, jamais une décision lifecycle ou métier.
 - Projection d'erreur commune pour le journal durable, sans déplacer la

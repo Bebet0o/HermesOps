@@ -17,6 +17,7 @@ from .contract import (
 from .failure import RuntimeFailureRecord, record_runtime_failure
 from .fake import FakeRuntime, FakeRuntimeOutcome
 from .hermes import HermesRuntime
+from .native import NativeRuntime
 
 
 def create_runtime(
@@ -32,6 +33,7 @@ __all__ = [
     "FakeRuntime",
     "FakeRuntimeOutcome",
     "HermesRuntime",
+    "NativeRuntime",
     "RuntimeEvent",
     "RuntimeEventDispatcher",
     "RuntimeEventKind",

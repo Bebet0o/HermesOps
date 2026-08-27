@@ -17,8 +17,9 @@ memory without encoding how any runtime discovers it. Plan JSON and reviewer
 JSON are parsed and validated by their domain components after execution.
 
 The runtime boundary owns one bounded role invocation: prompt delivery,
-logical runtime-configuration selection, execution supervision, timeout,
-completion detection, textual output, and a stable failure classification. A
+logical runtime-configuration selection, backend-specific execution
+supervision and timeout behavior, textual output, and a stable failure
+classification. A
 returned `RuntimeResult` always denotes runtime success and therefore contains
 only output text; non-zero process exits are `execution_failed` errors. The
 same textual output field is available on a `RuntimeError` so the control plane
@@ -39,8 +40,9 @@ container-name, or discovery-label field.
 `RuntimeEvent` is the runtime-fact side of the boundary. Its envelope is
 limited to a strict `RuntimeEventKind`, the request and role bindings, and an
 aware UTC timestamp. Milestone 2X has exactly two event kinds: `STARTED`
-reports that the invocation process was launched, and `HEARTBEAT` lets the
-current worker and reviewer consumers refresh their durable liveness. The
+reports that runtime pre-invocation validation has completed and backend
+invocation is beginning, and `HEARTBEAT` lets the current worker and reviewer
+consumers refresh their durable liveness. The
 dispatcher rejects a wrong request, wrong role, duplicate `STARTED`, or a
 `HEARTBEAT` before `STARTED`. A sink exception becomes a normalized
 `execution_failed` error with a stable, controlled message; no detail from the
@@ -69,6 +71,15 @@ also the cleanup key consumed by the current adapter; launchers no longer
 fabricate Hermes role/profile/container names.
 
 ## Implementations
+
+The boundary currently has three implementations:
+
+```text
+AgentRuntime
+|- HermesRuntime
+|- FakeRuntime
+`- NativeRuntime -> ModelProvider
+```
 
 `HermesRuntime` is the current transitional adapter. It maps the neutral
 request to the existing Hermes Agent Compose/CLI command and preserves the
@@ -131,17 +142,59 @@ normalized-error contract. Tests use it to exercise success, failure, timeout,
 invalid output, cancellation, worker/reviewer heartbeat consumption, real
 worker Git checks, and real reviewer immutability checks at the runtime seam.
 
-The default launch paths call the centralized `create_runtime` factory, while
-each launch function also accepts an injected `AgentRuntime`. The factory is
+`NativeRuntime` is the first native execution backend. One instance receives
+exactly one explicitly injected `ModelProvider` and one fixed opaque model ID.
+For every role it mechanically maps the runtime prompt to one `USER`
+`ModelMessage`, preserves the request timeout exactly, validates the resulting
+`ModelRequest`, emits one request/role-bound `STARTED` fact, invokes
+`ModelProvider.generate` synchronously once, and maps the complete
+`ModelResult` text to `RuntimeResult`. It does not add a
+system prompt, select a model from the role, inspect sandbox or lifecycle
+metadata, inspect the completion marker, validate planner/worker/reviewer
+payloads, decide task completion, retry, fall back, or construct a provider.
+Empty and non-JSON model output remain successful runtime output for the
+control plane to interpret later. Completion-marker handling is specific to
+`HermesRuntime`; business completion remains a control-plane decision.
+
+The model-provider timeout contract is limited to 600 seconds. A runtime
+request above that limit cannot be represented exactly and therefore fails
+closed before `STARTED` and before provider invocation; the timeout is never
+clamped or coerced. Provider failures are mapped to stable runtime kinds and
+controlled messages without retaining or copying provider exception data.
+Malformed provider results fail as `invalid_result`.
+
+The provider-to-runtime failure mapping is explicit:
+
+| Model provider kind | Runtime kind |
+|---|---|
+| `unavailable` | `runtime_unavailable` |
+| `timeout` | `timeout` |
+| `request_rejected` | `execution_failed` |
+| `invalid_response` | `invalid_result` |
+| `provider_failed` | `execution_failed` |
+
+An unexpected provider exception is also `execution_failed`; its type and
+message are neither retained nor copied. Provider failures have no fabricated
+partial output or process exit status.
+
+NativeRuntime 2Z emits no synthetic `HEARTBEAT` while synchronous
+`ModelProvider.generate` is blocked and creates no thread or background task.
+The current `RuntimeRequest` has no cancellation primitive, so NativeRuntime
+does not claim to interrupt an in-flight synchronous provider call. Advanced
+liveness and cancellation are future contract work.
+
+The default launch paths still call the centralized `create_runtime` factory,
+which continues to select `HermesRuntime`; 2Z does not integrate NativeRuntime
+into planner, worker, or reviewer. Each launch function also accepts an
+injected `AgentRuntime`. The factory remains
 the sole future configuration seam: adding and selecting another
 implementation does not require edits to planner, worker, reviewer, scheduler,
 integrator, or Recovery.
 
 ## Future direction
 
-The boundary makes a future `NativeRuntime` possible without changing the
-scheduler, planner/worker/reviewer domain logic, integrator, or Recovery. Such
-an implementation receives generic policy and the opaque sandbox handle; it
-does not need to emulate Hermes labels or profiles. Only the implementation and
-a future configuration/factory selection are required. No native provider,
-model router, or multi-model policy is implemented by milestone 2W.
+NativeRuntime now supplies the primitive execution mechanism without changing
+the scheduler, planner/worker/reviewer domain logic, integrator, or Recovery.
+Future configuration/factory selection and any model-routing policy remain
+separate work. No model router, role-to-model mapping, provider registry,
+fallback, or multi-model policy is implemented by milestone 2Z.
