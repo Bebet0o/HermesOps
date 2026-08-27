@@ -112,10 +112,12 @@ state, Git transactions, integration, approvals, retry or recovery policy, or
 review verdict policy. Plan and review payloads remain untrusted domain input
 and are validated by their existing control-plane code.
 
-`FakeRuntime` is the deterministic test implementation. An alternate native
-runtime is a future possibility, not an implementation delivered by 2W. The
-current runtime is constructed through one centralized factory so future
-selection does not enter domain launchers.
+`FakeRuntime` is the deterministic test implementation. Milestone 2Z adds
+`NativeRuntime` as a synchronous adapter from one runtime request to one
+explicitly injected `ModelProvider` and fixed model ID. It adds no routing,
+retry, business validation, synthetic heartbeat, or control-plane selection.
+The default runtime remains constructed through one centralized factory so
+future selection does not enter domain launchers.
 
 ## Rejected alternatives
 

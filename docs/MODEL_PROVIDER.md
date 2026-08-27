@@ -1,15 +1,18 @@
 # Model provider boundary
 
-Milestone 2Y introduces a synchronous, runtime-neutral boundary below any
-future native agent runtime:
+Milestone 2Y introduced a synchronous, runtime-neutral boundary. Milestone 2Z
+now composes it with the first native agent runtime:
 
 ```text
-Future NativeRuntime -> ModelProvider -> concrete model backend
+NativeRuntime -> ModelProvider -> concrete model backend
 ```
 
-No `NativeRuntime` or router is implemented by 2Y. Planner, worker, reviewer,
-`AgentRuntime`, and `HermesRuntime` do not use this package and remain
-functionally unchanged.
+`NativeRuntime` receives one provider and one fixed model ID, maps one runtime
+prompt to one user message, and performs one synchronous generation. It does
+not construct providers or route by role. Planner, worker, reviewer, the
+default runtime factory, and `HermesRuntime` remain functionally unchanged;
+control-plane selection of NativeRuntime is later work. No router is
+implemented.
 
 ## Public contract
 
@@ -23,9 +26,11 @@ from representations. The package does not interpret model families,
 quantization, roles, tasks, sandboxes, Git state, or lifecycle state.
 
 `ModelResult` is success-only and contains one textual output. Empty text is a
-valid provider response: a future runtime, not the provider boundary, decides
-whether text satisfies an agent protocol. Failures raise `ModelProviderError`
-with one of five backend-neutral kinds: `unavailable`, `timeout`,
+valid provider response. `NativeRuntime` transports that text to
+`RuntimeResult`; neither boundary decides whether it satisfies an agent
+protocol. Business validation remains in the higher-level control-plane and
+domain components. Failures raise `ModelProviderError` with one of five
+backend-neutral kinds: `unavailable`, `timeout`,
 `request_rejected`, `invalid_response`, or `provider_failed`.
 
 `FakeModelProvider` consumes deterministic typed outcomes and records typed
