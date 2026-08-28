@@ -120,7 +120,7 @@ class ConsoleHTTPTest(unittest.TestCase):
 
         status, _, body = self.request("/version")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["version"], "0.1.0-alpha")
+        self.assertEqual(json.loads(body)["version"], "0.2.0")
 
         for route in service_module.ROUTES:
             status, headers, body = self.request(route)

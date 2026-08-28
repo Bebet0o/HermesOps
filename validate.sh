@@ -27,7 +27,7 @@ log() { [[ "$QUIET" == 1 ]] || printf '%s\n' "$*"; }
 
 static_validation() {
     log "== Validation statique =="
-    [[ "$(cat "${REPO}/VERSION")" == "0.1.0-alpha" ]]
+    [[ "$(cat "${REPO}/VERSION")" == "0.2.0" ]]
 
     for file in \
         install.sh uninstall.sh preflight.sh validate.sh \

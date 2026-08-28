@@ -125,7 +125,7 @@ class OrchestrationReadsTest(unittest.TestCase):
         (self.root / "repo").mkdir()
         (self.root / "state/controller").mkdir(parents=True)
         (self.root / "secrets").mkdir()
-        (self.root / "repo/VERSION").write_text("0.1.0-alpha\n", encoding="utf-8")
+        (self.root / "repo/VERSION").write_text("0.2.0\n", encoding="utf-8")
         (self.root / "secrets/controller-session").write_text("s" * 64, encoding="ascii")
         self.database = self.root / "state/controller/hermesops.db"
         connection = sqlite3.connect(self.database)

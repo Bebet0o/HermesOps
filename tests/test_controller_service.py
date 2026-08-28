@@ -97,7 +97,7 @@ class ControllerProbeTest(unittest.TestCase):
         self.root = Path(self.temporary.name) / "root"
         (self.root / "repo").mkdir(parents=True)
         (self.root / "repo" / "VERSION").write_text(
-            "0.1.0-alpha\n",
+            "0.2.0\n",
             encoding="utf-8",
         )
         projects = self.root / "repo" / "config" / "projects.d"

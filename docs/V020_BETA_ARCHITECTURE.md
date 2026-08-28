@@ -1,5 +1,9 @@
 # v0.2.0-beta Architecture Contracts
 
+> **Historical design document.** This file records the 0.2 beta design phase
+> and its contemporary assumptions. For the implemented HermesOps 0.2.0
+> architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 The `v0.2.0-beta` line is a long-term product milestone with no committed
 release date.
 
@@ -49,5 +53,6 @@ boundaries, or dangerous-action policy must update:
 4. `tests/test-controller-contracts.sh`;
 5. the changelog.
 
-The current release remains `v0.1.0-alpha`. These contracts guide future
-development and do not change the released runtime.
+At the time this document was written, the current release remained
+`v0.1.0-alpha`. These contracts guided the subsequent 0.2 implementation; they
+do not supersede the final architecture documentation.

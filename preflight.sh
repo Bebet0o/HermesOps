@@ -130,7 +130,7 @@ if [[ "$CI_MODE" == 0 ]]; then
         TARGET_GID="$(id -g "$TARGET_USER")"
         [[ "$TARGET_UID" == "1000" && "$TARGET_GID" == "1000" ]] \
             && pass "Contrat UID/GID 1000:1000" \
-            || fail "0.1.0-alpha exige UID/GID 1000:1000; observé ${TARGET_UID}:${TARGET_GID}"
+            || fail "HermesOps 0.2.0 exige UID/GID 1000:1000; observé ${TARGET_UID}:${TARGET_GID}"
         id -nG "$TARGET_USER" | tr ' ' '\n' | grep -Fxq docker \
             && pass "Utilisateur membre du groupe docker" \
             || warn "install.sh ajoutera $TARGET_USER au groupe docker puis demandera une reconnexion"

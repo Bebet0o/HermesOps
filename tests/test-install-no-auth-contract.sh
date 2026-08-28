@@ -71,7 +71,7 @@ PY
 
     chmod 0700 "${ROOT}/secrets"
 
-    printf '%s\n' '0.1.0-alpha' >"${ROOT}/repo/VERSION"
+    printf '%s\n' '0.2.0' >"${ROOT}/repo/VERSION"
     printf '%s\n' 'services: {}' >"${ROOT}/repo/compose/agent.yaml"
     printf '%s\n' 'schema_version = 1' >"${ROOT}/repo/config/controller.toml"
 
@@ -83,7 +83,7 @@ PY
     )"
 
     grep -Fq \
-        'HermesOps layout: PASS (source archive 0.1.0-alpha)' \
+        'HermesOps layout: PASS (source archive 0.2.0)' \
         <<<"$OUTPUT"
 
     echo "HermesOps source-archive runtime layout: PASS"
