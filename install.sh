@@ -42,7 +42,7 @@ Usage: ./install.sh [options]
   --non-interactive            Refuser toute demande sudo interactive.
   -h, --help                   Afficher cette aide.
 
-La racine 0.1.0-alpha est fixe : /opt/docker/hermesops
+La racine HermesOps 0.2.0 est fixe : /opt/docker/hermesops
 HELP
 }
 
@@ -82,7 +82,7 @@ TARGET_GID="$(id -g "$TARGET_USER")"
 TARGET_GROUP="$(id -gn "$TARGET_USER")"
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 [[ "$TARGET_UID" == "1000" && "$TARGET_GID" == "1000" ]] || {
-    echo "HermesOps 0.1.0-alpha est validé uniquement pour UID/GID 1000:1000." >&2
+    echo "HermesOps 0.2.0 est validé uniquement pour UID/GID 1000:1000." >&2
     echo "Utilisateur observé: ${TARGET_UID}:${TARGET_GID}" >&2
     exit 1
 }
@@ -333,7 +333,7 @@ if ! command -v docker >/dev/null 2>&1; then
 elif ! dpkg-query -W -f='${Status}' docker-ce 2>/dev/null |
      grep -Fq 'install ok installed'; then
     echo "Une installation Docker non officielle est présente." >&2
-    echo "HermesOps 0.1.0-alpha exige les paquets Docker CE officiels." >&2
+    echo "HermesOps 0.2.0 exige les paquets Docker CE officiels." >&2
     exit 1
 fi
 
@@ -433,7 +433,7 @@ else
     sudo_run rsync -a --exclude='config/projects.d/*.toml' "$SOURCE/" "$REPO/"
     sudo_run chown -R "$TARGET_USER:$TARGET_GROUP" "$REPO"
 fi
-[[ "$(cat "${REPO}/VERSION")" == "0.1.0-alpha" ]]
+[[ "$(cat "${REPO}/VERSION")" == "0.2.0" ]]
 
 umask 077
 API_KEY=""
@@ -531,7 +531,7 @@ PY
                 echo "Archive worker requise en mode offline." >&2
                 exit 1
             }
-            ASSET_BASE="https://github.com/Bebet0o/HermesOps/releases/download/v0.1.0-alpha"
+            ASSET_BASE="https://github.com/Bebet0o/HermesOps/releases/download/v0.2.0"
             DOWNLOAD_DIR="${ROOT}/runtime/bootstrap"
             sudo_run install -d -m 0750 -o "$TARGET_USER" -g "$TARGET_GROUP" "$DOWNLOAD_DIR"
             WORKER_ARCHIVE="${DOWNLOAD_DIR}/hermesops-worker-sandbox-0.2.tar.gz"

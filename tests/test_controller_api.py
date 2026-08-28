@@ -40,7 +40,7 @@ class APIFixture:
         )
         (self.root / "repo").mkdir(parents=True)
         (self.root / "repo" / "VERSION").write_text(
-            "0.1.0-alpha\n",
+            "0.2.0\n",
             encoding="utf-8",
         )
         self.project_config.parent.mkdir(parents=True)
@@ -587,7 +587,7 @@ class ControllerAPITest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["x-request-id"], "request-12345678")
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["version"], "0.1.0-alpha")
+        self.assertEqual(payload["version"], "0.2.0")
 
     def test_ready_checks_database_and_auth_configuration(self) -> None:
         status, _, payload = self.fixture.request("GET", "/ready")

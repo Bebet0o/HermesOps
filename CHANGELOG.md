@@ -1,118 +1,155 @@
 # Changelog
-- Added durable, immutable Hermesfile v1 sandbox profile source revisions and authenticated profile reads.
 
-All notable changes to HermesOps will be documented in this file.
+All notable changes to HermesOps are documented in this file.
 
 ## [Unreleased]
 
-- Add milestone 2U bounded Objective Lifecycle Console integration.
-- Reuse the existing secure objective creation, pause, resume, cancel and operation read contracts without a schema migration.
+No unreleased feature work is planned under the HermesOps name. Future product
+development continues in [Orchestra](https://github.com/Bebet0o/Orchestra).
 
-- Add milestone 2T Hermesfile lifecycle persistence and Controller routes.
-- Add strict non-persisting validation, guided template creation, immutable
-  source revisions, `If-Match` concurrency, path-only canonical comparison,
-  runtime projection, redacted operations/audit/events, and the dedicated
-  Console editor.
+## [0.2.0] - 2026-08-27
 
-- Add authenticated, redacted public reads for orchestration plans, DAG edges, attempts and reviewer assignments.
-- Add executable Hermesfile v1 parsing, semantic validation, canonical JSON and deterministic source/canonical SHA-256 fingerprints.
+HermesOps 0.2.0 closes the HermesOps product generation. The repository remains
+available as installable software and a historical reference. Future product
+development continues in Orchestra, which inherits the complete HermesOps Git
+history.
 
 ### Added
 
-- public Debian 12 installer, preflight, validation, and conservative
-  uninstaller;
-- local and CI secret scanning;
-- examples for Hermes Agent, the temporary upstream WebUI, and notifications;
-- reproducible worker-image export and verified import;
-- Apache License 2.0;
-- English public README covering architecture, installation, sandbox
-  concepts, security, current limitations, and roadmap;
-- explicit long-term direction for HermesOps Console and Hermesfiles in
-  `v0.2.0-beta`.
-- Milestone 2A architecture contracts for the future Controller, Console,
-  replayable event stream, and Hermesfile sandbox profiles;
-- machine-readable OpenAPI and JSON Schema design contracts;
-- accepted architecture decisions covering state ownership, privilege
-  boundaries, Agent adaptation, immutable images, replay, and confirmations.
+- **Public install foundation:** Debian 12 preflight, idempotent installer,
+  static/runtime validation, conservative uninstall, secret scanning,
+  worker-image export/import, upgrade backups, and systemd user services.
+- **Architecture/API contracts (2A–2C):** Controller ownership and privilege
+  boundaries, OpenAPI/AsyncAPI contracts, replayable-event design, persistence
+  delta, architecture decisions, and a loopback Controller service.
+- **Reads and commands (2D–2M):** authenticated redacted APIs for objectives,
+  operations, executions, events, review, recovery, plans, DAGs, attempts, and
+  reviewer assignments; bounded objective/human-review commands; durable event
+  journal; WebSocket replay; browser sessions; and reviewer assignments.
+- **Hermesfile v1 (2N):** strict executable YAML parsing, semantic validation,
+  canonical JSON, source/canonical SHA-256 fingerprints, and machine schema.
+- **Sandbox profile persistence (2O):** durable immutable source revisions and
+  authenticated redacted profile reads.
+- **Console Web Foundation (2P):** independent loopback static Console,
+  deterministic build, hardened service on port 8788, and bounded probes.
+- **Browser session/Controller client (2Q):** same-origin login, refresh,
+  CSRF logout, capability reads, bounded proxy, and degraded states.
+- **Operational Dashboard (2R):** bounded project, objective, attention, plan,
+  review, recovery, reviewer-assignment, and portfolio summaries.
+- **Project Lifecycle (2S):** project revisions/archive state; secure
+  create/import, update, enable, disable, rescan, and archive; compatibility
+  TOML; idempotency/audit; and Console ETag/`If-Match` handling.
+- **Hermesfile Lifecycle (2T):** operations/audit, templates, non-persisting
+  validation, optimistic create/update, immutable history, canonical/runtime
+  projections, path comparison, redaction, and a Console editor.
+- **Objective Lifecycle (2U):** Console list, create/detail, pause/resume/cancel,
+  and bounded operation following over existing secure Controller contracts.
 
-### Fixed
+### Orchestration and reliability
 
-- synchronized the complete Controller HTTP documentation with OpenAPI;
-- preserved multi-project objectives and numeric queue priorities in API v1;
-- added a machine-readable AsyncAPI WebSocket contract;
-- removed forward-compatibility contradictions from response and event schemas;
-- prohibited unsupported Hermesfile v0 secret eligibility;
-- documented the persistence delta required before Controller writes.
+- Added durable SQLite state, a persistent objective queue, validated DAG
+  planning, bounded scheduling, project affinity, and restart reconciliation.
+- Added transactional Git worktrees/clones, snapshots, isolated workers,
+  independent read-only review, reviewed integration, deterministic recovery,
+  Supervisor, notifications, human approvals, and project memory/history.
+- Hardened container adoption/cleanup using positive ownership, immutable IDs,
+  durable bindings, and audited image/mount/network/resource checks.
+- Preserved one active writer per project and no automatic push.
 
-- scanner-safe CSRF and Hermesfile schema identifiers that preserve the
-  security contract without resembling tracked secret assignments;
+### Lifecycle Stabilization (2V)
 
-### Changed
+- Made objective lifecycle gates authoritative across scheduling, reservation,
+  approvals, orchestration, and recovery.
+- Serialized pause/cancel transitions at safe boundaries and closed deferred
+  human-gate and restart races.
+- Stabilized recovery of requested, paused, cancelled, and human-gated work.
+- Prevented task reservation from bypassing objective or approval gates.
 
-- public version normalized to `0.1.0-alpha`;
-- a fresh public installation starts with zero registered projects;
-- local project configurations are ignored and test fixtures live only
-  under `tests/fixtures/projects/`;
-- the current upstream WebUI is documented as a temporary compatibility
-  interface rather than the final HermesOps product;
-- `v0.1.0-alpha` is explicitly positioned as the validated technical
-  foundation for future releases.
+### Agent Runtime Foundation (2W)
 
-### Fixed
+- Introduced runtime-neutral `AgentRuntime`, requests/results/errors, sandbox
+  context, and bounded failure vocabulary.
+- Added `HermesRuntime` as the Hermes Agent adapter and deterministic
+  `FakeRuntime`.
+- Kept lifecycle, persistence, Git, review, approval, and Recovery in the
+  control plane while moving backend invocation behind the runtime boundary.
+- Added normalized failure projection and runtime injection seams.
 
-- minimal Debian preflight no longer fails before installable dependencies
-  can be installed;
-- `/usr/sbin` and `/sbin` are included when locating administrative
-  commands;
-- `util-linux` is an explicit installer dependency;
-- local test fixtures are no longer accidentally tracked as active projects;
-- static validation works from source archives without `.git` metadata;
-- installation without `auth.json` defers AI-profile verification instead
-  of failing;
-- runtime layout validation accepts source-archive installations;
-- user systemd services no longer create a `default.target` ordering cycle;
-- the installer restarts user services deterministically and verifies that
-  all three are active.
+### Runtime-neutral Execution (2X)
+
+- Added request/role-bound `STARTED` and `HEARTBEAT` facts with strict order.
+- Persisted liveness from control-plane receipt time, not runtime timestamps.
+- Removed Hermes discovery details from the public sandbox contract and
+  hardened generic ownership/adoption/cleanup.
+- Preserved neutral identity in compatibility columns without migration.
+
+### Model Provider (2Y)
+
+- Added synchronous `ModelProvider`, typed requests/results/messages/errors,
+  plus a deterministic fake.
+- Added bounded non-streaming `OpenAICompatibleProvider` with strict endpoint,
+  system TLS, disabled proxy discovery, refused redirects, byte ceilings, and
+  exact response parsing.
+- Normalized failures without exposing prompts, credentials, endpoints, bodies,
+  or secondary exception details.
+
+### First NativeRuntime (2Z)
+
+- Added the first real `NativeRuntime`, composed with one injected provider and
+  one fixed model ID.
+- Mapped one prompt to one user message, preserved timeout, emitted `STARTED`,
+  invoked one synchronous generation, and returned text for domain validation.
+- Added explicit provider-to-runtime failure mapping and fail-closed handling.
+- Preserved default `HermesRuntime`: no model router, role routing, registry,
+  fallback, native worker pool, or autonomous multi-agent behavior was added.
 
 ### Security
 
-- explicit protection for `auth.json` and `secrets/`;
-- backups before divergent upgrades;
-- no generated secret is stored in the source repository;
-- host Docker socket is not exposed to workers.
+- Kept credentials/secrets outside Git with restrictive permissions.
+- Kept the host Docker socket away from workers via a sandbox engine.
+- Added browser authentication, CSRF/origin controls, bounded I/O, idempotency,
+  optimistic concurrency, immutable audit, and redacted projections.
+- Made review read-only/network-disabled and recovery fail closed.
 
-### Milestone 2P — Console Web Foundation
+### Known limits
 
-- add the independent loopback-only HermesOps Console shell;
-- add a deterministic Python-only static build and manifest;
-- add a dedicated hardened user service on port 8788;
-- add bounded HTTP, build, install, probe, and adversarial test coverage;
-- keep Controller integration and all business workflows disabled until later
-  beta milestones.
+- Hermesfile does not build/activate/rollback images, bind secrets, or delete
+  revisions.
+- NativeRuntime is synchronous and not selected by the default control plane;
+  it has no in-flight cancellation or blocked-call heartbeat.
+- Detailed execution/review/event/administration/recovery actions are absent
+  from the Console.
 
-### Milestone 2Q — Browser Session and Controller Client
+## [0.1.0-alpha]
 
-- add a narrow same-origin Console gateway for browser session lifecycle and
-  capability reads;
-- add login, authoritative session refresh, CSRF-protected logout, and degraded
-  Controller-unavailable states;
-- keep passwords, cookies, CSRF values, and pending actions out of browser
-  storage;
-- add bounded proxy, origin, header, body, response, and live-probe coverage;
-- keep business workflows and WebSocket events assigned to later milestones.
+The validated technical foundation established the first public installation
+and core local operations pipeline. No historical date is assigned here.
 
-### Milestone 2R — Operational Dashboard
+### Added
 
-- add six explicit query-free read-only Controller collections to the Console gateway;
-- add bounded project, objective, attention, plan and portfolio summaries;
-- add partial-data, session-expiry, empty-state and manual-refresh handling;
-- keep SQLite, host paths, browser storage, WebSocket and all mutations outside the Console;
-- add deterministic dashboard source, proxy, build and live-probe coverage.
+- Debian 12 installer, preflight, validation, conservative uninstall, secret
+  scanning, examples, worker-image export/import, and Apache License 2.0;
+- declarative projects, SQLite state, isolated Hermes Agent gateway, sandbox
+  engine, role fleet, Git transactions, controlled workers, independent review,
+  integration, recovery, Supervisor, DAG orchestration, objectives, and durable
+  notifications.
 
-### Milestone 2S — Project Lifecycle
+### Changed
 
-- add schema 21 project revisions, archive state, repository mode, operations, idempotency and immutable audit;
-- add secure create/import, metadata update, enable, disable, rescan and archive Controller commands;
-- preserve compatibility project TOML files while making Controller mutations authoritative;
-- add a bounded same-origin Console project page with ETag/If-Match and fresh CSRF per intent;
-- keep delete, remote/default-branch mutation, automatic push and Hermesfile editing unavailable.
+- normalized the public version to `0.1.0-alpha`;
+- made fresh installations start with zero registered projects;
+- moved fixtures under `tests/fixtures/projects/`;
+- documented the upstream WebUI as a compatibility interface.
+
+### Fixed
+
+- supported minimal Debian dependency installation and administrative paths;
+- made `util-linux` explicit and static validation source-archive compatible;
+- allowed missing `auth.json` while deferring AI checks;
+- fixed user-systemd ordering and deterministic service verification.
+
+### Security
+
+- protected `auth.json` and `secrets/`, backed up divergent upgrades, kept
+  generated secrets out of Git, and withheld the host Docker socket from
+  workers.

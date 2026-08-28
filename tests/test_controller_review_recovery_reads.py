@@ -179,7 +179,7 @@ class Fixture:
         self.database = self.root / "state/controller/hermesops.db"
         self.session = self.root / "secrets/controller-session"
         (self.root / "repo/config/projects.d").mkdir(parents=True)
-        (self.root / "repo/VERSION").write_text("0.1.0-alpha\n", encoding="utf-8")
+        (self.root / "repo/VERSION").write_text("0.2.0\n", encoding="utf-8")
         config = self.root / "repo/config/projects.d/alpha.toml"
         config.write_text('[git]\ndefault_branch="main"\n', encoding="utf-8")
         self.session.parent.mkdir(parents=True)

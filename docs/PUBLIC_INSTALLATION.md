@@ -1,108 +1,121 @@
-# Installation publique Debian 12
+# Installation publique HermesOps 0.2.0 sur Debian 12
 
-## Contrat de la première alpha
+## Contrat supporté
 
-HermesOps `0.1.0-alpha` est volontairement limité à :
+HermesOps 0.2.0 cible :
 
-- Debian 12 Bookworm ;
-- architecture amd64 ;
-- utilisateur de service avec UID/GID `1000:1000` ;
-- racine fixe `/opt/docker/hermesops` ;
+- Debian 12 Bookworm sur `amd64` ;
+- un utilisateur de service UID/GID `1000:1000` ;
+- la racine fixe `/opt/docker/hermesops` ;
 - Docker Engine testé en `29.6.1` ;
 - Docker Compose testé en `5.3.0`.
 
-L'installateur sait ajouter le dépôt APT officiel Docker et installer les
-versions verrouillées lorsqu'aucun Docker n'est présent. Il refuse de supprimer
-automatiquement des paquets Docker concurrents.
+L'installateur peut ajouter le dépôt APT officiel Docker et installer les
+versions verrouillées si Docker est absent. Il ne supprime pas automatiquement
+les paquets Docker concurrents.
 
-## Installation recommandée
+## Installation
 
 ```bash
-git clone git@github.com:Bebet0o/HermesOps.git
+git clone https://github.com/Bebet0o/HermesOps.git
 cd HermesOps
-
 ./preflight.sh
 ./install.sh
 ```
 
-Lors de la première exécution, l'utilisateur peut être ajouté au groupe
-`docker`. Dans ce cas, le statut devient `RELOGIN_REQUIRED` : fermez entièrement
-la session SSH, reconnectez-vous, puis relancez exactement la même commande.
-L'installation est idempotente et reprend sans écraser l'état existant.
+Le snapshot immuable final sera le tag `v0.2.0`, créé après merge de la
+finalisation source. Le tag, la GitHub Release et ses assets ne sont donc pas
+encore supposés exister sur cette branche.
 
-Un fichier d'authentification OpenAI Codex existant peut être fourni sans
-l'afficher :
+Si le preflight ajoute l'utilisateur au groupe `docker`, son statut devient
+`RELOGIN_REQUIRED` : fermer entièrement la session, se reconnecter et relancer
+la même commande. L'installation est idempotente.
+
+Un fichier OpenAI Codex existant peut être fourni sans l'afficher :
 
 ```bash
-./install.sh --auth-file "$HOME/auth.json"
+./install.sh --auth-file /secure/path/auth.json
 ```
 
-## Installation hors ligne ou test avant release
+Sans ce fichier, l'installation reporte la vérification des profils IA et les
+objectifs IA ne sont pas encore utilisables.
 
-Avant que l'asset de release soit publié, fournissez l'archive worker exportée
-depuis l'installation validée :
+## Image worker et installation hors ligne
+
+Le moteur sandbox dédié doit charger l'image
+`hermesops-worker-sandbox:0.2` dont l'identifiant exact est verrouillé dans
+`config/worker-sandbox.lock.toml`. La release finale doit publier :
+
+- `hermesops-worker-sandbox-0.2.tar.gz` ;
+- `hermesops-worker-sandbox-0.2.tar.gz.sha256`.
+
+Avant publication de ces assets, ou pour une installation hors ligne, fournir
+l'archive explicitement :
 
 ```bash
 ./install.sh \
   --offline \
-  --auth-file "$HOME/auth.json" \
-  --worker-image-archive \
-  "$HOME/hermesops-worker-sandbox-0.2.tar.gz"
+  --auth-file /secure/path/auth.json \
+  --worker-image-archive /secure/path/hermesops-worker-sandbox-0.2.tar.gz
 ```
 
-L'image worker est chargée dans le moteur Docker isolé. Son ID exact doit
-correspondre à `config/worker-sandbox.lock.toml`, sinon l'installation échoue
-fermée.
+L'archive est chargée dans le moteur Docker isolé. L'installation échoue fermée
+si l'identifiant chargé diffère de la lock.
 
-
-## Registre initial
-
-Une installation publique neuve ne crée aucun projet métier et n'enregistre
-aucune fixture. Après migration, la table `projects` doit contenir zéro ligne.
-
-Les fixtures de fondation sont conservées sous `tests/fixtures/projects/`.
-Elles ne sont installées qu'après une action explicite :
+Après merge, produire les deux assets depuis une installation validée avec :
 
 ```bash
-HERMESOPS_ENABLE_TEST_FIXTURES=1   /opt/docker/hermesops/repo/scripts/init-test-fixtures.sh
+HERMESOPS_ROOT=/opt/docker/hermesops \
+HERMESOPS_EXPORT_DIR=/secure/release-assets \
+  /opt/docker/hermesops/repo/scripts/export-worker-image.sh
 ```
 
-Cette commande est réservée aux tests du moteur et ne fait pas partie du
-bootstrap normal.
+Le script inspecte l'image dans `hermesops-sandbox-engine`, exige l'identifiant
+verrouillé, exporte avec `gzip -9`, vérifie l'archive et écrit son SHA-256.
 
-## Reprise et sauvegardes
+## Services et Console
 
-Avant une mise à niveau divergente, l'installateur crée :
+L'installation active les services utilisateur :
 
-- un `git bundle` complet du contrôleur ;
-- une sauvegarde cohérente de la base SQLite lorsqu'elle existe.
+- `hermesops-supervisor.service` ;
+- `hermesops-orchestrator.service` ;
+- `hermesops-notifier.service` ;
+- `hermesops-controller-api.service` sur `127.0.0.1:8765` ;
+- `hermesops-console.service` sur `127.0.0.1:8788`.
 
-Il préserve les secrets, `auth.json`, les workspaces, les données projet, les
-backups et les fichiers locaux `config/projects.d/*.toml`.
-
-## Désinstallation non destructive
-
-```bash
-./uninstall.sh
-```
-
-Cette commande désactive les services, retire les copies des unités systemd
-utilisateur et arrête les conteneurs sans supprimer les volumes, secrets,
-bases, projets ou sauvegardes.
-
-## HermesOps Console foundation (2P)
-
-The dedicated HermesOps Console is served by the user service
-`hermesops-console.service` on `127.0.0.1:8788`. The legacy Hermes WebUI remains
-on `127.0.0.1:8787` during the beta construction milestones.
-
-Check the service with:
+Hermes Agent utilise également les services locaux `8642` et `8787`. La
+Console et les APIs restent loopback-only ; un accès distant nécessite un
+tunnel SSH ou reverse proxy TLS géré par l'opérateur.
 
 ```bash
 systemctl --user status hermesops-console.service
 curl --fail http://127.0.0.1:8788/health
 ```
 
-The service is loopback-only. Remote browser access still requires an
-operator-managed SSH tunnel or TLS reverse proxy. Milestone 2P exposes no
-Controller API proxy and performs no browser authentication or mutation.
+La Console 0.2.0 fournit authentification, dashboard opérationnel, projets,
+Hermesfiles et cycle de vie borné des objectifs.
+
+## Registre initial
+
+Une installation neuve ne crée aucun projet métier. Les fixtures sous
+`tests/fixtures/projects/` nécessitent une activation explicite réservée aux
+tests :
+
+```bash
+HERMESOPS_ENABLE_TEST_FIXTURES=1 \
+  /opt/docker/hermesops/repo/scripts/init-test-fixtures.sh
+```
+
+## Reprise, sauvegardes et désinstallation
+
+Avant une mise à niveau divergente, l'installateur crée un bundle Git et une
+sauvegarde SQLite cohérente lorsqu'elle existe. Secrets, `auth.json`,
+workspaces, données projet, backups et configurations locales sont préservés.
+
+```bash
+./uninstall.sh --user SERVICE_USER
+```
+
+La désinstallation standard désactive les services et retire leurs unités sans
+supprimer volumes, secrets, bases, projets ou sauvegardes. La suppression du
+repository exige `--remove-repo --confirm REMOVE_REPO`.

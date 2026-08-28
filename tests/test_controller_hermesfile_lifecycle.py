@@ -28,7 +28,7 @@ class HermesfileLifecycleFixture:
         (self.root / "repo/config/projects.d").mkdir(parents=True)
         (self.root / "state/controller").mkdir(parents=True)
         (self.root / "secrets").mkdir(parents=True)
-        (self.root / "repo/VERSION").write_text("0.1.0-alpha\n", encoding="utf-8")
+        (self.root / "repo/VERSION").write_text("0.2.0\n", encoding="utf-8")
         (self.root / "secrets/controller-session").write_text(TOKEN + "\n", encoding="utf-8")
         os.chmod(self.root / "secrets/controller-session", 0o600)
         shutil.copy2(ROOT / "config/examples/Hermesfile", self.root / "repo/config/examples/Hermesfile")

@@ -3,7 +3,7 @@
   "info": {
     "title": "HermesOps Controller API",
     "version": "1.0.0-design-rc1",
-    "description": "Milestone 2A design contract after adversarial review. No running API is included in v0.1.0-alpha. The API preserves the current multi-project objective and numeric-priority semantics while defining future projections.",
+    "description": "Controller API v1 contract originating in milestone 2A and implemented incrementally for HermesOps 0.2.0. The API preserves multi-project objectives and numeric-priority semantics.",
     "license": {
       "name": "Apache-2.0"
     }
